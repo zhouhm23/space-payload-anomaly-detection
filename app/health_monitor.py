@@ -260,8 +260,8 @@ st.caption(t("detection_desc", lang))
 col_a, col_b = st.columns([3, 1])
 with col_b:
     run_detection = st.button(t("run_detection", lang), type="primary")
-        st.metric(t("model_label", lang), f"TSPulse {detector.n_params/1e6:.1f}M")
-        st.metric(t("device_label", lang), device.upper())
+    st.metric(t("model_label", lang), "TSPulse 1.1M")
+    st.metric(t("device_label", lang), device.upper())
 
     if run_detection or st.session_state.get("detection_done", False):
         detector, _ = ensure_models()  # lazy-load on first click
@@ -330,8 +330,8 @@ st.caption(t("warning_desc", lang))
 col_e, col_f = st.columns([3, 1])
 with col_f:
     run_warning = st.button(t("run_warning", lang), type="primary")
-        st.metric(t("model_label", lang), "TSPulse → TTM-R3")
-        st.metric(t("horizon_label", lang), f"96 {t('steps_unit', lang)}")
+    st.metric(t("model_label", lang), "TSPulse → TTM-R3")
+    st.metric(t("horizon_label", lang), f"96 {t('steps_unit', lang)}")
 
     if run_warning or st.session_state.get("warning_done", False):
         detector, forecaster = ensure_models()  # lazy-load on first click
@@ -434,8 +434,8 @@ st.caption(t("forecast_desc", lang))
 col_c, col_d = st.columns([3, 1])
 with col_d:
     run_forecast = st.button(t("run_forecast", lang), type="primary")
-        st.metric(t("model_label", lang), f"TTM-R3 {forecaster.n_params/1e6:.1f}M")
-        st.metric(t("horizon_label", lang), f"96 {t('steps_unit', lang)}")
+    st.metric(t("model_label", lang), "TTM-R3 5.3M")
+    st.metric(t("horizon_label", lang), f"96 {t('steps_unit', lang)}")
 
     if run_forecast or st.session_state.get("forecast_done", False):
         _, forecaster = ensure_models()  # lazy-load on first click
