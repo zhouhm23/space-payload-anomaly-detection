@@ -396,71 +396,9 @@ if run_warning or st.session_state.get("warning_done", False):
         col_m2.metric("Max anomaly score", f"{max_score:.4f}")
         col_m3.metric("Alert steps (>threshold)", f"{n_alert_steps}/{len(fcast_scores)}")
 
-# ---------------------------------------------------------------------------
-# Section 4: Trend Forecasting (Ground Segment) — standalone
-# ---------------------------------------------------------------------------
-st.header(t("forecast_title", lang))
-st.caption(t("forecast_desc", lang))
-
-run_forecast = st.button(t("run_forecast", lang), type="primary", key="btn_forecast")
-col_f1, col_f2, col_f3 = st.columns(3)
-col_f1.metric(t("model_label", lang), "TTM-R3 5.3M")
-col_f2.metric(t("horizon_label", lang), f"96 {t('steps_unit', lang)}")
-
-if run_forecast or st.session_state.get("forecast_done", False):
-    with st.spinner(t("forecast_running", lang)):
-        if run_forecast:
-            t0 = time.time()
-            scaler_data = train_ts if train_ts is not None else display_ts
-            ctx_input = display_ts[-512:] if len(display_ts) >= 512 else display_ts
-            context_std, prediction_std = forecaster.forecast(ctx_input, scaler_data)
-            elapsed = time.time() - t0
-            st.session_state["forecast_ctx"] = context_std
-            st.session_state["forecast_pred"] = prediction_std
-            st.session_state["forecast_done"] = True
-            st.session_state["forecast_time"] = elapsed
-
-    prediction = st.session_state.get("forecast_pred")
-    context = st.session_state.get("forecast_ctx")
-    if prediction is not None and context is not None:
-        elapsed = st.session_state.get("forecast_time", 0)
-        col_f3.metric(t("detection_time_label", lang), f"{elapsed:.2f}s")
-        st.success(t("forecast_done", lang).format(elapsed))
-
-        fig_fc = go.Figure()
-        ctx_x = np.arange(len(context))
-        pred_x = np.arange(len(context), len(context) + len(prediction))
-        fig_fc.add_trace(
-            go.Scatter(
-                x=ctx_x, y=context, mode="lines",
-                name=t("legend_history", lang),
-                line=dict(color="#1f77b4", width=1.5),
-            )
-        )
-        fig_fc.add_trace(
-            go.Scatter(
-                x=pred_x, y=prediction, mode="lines",
-                name=t("legend_forecast", lang),
-                line=dict(color="#2ca02c", width=2, dash="dash"),
-            )
-        )
-        fig_fc.add_vrect(
-            x0=len(context), x1=len(context) + len(prediction),
-            fillcolor="rgba(44,160,44,0.1)",
-            annotation_text=t("forecast_zone", lang),
-        )
-        fig_fc.update_layout(
-            height=350,
-            title=t("forecast_chart_title_fmt", lang).format(len(context), len(prediction)),
-            xaxis_title=t("xaxis_time", lang),
-            yaxis_title=t("yaxis_std", lang),
-            hovermode="x unified",
-            font=dict(size=12),
-        )
-        st.plotly_chart(fig_fc, use_container_width=True)
-
-        pred_error = float(np.mean(prediction ** 2))
-        st.info(t("forecast_mse_info", lang).format(pred_error))
+        # Forecast quality metric (was standalone Section 4, now merged here)
+        pred_mse = float(np.mean(prediction ** 2))
+        st.caption(t("forecast_mse_info", lang).format(pred_mse))
 
 # ---------------------------------------------------------------------------
 # Footer
