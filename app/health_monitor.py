@@ -113,16 +113,16 @@ ttm_path_input = st.sidebar.text_input(
 # ---------------------------------------------------------------------------
 # Model loading (cached)
 # ---------------------------------------------------------------------------
+# Model loading (cached — downloads once, reuses across restarts)
+# ---------------------------------------------------------------------------
 @st.cache_resource
 def load_detector(device="cuda", model_path=""):
-    """Load TSPulse anomaly detector."""
     path = model_path.strip() if model_path else None
     return AnomalyDetector(device=device, model_path=path)
 
 
 @st.cache_resource
 def load_forecaster(device="cuda", model_path=""):
-    """Load TTM-R3 trend forecaster."""
     path = model_path.strip() if model_path else None
     return TrendForecaster(device=device, model_path=path)
 
@@ -135,40 +135,16 @@ try:
 except ImportError:
     device = "cpu"
 
-# Lazy model loading: only load when first needed (not on page load).
-# Uses st.cache_resource for persistence across reruns.
-if "models_loaded" not in st.session_state:
-    st.session_state["models_loaded"] = False
-
-detector = None
-forecaster = None
-
-if not st.session_state["models_loaded"]:
-    st.info("⏳ 模型尚未加载，点击下方任一按钮时自动加载（约 15s，仅首次）")
-    st.info("⏳ Models not loaded yet. Click any button below to auto-load (~15s, first time only)")
-else:
-    detector = load_detector(device, tspulse_path_input.strip() or "")
-    forecaster = load_forecaster(device, ttm_path_input.strip() or "")
+# Load models (cached: downloads only on first run, instant thereafter)
+with st.spinner("⏳ Loading models (first time may take ~15s to download weights)..."):
+    tspulse_p = tspulse_path_input.strip() if tspulse_path_input else ""
+    ttm_p = ttm_path_input.strip() if ttm_path_input else ""
+    detector = load_detector(device, tspulse_p)
+    forecaster = load_forecaster(device, ttm_p)
 
 st.sidebar.divider()
-if st.session_state["models_loaded"]:
-    st.sidebar.success(t("tspulse_loaded", lang).format(1.1))  # TSPulse ≈1.1M
-    st.sidebar.success(t("ttm_loaded", lang).format(5.3))       # TTM-R3 ≈5.3M
-else:
-    st.sidebar.info("⏳ " + ("模型待加载" if lang == "zh" else "Models pending"))
-
-
-def ensure_models():
-    """Lazy-load models on first use. Returns (detector, forecaster)."""
-    if not st.session_state["models_loaded"]:
-        with st.spinner("Loading models (first time ~15s)..."):
-            d = load_detector(device, tspulse_path_input.strip() or "")
-            f = load_forecaster(device, ttm_path_input.strip() or "")
-            st.session_state["models_loaded"] = True
-        st.rerun()
-    d = load_detector(device, tspulse_path_input.strip() or "")
-    f = load_forecaster(device, ttm_path_input.strip() or "")
-    return d, f
+st.sidebar.success(t("tspulse_loaded", lang).format(detector.n_params / 1e6))
+st.sidebar.success(t("ttm_loaded", lang).format(forecaster.n_params / 1e6))
 
 st.sidebar.divider()
 st.sidebar.markdown(f"### {t('architecture', lang)}")
@@ -264,7 +240,6 @@ with col_b:
     st.metric(t("device_label", lang), device.upper())
 
     if run_detection or st.session_state.get("detection_done", False):
-        detector, _ = ensure_models()  # lazy-load on first click
         with col_a:
             with st.spinner(t("detection_running", lang)):
                 t0 = time.time()
@@ -334,7 +309,6 @@ with col_f:
     st.metric(t("horizon_label", lang), f"96 {t('steps_unit', lang)}")
 
     if run_warning or st.session_state.get("warning_done", False):
-        detector, forecaster = ensure_models()  # lazy-load on first click
         with col_e:
             with st.spinner(t("warning_running", lang)):
                 t0 = time.time()
@@ -438,7 +412,6 @@ with col_d:
     st.metric(t("horizon_label", lang), f"96 {t('steps_unit', lang)}")
 
     if run_forecast or st.session_state.get("forecast_done", False):
-        _, forecaster = ensure_models()  # lazy-load on first click
         with col_c:
             with st.spinner(t("forecast_running", lang)):
                 t0 = time.time()
