@@ -72,6 +72,7 @@ _STRINGS = {
     "run_detection": {"zh": "▶️ 运行检测", "en": "▶️ Run Detection"},
     "model_label": {"zh": "模型", "en": "Model"},
     "device_label": {"zh": "设备", "en": "Device"},
+    "detection_time_label": {"zh": "耗时", "en": "Time"},
     "detection_running": {"zh": "正在运行 TSPulse 异常检测...", "en": "Running TSPulse anomaly detection..."},
     "detection_done": {"zh": "✅ 检测完成，耗时 {:.2f}s", "en": "✅ Detection completed in {:.2f}s"},
     "subplot_telemetry": {"zh": "遥测信号与异常区域", "en": "Telemetry with anomaly regions"},
