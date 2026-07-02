@@ -302,10 +302,10 @@ with col_b:
 st.header(t("warning_title", lang))
 st.caption(t("warning_desc", lang))
 
-col_e, col_f = st.columns([3, 1])
+col_e, col_f = st.columns([2.5, 1.5])
 with col_f:
     run_warning = st.button(t("run_warning", lang), type="primary")
-    st.metric(t("model_label", lang), "TSPulse → TTM-R3")
+    st.metric(t("model_label", lang), "TSPulse+TTM")
     st.metric(t("horizon_label", lang), f"96 {t('steps_unit', lang)}")
 
     if run_warning or st.session_state.get("warning_done", False):
