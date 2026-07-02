@@ -307,7 +307,118 @@ else:
     st.warning(t("detector_not_loaded", lang))
 
 # ---------------------------------------------------------------------------
-# Section 3: Trend Forecasting (Ground Segment)
+# Section 3: Early Warning (Forecast → Detect Cascade)
+# ---------------------------------------------------------------------------
+st.header(t("warning_title", lang))
+st.caption(t("warning_desc", lang))
+
+if detector is not None and forecaster is not None:
+    col_e, col_f = st.columns([3, 1])
+    with col_f:
+        run_warning = st.button(t("run_warning", lang), type="primary")
+        st.metric(t("model_label", lang), "TSPulse → TTM-R3")
+        st.metric(t("horizon_label", lang), f"96 {t('steps_unit', lang)}")
+
+    if run_warning or st.session_state.get("warning_done", False):
+        with col_e:
+            with st.spinner(t("warning_running", lang)):
+                t0 = time.time()
+                scaler_data = train_ts if train_ts is not None else display_ts
+                ctx_input = display_ts[-512:] if len(display_ts) >= 512 else display_ts
+                context_std, prediction_std = forecaster.forecast(ctx_input, scaler_data)
+                # Run TSPulse detection on the forecast window (already standardized)
+                fcast_scores = detector.detect(prediction_std, prediction_std)
+                elapsed = time.time() - t0
+                st.session_state["warn_ctx"] = context_std
+                st.session_state["warn_pred"] = prediction_std
+                st.session_state["warn_scores"] = fcast_scores
+                st.session_state["warning_done"] = True
+                st.session_state["warning_time"] = elapsed
+
+        prediction = st.session_state.get("warn_pred")
+        context = st.session_state.get("warn_ctx")
+        fcast_scores = st.session_state.get("warn_scores")
+        if prediction is not None and fcast_scores is not None:
+            elapsed = st.session_state.get("warning_time", 0)
+            st.success(t("warning_done", lang).format(elapsed))
+
+            # Compute warning metrics
+            max_score = float(np.max(fcast_scores))
+            max_idx = int(np.argmax(fcast_scores))
+            threshold = 0.5 * max_score if max_score > 0.01 else 0.01
+            n_alert_steps = int((fcast_scores > threshold).sum())
+
+            if n_alert_steps > 0:
+                st.warning(t("warning_alert", lang).format(lead=max_idx + 1, score=max_score))
+            else:
+                st.info(t("warning_clear", lang))
+
+            # Visualization: forecast curve + anomaly score overlay
+            fig_warn = make_subplots(
+                rows=2, cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.1,
+                subplot_titles=(
+                    t("subplot_warning_forecast", lang),
+                    t("subplot_warning_bar", lang),
+                ),
+                row_heights=[0.55, 0.45],
+            )
+            ctx_x = np.arange(len(context))
+            pred_x = np.arange(len(context), len(context) + len(prediction))
+            # Top: history + forecast
+            fig_warn.add_trace(
+                go.Scatter(
+                    x=ctx_x, y=context, mode="lines",
+                    name=t("legend_history", lang),
+                    line=dict(color="#1f77b4", width=1),
+                ), row=1, col=1,
+            )
+            fig_warn.add_trace(
+                go.Scatter(
+                    x=pred_x, y=prediction, mode="lines",
+                    name=t("legend_forecast", lang),
+                    line=dict(color="#2ca02c", width=2, dash="dash"),
+                ), row=1, col=1,
+            )
+            fig_warn.add_vrect(
+                x0=len(context), x1=len(context) + len(prediction),
+                fillcolor="rgba(44,160,44,0.08)",
+                annotation_text=t("forecast_zone", lang),
+                row=1, col=1,
+            )
+            # Bottom: per-step anomaly score on forecast window
+            colors = ["#ff7f0e" if s > threshold else "#1f77b4" for s in fcast_scores]
+            fig_warn.add_trace(
+                go.Bar(
+                    x=pred_x, y=fcast_scores,
+                    name=t("legend_score", lang),
+                    marker_color=colors,
+                ), row=2, col=1,
+            )
+            fig_warn.add_hline(
+                y=threshold, line_dash="dash", line_color="red",
+                annotation_text=f"threshold={threshold:.3f}",
+                row=2, col=1,
+            )
+            fig_warn.update_layout(height=480, hovermode="x unified")
+            fig_warn.update_xaxes(title_text=t("xaxis_time", lang), row=2, col=1)
+            st.plotly_chart(fig_warn, use_container_width=True)
+
+            col_m1, col_m2, col_m3 = st.columns(3)
+            col_m1.metric(t("warning_lead_time", lang).format(""), f"{max_idx + 1} steps")
+            col_m2.metric("Max anomaly score", f"{max_score:.4f}")
+            col_m3.metric("Alert steps (>threshold)", f"{n_alert_steps}/{len(fcast_scores)}")
+else:
+    missing = []
+    if detector is None:
+        missing.append("TSPulse")
+    if forecaster is None:
+        missing.append("TTM-R3")
+    st.warning(f"预警需要两个模型均已加载（{', '.join(missing)} 未就绪）。")
+
+# ---------------------------------------------------------------------------
+# Section 4: Trend Forecasting (Ground Segment) — standalone
 # ---------------------------------------------------------------------------
 st.header(t("forecast_title", lang))
 st.caption(t("forecast_desc", lang))

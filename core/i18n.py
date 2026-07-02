@@ -79,6 +79,30 @@ _STRINGS = {
     "legend_score": {"zh": "异常分数", "en": "Anomaly score"},
     "detector_not_loaded": {"zh": "异常检测器未加载，请检查模型可用性。", "en": "Anomaly detector not loaded. Check model availability."},
 
+    # --- Section: Early Warning (forecast + detection cascade) ---
+    "warning_title": {
+        "zh": "⚠️ 预警 — 天→地协同（预测→检测级联）",
+        "en": "⚠️ Early Warning — Space-Ground Cascade (Forecast→Detect)",
+    },
+    "warning_desc": {
+        "zh": "地基 TTM-R3 预测未来 96 步 → 天基 TSPulse 检测预测结果 → 若含异常则提前报警。预警提前量 = 96 步。",
+        "en": "Ground TTM-R3 forecasts next 96 steps → Space TSPulse detects on forecast → alert if anomalous. Lead time = 96 steps.",
+    },
+    "run_warning": {"zh": "▶️ 运行预警", "en": "▶️ Run Early Warning"},
+    "warning_running": {"zh": "TTM-R3 预测中 → TSPulse 检测预测结果中...", "en": "TTM-R3 forecasting → TSPulse detecting on forecast..."},
+    "warning_done": {"zh": "✅ 预警分析完成，耗时 {:.1f}s", "en": "✅ Early warning analysis done in {:.1f}s"},
+    "warning_alert": {
+        "zh": "🚨 **预警：预测窗口第 {lead} 步检测到异常峰值，建议关注！**（异常分数最高 {score:.3f}）",
+        "en": "🚨 **WARNING: Anomaly peak detected at step {lead} in forecast window!** (max score {score:.3f})",
+    },
+    "warning_clear": {
+        "zh": "✅ 预测窗口内未检测到显著异常，遥测趋势正常。",
+        "en": "✅ No significant anomaly detected in forecast window. Trend appears normal.",
+    },
+    "subplot_warning_forecast": {"zh": "预测曲线 + 异常分数", "en": "Forecast curve + anomaly score"},
+    "subplot_warning_bar": {"zh": "各步异常分数", "en": "Per-step anomaly score"},
+    "warning_lead_time": {"zh": "预警提前量：{} 步", "en": "Warning lead time: {} steps"},
+
     # --- Section: Forecasting ---
     "forecast_title": {
         "zh": "📈 趋势预测 — 地基段（TTM-R3）",
