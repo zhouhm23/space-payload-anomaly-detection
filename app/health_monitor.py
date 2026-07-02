@@ -130,28 +130,45 @@ def load_forecaster(device="cuda", model_path=""):
 device = "cuda"
 try:
     import torch
-
     if not torch.cuda.is_available():
         device = "cpu"
 except ImportError:
     device = "cpu"
 
-with st.sidebar.status(t("loading_models", lang), expanded=False):
-    tspulse_p = tspulse_path_input.strip() if tspulse_path_input else ""
-    ttm_p = ttm_path_input.strip() if ttm_path_input else ""
-    detector = None
-    forecaster = None
-    try:
-        detector = load_detector(device, tspulse_p)
-        st.sidebar.success(t("tspulse_loaded", lang).format(detector.n_params / 1e6))
-    except Exception as e:
-        st.sidebar.error(t("load_failed", lang).format("TSPulse", e))
+# Lazy model loading: only load when first needed (not on page load).
+# Uses st.cache_resource for persistence across reruns.
+if "models_loaded" not in st.session_state:
+    st.session_state["models_loaded"] = False
 
-    try:
-        forecaster = load_forecaster(device, ttm_p)
-        st.sidebar.success(t("ttm_loaded", lang).format(forecaster.n_params / 1e6))
-    except Exception as e:
-        st.sidebar.error(t("load_failed", lang).format("TTM-R3", e))
+detector = None
+forecaster = None
+
+if not st.session_state["models_loaded"]:
+    st.info("⏳ 模型尚未加载，点击下方任一按钮时自动加载（约 15s，仅首次）")
+    st.info("⏳ Models not loaded yet. Click any button below to auto-load (~15s, first time only)")
+else:
+    detector = load_detector(device, tspulse_path_input.strip() or "")
+    forecaster = load_forecaster(device, ttm_path_input.strip() or "")
+
+st.sidebar.divider()
+if st.session_state["models_loaded"]:
+    st.sidebar.success(t("tspulse_loaded", lang).format(1.1))  # TSPulse ≈1.1M
+    st.sidebar.success(t("ttm_loaded", lang).format(5.3))       # TTM-R3 ≈5.3M
+else:
+    st.sidebar.info("⏳ " + ("模型待加载" if lang == "zh" else "Models pending"))
+
+
+def ensure_models():
+    """Lazy-load models on first use. Returns (detector, forecaster)."""
+    if not st.session_state["models_loaded"]:
+        with st.spinner("Loading models (first time ~15s)..."):
+            d = load_detector(device, tspulse_path_input.strip() or "")
+            f = load_forecaster(device, ttm_path_input.strip() or "")
+            st.session_state["models_loaded"] = True
+        st.rerun()
+    d = load_detector(device, tspulse_path_input.strip() or "")
+    f = load_forecaster(device, ttm_path_input.strip() or "")
+    return d, f
 
 st.sidebar.divider()
 st.sidebar.markdown(f"### {t('architecture', lang)}")
@@ -240,14 +257,14 @@ st.plotly_chart(fig_wave, use_container_width=True)
 st.header(t("detection_title", lang))
 st.caption(t("detection_desc", lang))
 
-if detector is not None:
-    col_a, col_b = st.columns([3, 1])
-    with col_b:
-        run_detection = st.button(t("run_detection", lang), type="primary")
+col_a, col_b = st.columns([3, 1])
+with col_b:
+    run_detection = st.button(t("run_detection", lang), type="primary")
         st.metric(t("model_label", lang), f"TSPulse {detector.n_params/1e6:.1f}M")
         st.metric(t("device_label", lang), device.upper())
 
     if run_detection or st.session_state.get("detection_done", False):
+        detector, _ = ensure_models()  # lazy-load on first click
         with col_a:
             with st.spinner(t("detection_running", lang)):
                 t0 = time.time()
@@ -303,8 +320,6 @@ if detector is not None:
             fig_det.update_layout(height=450, hovermode="x unified")
             fig_det.update_xaxes(title_text=t("xaxis_time", lang), row=2, col=1)
             st.plotly_chart(fig_det, use_container_width=True)
-else:
-    st.warning(t("detector_not_loaded", lang))
 
 # ---------------------------------------------------------------------------
 # Section 3: Early Warning (Forecast → Detect Cascade)
@@ -312,14 +327,14 @@ else:
 st.header(t("warning_title", lang))
 st.caption(t("warning_desc", lang))
 
-if detector is not None and forecaster is not None:
-    col_e, col_f = st.columns([3, 1])
-    with col_f:
-        run_warning = st.button(t("run_warning", lang), type="primary")
+col_e, col_f = st.columns([3, 1])
+with col_f:
+    run_warning = st.button(t("run_warning", lang), type="primary")
         st.metric(t("model_label", lang), "TSPulse → TTM-R3")
         st.metric(t("horizon_label", lang), f"96 {t('steps_unit', lang)}")
 
     if run_warning or st.session_state.get("warning_done", False):
+        detector, forecaster = ensure_models()  # lazy-load on first click
         with col_e:
             with st.spinner(t("warning_running", lang)):
                 t0 = time.time()
@@ -409,13 +424,6 @@ if detector is not None and forecaster is not None:
             col_m1.metric(t("warning_lead_time", lang).format(""), f"{max_idx + 1} steps")
             col_m2.metric("Max anomaly score", f"{max_score:.4f}")
             col_m3.metric("Alert steps (>threshold)", f"{n_alert_steps}/{len(fcast_scores)}")
-else:
-    missing = []
-    if detector is None:
-        missing.append("TSPulse")
-    if forecaster is None:
-        missing.append("TTM-R3")
-    st.warning(f"预警需要两个模型均已加载（{', '.join(missing)} 未就绪）。")
 
 # ---------------------------------------------------------------------------
 # Section 4: Trend Forecasting (Ground Segment) — standalone
@@ -423,14 +431,14 @@ else:
 st.header(t("forecast_title", lang))
 st.caption(t("forecast_desc", lang))
 
-if forecaster is not None:
-    col_c, col_d = st.columns([3, 1])
-    with col_d:
-        run_forecast = st.button(t("run_forecast", lang), type="primary")
+col_c, col_d = st.columns([3, 1])
+with col_d:
+    run_forecast = st.button(t("run_forecast", lang), type="primary")
         st.metric(t("model_label", lang), f"TTM-R3 {forecaster.n_params/1e6:.1f}M")
         st.metric(t("horizon_label", lang), f"96 {t('steps_unit', lang)}")
 
     if run_forecast or st.session_state.get("forecast_done", False):
+        _, forecaster = ensure_models()  # lazy-load on first click
         with col_c:
             with st.spinner(t("forecast_running", lang)):
                 t0 = time.time()
@@ -482,8 +490,6 @@ if forecaster is not None:
 
             pred_error = float(np.mean(prediction ** 2))
             st.info(t("forecast_mse_info", lang).format(pred_error))
-else:
-    st.warning(t("forecaster_not_loaded", lang))
 
 # ---------------------------------------------------------------------------
 # Footer
