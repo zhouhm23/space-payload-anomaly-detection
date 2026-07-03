@@ -13,11 +13,11 @@ import pytest
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault(
     "HF_HOME",
-    os.path.join(os.path.dirname(__file__), "..", "..", "baselines", "granite-tsfm", ".hf_cache"),
+    os.path.join(os.path.dirname(__file__), "..", "..", ".hf_cache"),
 )
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
-from core.data_loader import list_channels, load_channel, load_train
+from data_loader import list_channels, load_channel, load_train
 
 
 @pytest.fixture(scope="module")
@@ -43,7 +43,7 @@ class TestAnomalyDetector:
 
     @pytest.mark.slow
     def test_detector_loads(self):
-        from core.anomaly_detection import AnomalyDetector
+        from anomaly_detection import AnomalyDetector
 
         detector = AnomalyDetector(device="cpu")
         assert detector.n_params > 0
@@ -51,7 +51,7 @@ class TestAnomalyDetector:
 
     @pytest.mark.slow
     def test_detect_returns_scores(self, sample_channel):
-        from core.anomaly_detection import AnomalyDetector
+        from anomaly_detection import AnomalyDetector
 
         detector = AnomalyDetector(device="cpu")
         ts = sample_channel["test_ts"][:1024].astype(np.float32)
@@ -65,7 +65,7 @@ class TestAnomalyDetector:
     @pytest.mark.slow
     def test_detect_short_input(self, sample_channel):
         """Detector should handle input shorter than CONTEXT_LENGTH."""
-        from core.anomaly_detection import AnomalyDetector
+        from anomaly_detection import AnomalyDetector
 
         detector = AnomalyDetector(device="cpu")
         ts = sample_channel["test_ts"][:256].astype(np.float32)  # < 512
@@ -76,7 +76,7 @@ class TestAnomalyDetector:
     @pytest.mark.slow
     def test_scores_nonnegative(self, sample_channel):
         """Anomaly scores should be non-negative."""
-        from core.anomaly_detection import AnomalyDetector
+        from anomaly_detection import AnomalyDetector
 
         detector = AnomalyDetector(device="cpu")
         ts = sample_channel["test_ts"][:1024].astype(np.float32)
@@ -93,14 +93,14 @@ class TestTrendForecaster:
 
     @pytest.mark.slow
     def test_forecaster_loads(self):
-        from core.forecasting import TrendForecaster
+        from forecasting import TrendForecaster
 
         forecaster = TrendForecaster(device="cpu")
         assert forecaster.n_params > 0
 
     @pytest.mark.slow
     def test_forecast_returns_correct_lengths(self, sample_channel):
-        from core.forecasting import TrendForecaster, CONTEXT_LENGTH, PREDICTION_LENGTH
+        from forecasting import TrendForecaster, CONTEXT_LENGTH, PREDICTION_LENGTH
 
         forecaster = TrendForecaster(device="cpu")
         ts = sample_channel["test_ts"][:1024].astype(np.float32)
@@ -115,7 +115,7 @@ class TestTrendForecaster:
     @pytest.mark.slow
     def test_forecast_short_input_padded(self, sample_channel):
         """Forecaster should pad input shorter than CONTEXT_LENGTH."""
-        from core.forecasting import TrendForecaster, CONTEXT_LENGTH
+        from forecasting import TrendForecaster, CONTEXT_LENGTH
 
         forecaster = TrendForecaster(device="cpu")
         ts = sample_channel["test_ts"][:100].astype(np.float32)  # << 512

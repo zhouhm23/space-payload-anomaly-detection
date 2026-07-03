@@ -1,6 +1,6 @@
 """Unit tests for i18n module — no model dependency, fast."""
 
-from core.i18n import t, LANGS
+from i18n import t, LANGS
 
 
 class TestTranslations:
@@ -32,7 +32,7 @@ class TestTranslations:
 
     def test_all_keys_have_both_languages(self):
         """Every key in the dictionary must have both zh and en."""
-        from core.i18n import _STRINGS
+        from i18n import _STRINGS
 
         missing = []
         for key, entry in _STRINGS.items():

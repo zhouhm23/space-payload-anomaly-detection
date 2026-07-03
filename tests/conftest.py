@@ -1,4 +1,4 @@
-"""Pytest configuration — adds src/ to sys.path for imports."""
+"""Pytest configuration — adds src/ to sys.path for e2e tests."""
 
 import os
 import sys

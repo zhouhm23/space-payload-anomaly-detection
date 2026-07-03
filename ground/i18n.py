@@ -132,6 +132,28 @@ _STRINGS = {
     },
     "forecaster_not_loaded": {"zh": "预测器未加载，请检查模型可用性。", "en": "Forecaster not loaded. Check model availability."},
 
+    # --- Section: Sensor Preprocessing ---
+    "preproc_title": {
+        "zh": "🔧 传感器数据预处理",
+        "en": "🔧 Sensor Data Preprocessing",
+    },
+    "preproc_desc": {
+        "zh": "模拟真实传感器链路：注入噪声/缺失/饱和 → 缺失值插补 → 去噪滤波 → 归一化",
+        "en": "Simulate real sensor chain: inject noise/missing/saturation → impute → denoise → normalize",
+    },
+    "preproc_enable": {"zh": "启用噪声模拟", "en": "Enable noise simulation"},
+    "preproc_missing": {"zh": "缺失率", "en": "Missing rate"},
+    "preproc_noise": {"zh": "噪声标准差", "en": "Noise std"},
+    "preproc_jitter": {"zh": "采样抖动", "en": "Sampling jitter"},
+    "preproc_clip": {"zh": "传感器饱和范围", "en": "Sensor saturation range"},
+    "preproc_filter": {"zh": "去噪滤波器", "en": "Denoise filter"},
+    "preproc_raw": {"zh": "原始传感器（含噪声）", "en": "Raw sensor (with noise)"},
+    "preproc_cleaned": {"zh": "预处理后", "en": "After preprocessing"},
+    "preproc_stats": {
+        "zh": "缺失点：{} | 噪声注入：{} | 滤波方法：{}",
+        "en": "Missing: {} | Noise: {} | Filter: {}",
+    },
+
     # --- Footer ---
     "footer": {
         "zh": "模型：TSPulse (ICLR 2026) + TTM-R3 (GIFT-Eval #3) | 数据：NASA SMAP/MSL (Hundman et al. 2018) | 框架：IBM Granite TSFM",

@@ -1,7 +1,7 @@
 """Unit tests for data_loader — no model dependency, fast."""
 
 import numpy as np
-from core.data_loader import list_channels, load_channel, load_train
+from data_loader import list_channels, load_channel, load_train
 
 
 class TestListChannels:

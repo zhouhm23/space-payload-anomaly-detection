@@ -1,0 +1,18 @@
+{
+  "lang": "zh",
+  "source_type": "dataset",
+  "dataset_name": "NASA-MSL",
+  "channel": "C-1",
+  "signal_type": "multi_sine",
+  "freq": 0.02,
+  "noise_enabled": false,
+  "missing_rate": 0.05,
+  "noise_std": 0.08,
+  "jitter_std": 0.5,
+  "sample_rate": 1.0,
+  "use_detection": true,
+  "use_forecast": true,
+  "window_size": 512,
+  "space_host": "127.0.0.1",
+  "space_port": 9876
+}
