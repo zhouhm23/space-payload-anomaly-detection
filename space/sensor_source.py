@@ -1,14 +1,15 @@
-"""Simulated sensor data source — mimics a real data acquisition card.
+"""Unified sensor data source — mimics a real data acquisition card.
 
-Two modes:
-  1. ``DatasetSource``  — replays NASA-SMAP/MSL telemetry; outputs 0 after
-     the dataset is exhausted (simulating sensor end-of-life / shutdown).
-  2. ``SyntheticSource`` — generates continuous synthetic signals (sine,
-     square, multi-harmonic) that never run out.  Useful for stress-testing
-     the processing pipeline without depending on fixed-length data.
+All data sources expose the same ``read()`` interface, so the space-segment
+code does not need to know whether the data comes from a local file or a
+virtual (synthetic) sensor — just like a real DAQ card.
 
-Both sources expose the same ``read()`` interface, so the space-segment code
-does not need to know which source is active — just like a real DAQ card.
+Sources are registered in a global registry and can be looked up by ID:
+  - ``file:NASA-MSL/C-1``  — replay a NASA telemetry channel
+  - ``virtual:sine``        — continuous sine wave generator
+  - ``virtual:multi_sine``  — multi-harmonic signal generator
+  - ``virtual:square``      — square wave generator
+  - ``virtual:chirp``       — chirp signal generator
 
 Noise injection (missing values, Gaussian noise, sampling jitter, clipping)
 is applied at the source level, simulating real sensor artefacts *before*
@@ -19,11 +20,11 @@ from __future__ import annotations
 
 import os
 import sys
-import time
 import math
 import numpy as np
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
+from typing import Sequence
 
 # Resolve project root for data_loader import
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -32,6 +33,33 @@ if _HERE not in sys.path:
 
 from data_loader import list_channels, load_channel, load_train
 
+# ---------------------------------------------------------------------------
+# Source ID conventions
+# ---------------------------------------------------------------------------
+FILE_PREFIX = "file:"
+VIRTUAL_PREFIX = "virtual:"
+
+
+def _make_file_id(dataset: str, channel: str) -> str:
+    return f"{FILE_PREFIX}{dataset}/{channel}"
+
+
+def _make_virtual_id(signal: str) -> str:
+    return f"{VIRTUAL_PREFIX}{signal}"
+
+
+def _parse_file_id(source_id: str) -> tuple[str, str]:
+    """Parse ``file:NASA-MSL/C-1`` → (dataset, channel)."""
+    body = source_id[len(FILE_PREFIX):]
+    parts = body.split("/", 1)
+    if len(parts) != 2:
+        raise ValueError(f"Invalid file source ID: {source_id}")
+    return parts[0], parts[1]
+
+
+# ---------------------------------------------------------------------------
+# Noise configuration (unchanged)
+# ---------------------------------------------------------------------------
 
 @dataclass
 class SensorNoiseConfig:
@@ -99,14 +127,14 @@ class SensorSource(ABC):
         """Read ``n`` samples. Returns float32 array of length ``n``.
 
         May contain NaN for missing values (if noise injection is enabled).
-        Returns all-zeros when the source is exhausted (dataset mode).
+        Returns empty array when the source is exhausted.
         """
         ...
 
     @property
     @abstractmethod
     def exhausted(self) -> bool:
-        """True when no more real data is available (dataset mode only)."""
+        """True when no more real data is available."""
         ...
 
     @property
@@ -121,22 +149,41 @@ class SensorSource(ABC):
         """Nominal sample rate in Hz."""
         ...
 
+    @property
+    @abstractmethod
+    def source_id(self) -> str:
+        """Unique source identifier (e.g. ``file:NASA-MSL/C-1``)."""
+        ...
+
+    @property
+    @abstractmethod
+    def label(self) -> str:
+        """Human-readable display label for UI dropdowns."""
+        ...
+
+    @property
+    @abstractmethod
+    def is_virtual(self) -> bool:
+        """True if this is a virtual (synthetic) sensor, False for file replay."""
+        ...
+
 
 # ---------------------------------------------------------------------------
-# Dataset replay source
+# File replay source (was DatasetSource)
 # ---------------------------------------------------------------------------
 
-class DatasetSource(SensorSource):
+class FileSource(SensorSource):
     """Replays a NASA-SMAP/MSL telemetry channel as a live sensor stream.
 
     - Normal mode (``sample_rate > 0``): reads ``n`` samples per call,
       respecting the configured rate.  Pacing is done by the caller.
     - Bulk mode (``sample_rate == -1``): the first ``read()`` returns
-      **all remaining data** regardless of ``n``, then marks exhausted
-      (all subsequent reads return zeros).
+      **all remaining data** regardless of ``n``, then marks exhausted.
+    - Loop mode (``loop=True``): when the dataset is exhausted, it
+      automatically rewinds to the beginning (debugging convenience).
 
-    After the dataset is exhausted, ``read()`` returns zeros — simulating
-    a sensor that has gone offline or been shut down.
+    After the dataset is exhausted and loop is off, ``read()`` returns
+    an empty array — simulating a sensor that has gone offline.
     """
 
     def __init__(
@@ -145,6 +192,7 @@ class DatasetSource(SensorSource):
         channel: str | None = None,
         sample_rate: float = 1.0,
         noise: SensorNoiseConfig | None = None,
+        loop: bool = False,
     ):
         channels = list_channels(dataset)
         if not channels:
@@ -162,6 +210,8 @@ class DatasetSource(SensorSource):
         self._dataset = dataset
         self._sample_rate = sample_rate
         self._noise = noise or SensorNoiseConfig()
+        self._source_id = _make_file_id(dataset, ch_name)
+        self._loop = loop
 
         test_ts, test_labels = load_channel(test_path, train_path)
         self._data = test_ts.astype(np.float32)
@@ -170,7 +220,7 @@ class DatasetSource(SensorSource):
         self._exhausted = False
 
     def read(self, n: int) -> np.ndarray:
-        if self._exhausted:
+        if self._exhausted and not self._loop:
             return np.empty(0, dtype=np.float32)
 
         # bulk mode — return everything remaining, then done
@@ -182,23 +232,36 @@ class DatasetSource(SensorSource):
                 remaining = _apply_noise(remaining, self._noise)
             return remaining
 
-        # normal mode — return actual available, may be shorter than n
-        available = min(n, len(self._data) - self._pos)
-        if available == 0:
-            self._exhausted = True
-            return np.empty(0, dtype=np.float32)
-        chunk = self._data[self._pos : self._pos + available].copy()
-        self._pos += available
-        if self._pos >= len(self._data):
-            self._exhausted = True
+        data_len = len(self._data)
 
-        if self._pos >= len(self._data):
-            self._exhausted = True
+        # non-loop: 读完即止
+        if not self._loop:
+            available = min(n, data_len - self._pos)
+            if available == 0:
+                self._exhausted = True
+                return np.empty(0, dtype=np.float32)
+            chunk = self._data[self._pos : self._pos + available].copy()
+            self._pos += available
+            if self._pos >= data_len:
+                self._exhausted = True
+            if self._noise.missing_rate > 0 or self._noise.noise_std > 0:
+                chunk = _apply_noise(chunk, self._noise)
+            return chunk
+
+        # loop 模式：块式读取，每次固定返回 n 点，不足时从文件头补齐
+        result = np.empty(n, dtype=np.float32)
+        filled = 0
+        while filled < n:
+            chunk_size = min(n - filled, data_len - self._pos)
+            result[filled : filled + chunk_size] = self._data[self._pos : self._pos + chunk_size]
+            filled += chunk_size
+            self._pos += chunk_size
+            if self._pos >= data_len:
+                self._pos = 0  # 回到文件头继续读
 
         if self._noise.missing_rate > 0 or self._noise.noise_std > 0:
-            chunk = _apply_noise(chunk, self._noise)
-
-        return chunk
+            result = _apply_noise(result, self._noise)
+        return result
 
     @property
     def exhausted(self) -> bool:
@@ -213,6 +276,18 @@ class DatasetSource(SensorSource):
         return self._sample_rate
 
     @property
+    def source_id(self) -> str:
+        return self._source_id
+
+    @property
+    def label(self) -> str:
+        return f"📂 {self._dataset} · {self._channel}"
+
+    @property
+    def is_virtual(self) -> bool:
+        return False
+
+    @property
     def labels(self) -> np.ndarray:
         """Ground-truth labels for the replayed portion (testing only)."""
         return self._labels[: self._pos]
@@ -224,7 +299,7 @@ class DatasetSource(SensorSource):
 
 
 # ---------------------------------------------------------------------------
-# Synthetic signal source
+# Synthetic signal configuration (unchanged)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -239,25 +314,57 @@ class SyntheticConfig:
     anomaly_magnitude: float = 3.0
 
 
-class SyntheticSource(SensorSource):
+# ---------------------------------------------------------------------------
+# Virtual sensor source (was SyntheticSource)
+# ---------------------------------------------------------------------------
+
+# Preset virtual sensors registered in the global list
+_VIRTUAL_PRESETS: dict[str, SyntheticConfig] = {
+    "sine": SyntheticConfig(signal_type="sine", frequency=0.02, amplitude=1.0),
+    "square": SyntheticConfig(signal_type="square", frequency=0.02, amplitude=1.0),
+    "multi_sine": SyntheticConfig(signal_type="multi_sine", frequency=0.02, amplitude=1.0),
+    "chirp": SyntheticConfig(signal_type="chirp", frequency=0.01, amplitude=1.0),
+}
+
+_VIRTUAL_LABELS = {
+    "sine": "🎛️ 虚拟传感器 · 正弦波",
+    "square": "🎛️ 虚拟传感器 · 方波",
+    "multi_sine": "🎛️ 虚拟传感器 · 多谐波",
+    "chirp": "🎛️ 虚拟传感器 · 啁啾",
+}
+
+
+class VirtualSensorSource(SensorSource):
     """Generates continuous synthetic sensor signals.
 
-    Unlike ``DatasetSource``, this source never exhausts — it will keep
+    Unlike ``FileSource``, this source never exhausts — it will keep
     producing samples indefinitely, making it ideal for long-running
-    pipeline tests.
+    pipeline tests and demo scenarios where no real sensor is available.
+
+    The DAQ card (ie the space-segment code) does not know this sensor is
+    virtual — it just calls ``read()`` and gets data.
     """
 
     def __init__(
         self,
+        signal_type: str = "multi_sine",
         config: SyntheticConfig | None = None,
         sample_rate: float = 1.0,
         noise: SensorNoiseConfig | None = None,
+        signal_freq_hz: float | None = None,
     ):
-        self._config = config or SyntheticConfig()
+        self._config = config or _VIRTUAL_PRESETS.get(
+            signal_type, SyntheticConfig(signal_type=signal_type),
+        )
+        # signal_freq_hz (Hz) → frequency (cycles per sample)
+        if signal_freq_hz is not None and sample_rate > 0:
+            self._config.frequency = signal_freq_hz / sample_rate
+        self._signal_type = signal_type
         self._sample_rate = sample_rate
         self._noise = noise or SensorNoiseConfig()
         self._t = 0  # global sample counter
-        self._channel = f"SYN-{self._config.signal_type}"
+        self._channel = f"VS-{self._config.signal_type}"
+        self._source_id = _make_virtual_id(signal_type)
 
     def read(self, n: int) -> np.ndarray:
         cfg = self._config
@@ -297,7 +404,7 @@ class SyntheticSource(SensorSource):
 
     @property
     def exhausted(self) -> bool:
-        return False  # synthetic source never exhausts
+        return False  # virtual sensor never exhausts
 
     @property
     def channel_name(self) -> str:
@@ -306,3 +413,121 @@ class SyntheticSource(SensorSource):
     @property
     def sample_rate(self) -> float:
         return self._sample_rate
+
+    @property
+    def source_id(self) -> str:
+        return self._source_id
+
+    @property
+    def label(self) -> str:
+        return _VIRTUAL_LABELS.get(self._signal_type, f"🎛️ 虚拟传感器 · {self._signal_type}")
+
+    @property
+    def is_virtual(self) -> bool:
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Global source registry
+# ---------------------------------------------------------------------------
+
+def list_all_sources(dataset_dir: str | None = None) -> list[dict]:
+    """Return a unified list of ALL available data sources.
+
+    Each entry::
+
+        {
+            "id": "file:NASA-MSL/C-1",
+            "label": "📂 NASA-MSL · C-1",
+            "is_virtual": False,
+            "channel": "C-1",
+            "dataset": "NASA-MSL",
+        }
+
+    Virtual sensors are always included; file sources are discovered from the
+    datasets directory.
+    """
+    sources: list[dict] = []
+
+    # ---- file sources ----
+    for ds_name in ["NASA-MSL", "NASA-SMAP"]:
+        try:
+            channels = list_channels(ds_name)
+        except Exception:
+            continue
+        for ch_name, _train_path, _test_path in channels:
+            sources.append({
+                "id": _make_file_id(ds_name, ch_name),
+                "label": f"📂 {ds_name} · {ch_name}",
+                "is_virtual": False,
+                "dataset": ds_name,
+                "channel": ch_name,
+            })
+
+    # ---- virtual sensors ----
+    for sig_type, cfg in _VIRTUAL_PRESETS.items():
+        sources.append({
+            "id": _make_virtual_id(sig_type),
+            "label": _VIRTUAL_LABELS.get(sig_type, f"🎛️ 虚拟传感器 · {sig_type}"),
+            "is_virtual": True,
+            "signal_type": sig_type,
+        })
+
+    return sources
+
+
+def create_source(
+    source_id: str,
+    sample_rate: float = 1.0,
+    noise: SensorNoiseConfig | None = None,
+    loop: bool = False,
+    signal_freq_hz: float | None = None,
+) -> SensorSource:
+    """Factory: create a SensorSource from a source ID.
+
+    Args:
+        source_id: e.g. ``"file:NASA-MSL/C-1"`` or ``"virtual:sine"``
+        sample_rate: Hz for pacing; -1 for bulk mode (file sources only)
+        noise: optional noise configuration
+        loop: if True, FileSource rewinds on exhaustion (debugging)
+        signal_freq_hz: for virtual sensors, signal frequency in Hz
+                        (converted to cycles-per-sample internally)
+
+    Returns:
+        A ``SensorSource`` instance ready for ``read()``.
+    """
+    if source_id.startswith(FILE_PREFIX):
+        dataset, channel = _parse_file_id(source_id)
+        return FileSource(
+            dataset=dataset,
+            channel=channel,
+            sample_rate=sample_rate,
+            noise=noise,
+            loop=loop,
+        )
+    elif source_id.startswith(VIRTUAL_PREFIX):
+        signal_type = source_id[len(VIRTUAL_PREFIX):]
+        if signal_type not in _VIRTUAL_PRESETS:
+            raise ValueError(
+                f"Unknown virtual sensor: {signal_type}. "
+                f"Available: {list(_VIRTUAL_PRESETS.keys())}"
+            )
+        return VirtualSensorSource(
+            signal_type=signal_type,
+            sample_rate=sample_rate,
+            noise=noise,
+            signal_freq_hz=signal_freq_hz,
+        )
+    else:
+        raise ValueError(
+            f"Invalid source ID: {source_id!r}. "
+            f"Must start with '{FILE_PREFIX}' or '{VIRTUAL_PREFIX}'."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatibility aliases
+# ---------------------------------------------------------------------------
+
+DatasetSource = FileSource
+SyntheticSource = VirtualSensorSource

@@ -147,7 +147,7 @@ def space_process():
     proc = subprocess.Popen(
         [SPACE_PYTHON, "-m", "space.main",
          "--host", SPACE_HOST, "--port", str(SPACE_PORT),
-         "--source", "dataset", "--dataset", "NASA-MSL", "--channel", "C-1",
+         "--source", "file:NASA-MSL/C-1",
          "--sample-rate", str(TEST_RATE), "--window", str(TEST_WINDOW)],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=_SRC,
     )
@@ -167,9 +167,8 @@ class TestE2E:
     """Full pipeline: space → TCP → ground client, with golden-value checks."""
 
     @staticmethod
-    def _cfg(dataset="NASA-MSL", channel="C-1", source="dataset"):
-        return {"source_type": source, "dataset_name": dataset,
-                "channel": channel, "sample_rate": TEST_RATE}
+    def _cfg(source_id="file:NASA-MSL/C-1"):
+        return {"source_id": source_id, "sample_rate": TEST_RATE}
 
     def test_1_msl_c1_golden_values(self, space_process):
         """MSL C-1 telemetry must exactly match a contiguous slice of the dataset."""
@@ -213,53 +212,22 @@ class TestE2E:
         assert int(np.count_nonzero(sc)) > TEST_WINDOW // 2, \
             f"Too many zero scores: only {int(np.count_nonzero(sc))}/{TEST_WINDOW} nonzero"
 
-    def test_3_channel_switch_golden(self, space_process):
-        """Switch MSL→SMAP E-1; verify telemetry is genuinely from SMAP dataset."""
+    def test_3_loop_mode(self, space_process):
+        """With loop=True, space keeps producing data after exhaustion.
+
+        Poll multiple times over the pacing interval to verify continuous data.
+        """
         client = GroundClient(host=SPACE_HOST, port=SPACE_PORT, timeout=3)
-        smap_cfg = self._cfg("NASA-SMAP", "E-1")
-        client.poll(smap_cfg)
-        # drain old buffered MSL data
-        for _ in range(3):
-            client.poll(smap_cfg)
-            time.sleep(0.5)
+        time.sleep(TEST_WINDOW / TEST_RATE + 1)  # wait for one pacing cycle
+        pkts = client.poll(self._cfg())
+        tele = [p for p in pkts if isinstance(p, TelemetryPacket)]
+        assert len(tele) > 0, "Loop mode: expected data after pacing interval"
 
-        smap_pkt = None
-        for _ in range(10):
-            for p in client.poll(smap_cfg):
-                if (isinstance(p, TelemetryPacket)
-                        and len(p.raw_values) == TEST_WINDOW
-                        and p.channel == GOLDEN_SMAP_E1["channel"]):
-                    smap_pkt = p
-                    break
-            if smap_pkt is not None:
-                break
-            time.sleep(1.0)
-
-        assert smap_pkt is not None, \
-            "SMAP E-1 data never arrived — reconfig may be blocked"
-
-        # Exact match against SMAP E-1 dataset — proves channel switch worked
-        _verify_against_dataset(smap_pkt.raw_values, "NASA-SMAP", "E-1", "SMAP E-1")
-
-    def test_4_reconfig_latency(self, space_process):
-        """After sending synthetic config, data must arrive within 5 s."""
+    def test_4_space_still_alive(self, space_process):
+        """Space TCP server is still reachable (returns list, not exception)."""
         client = GroundClient(host=SPACE_HOST, port=SPACE_PORT, timeout=3)
-        synth_cfg = {"source_type": "synthetic", "signal_type": "multi_sine",
-                      "freq": 0.02, "sample_rate": TEST_RATE}
-        t0 = time.time()
-        client.poll(synth_cfg)
-        latency = None
-        for _ in range(10):
-            for p in client.poll(synth_cfg):
-                if isinstance(p, TelemetryPacket) and p.channel.startswith("SYN"):
-                    latency = time.time() - t0
-                    break
-            if latency is not None:
-                break
-            time.sleep(0.5)
-        assert latency is not None, "Synthetic data never arrived"
-        assert latency < 5.0, \
-            f"Reconfig latency {latency:.1f}s exceeds 5s — pace loop blocking"
+        pkts = client.poll(self._cfg())
+        assert isinstance(pkts, list), "Server should still accept connections"
 
     def test_5_forecast_valid(self, space_process):
         """Forecaster produces 96-step output with no NaN."""
@@ -276,7 +244,7 @@ class TestE2E:
         f = TrendForecaster(device="cpu")
         raw = telemetry[-1].raw_values
         assert len(raw) >= 512
-        ctx, pred = f.forecast(raw[-512:])
+        ctx, pred, _scaler = f.forecast(raw[-512:])
         assert len(ctx) == 512, f"Context len {len(ctx)} != 512"
         assert len(pred) == 96, f"Prediction len {len(pred)} != 96"
         assert not np.isnan(pred).any(), "Prediction has NaN"
@@ -284,5 +252,17 @@ class TestE2E:
     def test_6_space_shutdown(self, space_process):
         """Poll returns a list after space terminates."""
         client = GroundClient(host=SPACE_HOST, port=SPACE_PORT, timeout=1)
-        pkts = client.poll({"source_type": "dataset"})
+        pkts = client.poll({"source_id": "file:NASA-MSL/C-1"})
         assert isinstance(pkts, list)
+
+    def test_7_space_still_connected_after_data_exhausted(self, space_process):
+        """After data exhausted, polling should still reach space (not timeout).
+
+        This simulates the UI scenario where the user clicks reset — the buffer
+        is cleared but the space segment is still online and serving data.
+        We verify that a poll succeeds (returns a list, not an exception).
+        """
+        client = GroundClient(host=SPACE_HOST, port=SPACE_PORT, timeout=3)
+        # Space is exhausted from prior tests — poll without stored data check
+        pkts = client.poll({"source_id": "file:NASA-MSL/C-1", "sample_rate": 100})
+        assert isinstance(pkts, list), "Poll should not raise on exhausted space"

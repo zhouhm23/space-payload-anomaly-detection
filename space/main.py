@@ -2,18 +2,17 @@
 
 Run independently from the ground segment::
 
-    cd src
-    python -m space.main [--source dataset --dataset NASA-MSL --channel C-1]
+    python -m space.main
 
-Continuously reads sensor data → preprocesses → detects anomalies → buffers
-results to a TCP server that the ground segment polls.
+The data acquisition card (DAQ) and sensor configuration are defined in the
+DAQ_CONFIG dictionary below.  No command-line arguments — change the config
+dictionary and restart to reconfigure.
 
 Stop with Ctrl+C.
 """
 
 from __future__ import annotations
 
-import argparse
 import logging
 import os
 import signal
@@ -34,104 +33,114 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger("space")
 
 
+# ===========================================================================
+# DAQ card hardware configuration
+# ===========================================================================
+# These are HARDWARE parameters — the ground segment cannot change them.
+# Each channel represents a physical input on the data acquisition card.
+# Modify this dictionary and restart the space segment to reconfigure.
+DAQ_CONFIG = {
+    "sample_rate": 100.0,     # Hz — global acquisition rate
+    "window_size": 512,        # samples per read() call
+    "host": "0.0.0.0",
+    "port": 9876,
+
+    # Physical channels on the DAQ card
+    "channels": [
+        # Each entry: {id, source_id, loop, signal_freq_hz(optional), enabled}
+        {"id": 0, "source_id": "file:NASA-MSL/C-1",   "loop": True,  "enabled": True},
+        {"id": 1, "source_id": "file:NASA-MSL/D-14",  "loop": True,  "enabled": False},
+        {"id": 2, "source_id": "virtual:sine",         "loop": False, "signal_freq_hz": 2.0, "enabled": True},
+        {"id": 3, "source_id": "virtual:multi_sine",   "loop": False, "signal_freq_hz": 5.0, "enabled": True},
+    ],
+}
+
+
 def main():
-    p = argparse.ArgumentParser(description="Space-segment processing node")
-    p.add_argument("--source", choices=["dataset", "synthetic"], default="dataset")
-    p.add_argument("--dataset", default="NASA-MSL")
-    p.add_argument("--channel", default="C-1")
-    p.add_argument("--window", type=int, default=512)
-    p.add_argument("--host", default="0.0.0.0",
-                   help="TCP listen address (0.0.0.0 for cross-machine access)")
-    p.add_argument("--port", type=int, default=9876)
-    p.add_argument("--sample-rate", type=float, default=1.0,
-                   help="Sensor sample rate in Hz (-1 = bulk load all data at once)")
-    p.add_argument("--no-detection", action="store_true",
-                   help="Disable TSPulse anomaly detection")
-    args = p.parse_args()
+    # Minimal CLI: --source overrides DAQ_CONFIG (for E2E tests / quick debug)
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--source", default=None,
+                   help="Override DAQ_CONFIG with a single source_id")
+    p.add_argument("--host", default=None)
+    p.add_argument("--port", type=int, default=None)
+    p.add_argument("--sample-rate", type=float, default=None)
+    p.add_argument("--window", type=int, default=None)
+    args, _ = p.parse_known_args()
 
-    # ---- initial config (overridable by ground) ----
-    current_cfg = {
-        "source_type": args.source,
-        "dataset_name": args.dataset,
-        "channel": args.channel,
-        "signal_type": "multi_sine",
-        "freq": 0.02,
-        "noise_enabled": False,
-        "missing_rate": 0.0,
-        "noise_std": 0.0,
-        "jitter_std": 0.0,
-        "sample_rate": args.sample_rate,
-        "use_detection": not args.no_detection,
-    }
+    cfg = DAQ_CONFIG.copy()
+    if args.host: cfg["host"] = args.host
+    if args.port: cfg["port"] = args.port
+    if args.sample_rate: cfg["sample_rate"] = args.sample_rate
+    if args.window: cfg["window_size"] = args.window
 
-    from sensor_source import (
-        DatasetSource, SyntheticSource, SyntheticConfig, SensorNoiseConfig,
-    )
+    window = cfg["window_size"]
+    sr = cfg["sample_rate"]
+    host = cfg["host"]
+    port = cfg["port"]
+
+    # If --source is given, override to single-channel mode
+    if args.source:
+        channels = [{"id": 0, "source_id": args.source, "loop": True, "enabled": True}]
+    else:
+        channels = [ch for ch in cfg["channels"] if ch.get("enabled", True)]
+
+    if not channels:
+        logger.error("No enabled channels")
+        return
+
+    from sensor_source import create_source, SensorNoiseConfig
     from preprocessing import SpacePreprocessor
 
-    def _build_source(cfg: dict):
-        noise = SensorNoiseConfig(
-            missing_rate=cfg.get("noise_enabled", False) and cfg.get("missing_rate", 0) or 0,
-            noise_std=cfg.get("noise_enabled", False) and cfg.get("noise_std", 0) or 0,
-            jitter_std=cfg.get("noise_enabled", False) and cfg.get("jitter_std", 0) or 0,
+    # Build sources and preprocessors for each channel
+    sources: list = []
+    preprocessors: list = []
+    ch_ids: list = []
+    for ch in channels:
+        src = create_source(
+            source_id=ch["source_id"],
+            sample_rate=sr,
+            loop=ch.get("loop", False),
+            signal_freq_hz=ch.get("signal_freq_hz"),
         )
-        if cfg.get("source_type") == "synthetic":
-            return SyntheticSource(
-                config=SyntheticConfig(
-                    signal_type=cfg.get("signal_type", "multi_sine"),
-                    frequency=cfg.get("freq", 0.02),
-                ),
-                sample_rate=cfg.get("sample_rate", 1.0),
-                noise=noise,
-            )
-        else:
-            return DatasetSource(
-                dataset=cfg.get("dataset_name", "NASA-MSL"),
-                channel=cfg.get("channel", "C-1"),
-                sample_rate=cfg.get("sample_rate", 1.0),
-                noise=noise,
-            )
+        pp = SpacePreprocessor()
+        pp.fit_transform(src.read(window))  # initial scaler fit per channel
+        sources.append(src)
+        preprocessors.append(pp)
+        ch_ids.append(ch["id"])
 
-    def _build_preproc(cfg: dict):
-        return SpacePreprocessor()
-
-    # ---- shared state (protected by lock during reconfig) ----
-    import threading as _th
-    _reconf_lock = _th.Lock()
-    _reconf_needed = _th.Event()
-
-    source = _build_source(current_cfg)
-    preproc = _build_preproc(current_cfg)
-    preproc.fit_transform(source.read(args.window))  # initial fit
-
+    # Single TSPulse detector shared across all channels
     detector = None
-    if current_cfg["use_detection"]:
-        logger.info("Loading TSPulse detector …")
+    try:
         from anomaly_detection import AnomalyDetector
+        logger.info("Loading TSPulse detector …")
         detector = AnomalyDetector(device="cpu")
         logger.info("TSPulse loaded (%d params)", detector.n_params)
-
-    # ---- start TCP server ----
+    except Exception as e:
+        logger.warning("Detection disabled: %s", e)
+    # Device tree (synced from ground, enriches telemetry with display names)
+    device_tree: list = []
+    tree_lock = __import__('threading').Lock()
+    # Start TCP server
     from comm import SpaceServer
-    server = SpaceServer(host=args.host, port=args.port)
+    server = SpaceServer(host=host, port=port)
 
     def _on_config(cfg: dict):
-        nonlocal current_cfg
-        with _reconf_lock:
-            changed = any(current_cfg.get(k) != v for k, v in cfg.items()
-                          if k in current_cfg)
-            if changed:
-                current_cfg.update(cfg)
-                _reconf_needed.set()
-                logger.info("Config updated from ground: %s",
-                            {k: v for k, v in cfg.items() if k in current_cfg})
+        nonlocal device_tree
+        if "device_tree" in cfg:
+            with tree_lock:
+                device_tree = cfg["device_tree"]
+            logger.info("Device tree updated from ground (%d nodes)",
+                        sum(1 + len(n.get("children", [])) for n in device_tree))
 
     server.set_on_config(_on_config)
     server.start()
 
-    # ---- processing loop ----
-    logger.info("Space node started [%s] window=%d → tcp://%s:%d",
-                source.channel_name, args.window, args.host, args.port)
+    logger.info("Space node started: %d channels, sr=%.1f Hz, window=%d → tcp://%s:%d",
+                len(sources), sr, window, host, port)
+    for i, (src, ch) in enumerate(zip(sources, channels)):
+        logger.info("  ch[%d]: %s (loop=%s)", ch["id"], src.channel_name, ch.get("loop", False))
+
     step = 0
     running = True
 
@@ -143,63 +152,68 @@ def main():
 
     try:
         while running:
-            # --- reconfigure if ground sent new config ---
-            if _reconf_needed.is_set():
-                with _reconf_lock:
-                    source = _build_source(current_cfg)
-                    preproc = _build_preproc(current_cfg)
-                    preproc.fit_transform(source.read(args.window))
-                    _reconf_needed.clear()
-                logger.info("Reconfigured: %s ch=%s",
-                            current_cfg.get("source_type"),
-                            getattr(source, 'channel_name', 'N/A'))
+            any_data = False
+            for i, (src, pp) in enumerate(zip(sources, preprocessors)):
+                raw = src.read(window)
+                if len(raw) == 0:
+                    continue  # loop source will never hit this
+                any_data = True
 
-            raw = source.read(args.window)
-            if len(raw) == 0:
-                # source exhausted — wait for Ctrl+C
-                logger.info("Source exhausted at step %d", step)
-                while running:
-                    time.sleep(0.5)
+                cleaned = pp.transform(raw) if pp._scaler is not None else pp.fit_transform(raw)
+                scores = None
+                if detector is not None:
+                    try:
+                        imputed = pp._impute(raw.astype(np.float64)).astype(np.float32)
+                        scores = detector.detect(imputed)
+                    except Exception:
+                        logger.warning("Detection failed ch[%d]", ch_ids[i], exc_info=True)
+
+                # Look up device tree metadata for this channel
+                with tree_lock:
+                    _tree_meta = {}
+                    _src_id = ch.get("source_id", "")
+                    for _root in device_tree:
+                        for _child in _root.get("children", []):
+                            if _child.get("sourceId") == _src_id or \
+                               _child.get("source_id") == _src_id:
+                                _tree_meta = {
+                                    "display_name": _child.get("name", src.channel_name),
+                                    "rack": _root.get("name", ""),
+                                    "description": _child.get("description", ""),
+                                }
+                                break
+                        if _tree_meta:
+                            break
+
+                server.enqueue_telemetry(
+                    channel=src.channel_name,
+                    raw_values=raw,
+                    scores=scores,
+                    step=step,
+                    exhausted=src.exhausted,
+                    tree_meta=_tree_meta,
+                )
+
+                if scores is not None and len(scores) > 0:
+                    mx = float(np.nanmax(scores))
+                    if mx > 0.5:
+                        server.enqueue_alert(
+                            channel=src.channel_name,
+                            score=mx,
+                            step=step,
+                        )
+
+            if not any_data:
+                logger.info("All sources exhausted")
                 break
 
-            step += len(raw)
+            step += window
 
-            cleaned = preproc.transform(raw) if preproc._scaler is not None \
-                else preproc.fit_transform(raw)
-
-            scores = None
-            if detector is not None:
-                try:
-                    imputed = preproc._impute(raw.astype(np.float64)).astype(np.float32)
-                    scores = detector.detect(imputed)
-                except Exception:
-                    logger.warning("Detection failed", exc_info=True)
-
-            server.enqueue_telemetry(
-                channel=source.channel_name,
-                raw_values=raw,
-                scores=scores,
-                step=step,
-                exhausted=source.exhausted,
-            )
-
-            if scores is not None and len(scores) > 0:
-                mx = float(np.nanmax(scores))
-                if mx > 0.5:
-                    server.enqueue_alert(
-                        channel=source.channel_name,
-                        score=mx,
-                        step=step,
-                    )
-
-            # pace to simulate real-time (skip if sample_rate < 0)
-            if source.sample_rate > 0:
-                interval = args.window / source.sample_rate
+            # Pace to simulate real-time
+            if sr > 0:
+                interval = window / sr
                 wait_until = time.time() + interval
                 while running and time.time() < wait_until:
-                    # wake up immediately if ground sent a new config
-                    if _reconf_needed.is_set():
-                        break
                     time.sleep(0.1)
 
     except KeyboardInterrupt:

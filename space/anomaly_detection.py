@@ -109,9 +109,11 @@ class AnomalyDetector:
         else:
             scores = np.concatenate(all_scores)[:orig_len]
 
-        # Normalize to [0, 1]
-        mx = float(np.max(scores))
-        if mx > 0:
-            scores = scores / mx
+        # MSE is already in "standardized" units (data was StandardScaler'd
+        # to mean≈0, std≈1 before reconstruction).  So MSE=0.5 means the
+        # model's error is ~50% of the signal's typical fluctuation — a
+        # natural anomaly score.  Simple clip to [0,1], no per-window
+        # normalisation that would inflate flat segments.
+        scores = np.clip(scores, 0.0, 1.0)
 
         return scores

@@ -1,3 +1,4 @@
+
 # Space Payload Health Management System
 
 Space-ground collaborative health management for space payload telemetry.
@@ -30,19 +31,45 @@ displays telemetry and runs trend forecasting for early warning.
 
 ## Quick Start
 
-Two terminals — start space first, then ground:
+### 1. Space Segment (on-orbit node)
 
-```powershell
-# Terminal 1 — Space segment (on edge device)
-$env:PYTHONPATH = "d:\Office\生产实习\src"; & "d:\Office\生产实习\src\.conda-env\python.exe" -m space.main --host 0.0.0.0
-
-# Terminal 2 — Ground segment (on PC)
-$env:PYTHONPATH = "d:\Office\生产实习\src"; & "d:\Office\生产实习\src\.conda-env\python.exe" -m streamlit run src/ground/app.py
+```bash
+python -m space.main
 ```
 
-Open `http://localhost:8501` in browser.
+Edit `DAQ_CONFIG` in `space/main.py` to configure the DAQ card channels and
+sensors.  Restart to apply changes.
 
-> To connect to a remote edge device, set its IP in sidebar "Connection".
+```python
+DAQ_CONFIG = {
+    "sample_rate": 100.0,     # Hz
+    "window_size": 512,
+    "channels": [
+        {"id": 0, "source_id": "file:NASA-MSL/C-1", "loop": True, "enabled": True},
+        {"id": 1, "source_id": "virtual:sine",       "loop": False, "signal_freq_hz": 2.0, "enabled": False},
+    ],
+}
+```
+
+See available sources: `python -c "from space.sensor_source import list_all_sources; [print(s['id']) for s in list_all_sources()]"`
+
+### 2. Ground Segment (ECharts HTML frontend)
+
+```bash
+python ground/server.py
+```
+
+Open `http://localhost:8501`.  The HTML frontend provides:
+
+- **Device tree** — create/edit sensors and racks, drag-and-drop, save config
+- **Telemetry charts** — ECharts real-time waveforms + anomaly scores
+- **Alerts & early warnings** — TSPulse detection + TTM-R3 forecast cascade
+
+### 3. (Legacy) Streamlit frontend
+
+```bash
+streamlit run ground/app.py   # alternative ground UI
+```
 
 ## Directory Structure
 
@@ -57,7 +84,9 @@ src/
 │   ├── anomaly_detection.py   TSPulse anomaly detection (direct MSE, per-point)
 │   └── tests/
 ├── ground/                    Ground segment (self-contained)
-│   ├── app.py                 Entry: streamlit run ground/app.py
+│   ├── server.py              FastAPI: serves HTML + TCP bridge
+│   ├── app.py                 Legacy Streamlit entry
+│   ├── 空间站有效载荷…html     ECharts frontend
 │   ├── settings.json          Persisted settings
 │   ├── comm.py                TCP client (polls space + sends config)
 │   ├── forecasting.py         TTM-R3 trend forecasting
@@ -74,15 +103,19 @@ src/
 └── README.md
 ```
 
-## Data Source
+## Data Sources
 
-`space/sensor_source.py` simulates a DAQ card with two switchable modes:
+`space/sensor_source.py` simulates a DAQ card with a unified interface:
 
-1. **DatasetSource** — replays NASA-SMAP/MSL telemetry; returns empty when exhausted
-2. **SyntheticSource** — generates continuous signals (multi-sine, sine, square, chirp)
+| Type                          | `source_id`         | Behavior                                                                    |
+| ----------------------------- | --------------------- | --------------------------------------------------------------------------- |
+| **FileSource**          | `file:NASA-MSL/C-1` | Replays NASA-SMAP/MSL telemetry;`loop=True` rewinds on exhaustion         |
+| **VirtualSensorSource** | `virtual:sine`      | Continuous synthetic signals;`signal_freq_hz` controls waveform frequency |
 
-Synthetic mode supports noise injection (missing values, Gaussian noise, jitter);
-dataset mode does not need noise settings.
+All sources share the `SensorSource.read(n)` interface — the space segment
+does not distinguish real from virtual sensors.
+
+Virtual sensors support noise injection (missing values, Gaussian noise, jitter).
 
 ## Preprocessing
 

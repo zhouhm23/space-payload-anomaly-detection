@@ -1,0 +1,31 @@
+{
+  "device_tree": [
+    {
+      "id": "n_1783135270727_o7q0",
+      "name": "测试温度传感器",
+      "description": "",
+      "type": "sensor",
+      "sourceId": "file:NASA-MSL/C-1",
+      "channelName": "C-1",
+      "blockSize": 512
+    },
+    {
+      "id": "n_1783178071371_mp57",
+      "name": "SMAP测试传感器",
+      "description": "",
+      "type": "sensor",
+      "sourceId": "file:NASA-SMAP/E-1",
+      "blockSize": 512,
+      "channelName": "E-1"
+    },
+    {
+      "id": "n_1783178646041_coo3",
+      "name": "正弦波传感器",
+      "description": "虚拟正弦波测试通道",
+      "type": "sensor",
+      "sourceId": "virtual:sine",
+      "blockSize": 512,
+      "channelName": "VS-sine"
+    }
+  ]
+}

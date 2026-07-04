@@ -1,0 +1,1457 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+  <title>空间站有效载荷预测性维护支持系统 · WebUI</title>
+  <!-- 引入 ECharts 核心库 -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --bg-primary: #0b0f1a;
+      --bg-secondary: #131825;
+      --bg-card: #1a1f2f;
+      --border-color: #2a3348;
+      --text-primary: #e0e6f0;
+      --text-secondary: #8e9bb5;
+      --accent-blue: #2d8cf0;
+      --accent-green: #19be6b;
+      --accent-yellow: #f5a623;
+      --accent-red: #ed3f14;
+      --accent-cyan: #00c9db;
+      --shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+      --font-mono: 'Courier New', monospace;
+    }
+
+    body {
+      font-family: 'Segoe UI', 'Roboto', 'Microsoft YaHei', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ========== 顶部状态栏 ========== */
+    .header {
+      height: 60px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      flex-shrink: 0;
+      box-shadow: var(--shadow);
+    }
+    .header .title {
+      font-size: 1.3rem;
+      font-weight: 600;
+      letter-spacing: 1px;
+      background: linear-gradient(90deg, #6ea8fe, #a6c8ff);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .header .status-group {
+      display: flex;
+      align-items: center;
+      gap: 28px;
+    }
+    .link-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.9rem;
+      color: var(--text-secondary);
+    }
+    .link-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent-green);
+      box-shadow: 0 0 8px var(--accent-green);
+    }
+    .link-dot.loss {
+      background: var(--accent-red);
+      box-shadow: 0 0 8px var(--accent-red);
+    }
+    .utc-time {
+      font-family: var(--font-mono);
+      font-size: 0.95rem;
+      color: var(--accent-cyan);
+    }
+    .health-score {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .health-ring {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: conic-gradient(var(--accent-green) 0deg 300deg, #2a2f3a 300deg 360deg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.75rem;
+      font-weight: bold;
+      color: white;
+    }
+
+    /* ========== 主体布局 ========== */
+    .main-content {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+      gap: 1px;
+      background: var(--border-color);
+    }
+
+    /* 左侧设备树 */
+    .left-panel {
+      width: 240px;
+      background: var(--bg-secondary);
+      display: flex;
+      flex-direction: column;
+      padding: 16px 8px;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+    .left-panel h3 {
+      font-size: 0.9rem;
+      color: var(--text-secondary);
+      margin-bottom: 12px;
+      padding-left: 8px;
+      letter-spacing: 0.5px;
+    }
+    .device-tree {
+      list-style: none;
+      padding-left: 0;
+    }
+    .device-tree li {
+      margin-bottom: 4px;
+    }
+    .tree-item {
+      display: flex;
+      align-items: center;
+      padding: 6px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.2s;
+      font-size: 0.9rem;
+      color: var(--text-primary);
+      gap: 8px;
+    }
+    .tree-item:hover {
+      background: rgba(255,255,255,0.05);
+    }
+    .tree-item.active {
+      background: rgba(45,140,240,0.15);
+      border-left: 3px solid var(--accent-blue);
+    }
+    .tree-item .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-green);
+      flex-shrink: 0;
+    }
+    .tree-item .status-dot.warn {
+      background: var(--accent-yellow);
+    }
+    .tree-item .status-dot.error {
+      background: var(--accent-red);
+    }
+    .abnormal-score {
+      margin-left: auto;
+      font-size: 0.75rem;
+      color: var(--accent-yellow);
+      font-weight: 500;
+    }
+
+    /* 中央区域 */
+    .center-panel {
+      flex: 1;
+      background: var(--bg-primary);
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+      gap: 16px;
+      min-width: 0;
+    }
+    .device-diagram {
+      background: var(--bg-card);
+      border-radius: 10px;
+      height: 180px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      border: 1px solid var(--border-color);
+      overflow: hidden;
+    }
+    .gauges-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      flex: 1;
+      min-height: 0;
+    }
+    .gauge-card {
+      background: var(--bg-card);
+      border-radius: 10px;
+      border: 1px solid var(--border-color);
+      height: 100%;
+    }
+
+    /* 右侧信息面板 */
+    .right-panel {
+      width: 340px;
+      background: var(--bg-secondary);
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+      gap: 14px;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+    .info-card {
+      background: var(--bg-card);
+      border-radius: 10px;
+      border: 1px solid var(--border-color);
+      padding: 12px;
+    }
+    .info-card h4 {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      margin-bottom: 8px;
+      letter-spacing: 0.4px;
+    }
+    .radar-container {
+      width: 100%;
+      height: 180px;
+    }
+    .diagnosis-text {
+      font-family: var(--font-mono);
+      color: var(--accent-red);
+      font-weight: 600;
+    }
+    .warning-list {
+      list-style: none;
+      font-size: 0.85rem;
+      max-height: 120px;
+      overflow-y: auto;
+    }
+    .warning-list li {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      border-bottom: 1px solid var(--border-color);
+    }
+    .rul-bar {
+      width: 100%;
+      height: 8px;
+      background: #2a2f3a;
+      border-radius: 4px;
+      margin-top: 6px;
+    }
+    .rul-fill {
+      height: 100%;
+      background: var(--accent-yellow);
+      border-radius: 4px;
+      width: 60%;
+    }
+
+    /* 底部数据流区域 - 重点优化布局 */
+    .bottom-panel {
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+    }
+    .control-bar {
+      display: flex;
+      align-items: center;
+      padding: 6px 16px;
+      gap: 10px;
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border-color);
+      flex-shrink: 0;
+    }
+    .btn {
+      background: var(--border-color);
+      border: none;
+      color: var(--text-primary);
+      padding: 6px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      transition: background 0.2s, opacity 0.2s;
+    }
+    .btn:hover:not(:disabled) {
+      background: #3a4560;
+    }
+    .btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+    .btn.active {
+      background: var(--accent-blue);
+      color: white;
+    }
+    .btn.btn-pause {
+      background: var(--accent-yellow);
+      color: #1a1a1a;
+    }
+    .block-nav-info {
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+      color: var(--accent-cyan);
+      min-width: 60px;
+      text-align: center;
+      user-select: none;
+    }
+    .chunk-info {
+      margin-left: auto;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+    .chart-row {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .chart-main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: 8px 0;
+      min-height: 0;
+    }
+
+    /* 修改布局比例：上7下3 */
+    .chart-section {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      position: relative;
+    }
+    .chart-section.top {
+      flex: 7;
+      border-bottom: 1px solid var(--border-color);
+      padding-bottom: 4px;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .chart-section.bottom {
+      flex: 3;
+      padding-top: 4px;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .chart-title {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      padding: 0 12px 4px 12px;
+      flex-shrink: 0;
+      letter-spacing: 0.4px;
+    }
+    .chart-telemetry {
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .chart-anomaly {
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    /* 占位符面板 */
+    .placeholder-panel {
+      background: var(--bg-card);
+      border-radius: 10px;
+      border: 1px dashed var(--border-color);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+      flex: 1;
+    }
+    .placeholder-card {
+      opacity: 0.6;
+    }
+    .placeholder-card p {
+      font-size: 0.78rem;
+      color: var(--text-secondary);
+      margin-top: 4px;
+    }
+
+    /* 拖拽样式等 */
+    .tree-item.dragging { opacity: 0.4; }
+    .tree-item.drag-over { background: rgba(45,140,240,0.25); border: 1px dashed var(--accent-blue); }
+    .tree-actions { display: flex; gap: 6px; margin-bottom: 10px; }
+    .tree-actions button { font-size: 0.7rem; padding: 3px 8px; background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-secondary); border-radius: 4px; cursor: pointer; }
+    .tree-actions button:hover { border-color: var(--accent-blue); color: var(--accent-blue); }
+    .tree-item .del-btn { display: none; margin-left: auto; cursor: pointer; color: var(--accent-red); font-size: 0.8rem; }
+    .tree-item:hover .del-btn { display: inline; }
+    
+    /* 模态框 */
+    .modal-overlay { display: none; position: fixed; top: 0; left: 0; width:100%; height:100%; background: rgba(0,0,0,0.6); z-index: 100; justify-content: center; align-items: center; }
+    .modal-overlay.open { display: flex; }
+    .modal { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 10px; padding: 24px; min-width: 340px; box-shadow: var(--shadow); }
+    .modal h3 { margin-bottom: 16px; }
+    .modal label { display: block; font-size: 0.8rem; color: var(--text-secondary); margin: 8px 0 4px; }
+    .modal input, .modal select { width: 100%; padding: 6px 10px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-primary); font-size: 0.85rem; }
+    .modal .btn-row { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
+  </style>
+</head>
+<body>
+  <!-- 顶部状态栏 -->
+  <header class="header">
+    <div class="title">🚀 空间站有效载荷预测性维护支持系统</div>
+    <div class="status-group">
+      <div class="link-status">
+        <span class="link-dot" id="linkDot"></span>
+        <span id="linkText">天地链路 正常</span>
+      </div>
+      <div class="utc-time" id="utcTime"></div>
+      <div class="health-score">
+        <span style="font-size:0.8rem;">系统健康</span>
+        <div class="health-ring" id="healthRing">92</div>
+      </div>
+    </div>
+  </header>
+
+  <!-- 主体 -->
+  <div class="main-content">
+    <!-- 左侧设备树 -->
+    <div class="left-panel">
+      <h3>📡 有效载荷设备树</h3>
+      <div class="tree-actions">
+        <button id="btnNewSensor">➕ 传感器</button>
+        <button id="btnNewFolder">📁 文件夹</button>
+        <button id="btnSaveConfig" style="margin-left:auto;">💾 保存</button>
+      </div>
+      <ul class="device-tree" id="deviceTree"></ul>
+    </div>
+
+    <!-- 中央区 -->
+    <div class="center-panel">
+      <div class="placeholder-panel" style="flex:1;">
+        <span>🚧 设备示意图 — 开发中</span>
+      </div>
+      <div class="placeholder-panel" style="flex:2;">
+        <span>🚧 仪表盘 — 开发中</span>
+      </div>
+    </div>
+
+    <!-- 右侧面板 -->
+    <div class="right-panel">
+      <div class="info-card placeholder-card">
+        <h4>🚧 健康评估 — 开发中</h4>
+        <p>雷达图将在后续版本中实现</p>
+      </div>
+      <div class="info-card placeholder-card">
+        <h4>🚧 故障诊断 — 开发中</h4>
+        <p>诊断结果将在后续版本中实现</p>
+      </div>
+      <div class="info-card placeholder-card">
+        <h4>🚧 预警列表 — 开发中</h4>
+        <p>预警功能将在后续版本中实现</p>
+      </div>
+      <div class="info-card placeholder-card">
+        <h4>🚧 RUL 剩余寿命 — 开发中</h4>
+        <p>寿命预测将在后续版本中实现</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 底部数据流区域 -->
+  <div class="bottom-panel">
+    <div class="control-bar">
+      <label style="font-size:0.8rem;color:var(--text-secondary);">区块</label>
+      <input id="inputBlockSize" type="number" value="512" min="64" max="65536" step="64"
+        style="width:60px;background:var(--bg-secondary);border:1px solid var(--border-color);color:var(--text-primary);padding:3px 5px;border-radius:4px;font-size:0.8rem;text-align:center;">
+      <label style="font-size:0.8rem;color:var(--text-secondary);margin-left:6px;">Y轴</label>
+      <input id="inputYMin" type="number" value="-1" step="0.1"
+        style="width:50px;background:var(--bg-secondary);border:1px solid var(--border-color);color:var(--text-primary);padding:3px 5px;border-radius:4px;font-size:0.8rem;text-align:center;">
+      <span style="color:var(--text-secondary);font-size:0.8rem;">~</span>
+      <input id="inputYMax" type="number" value="1" step="0.1"
+        style="width:50px;background:var(--bg-secondary);border:1px solid var(--border-color);color:var(--text-primary);padding:3px 5px;border-radius:4px;font-size:0.8rem;text-align:center;">
+      <button class="btn" id="btnPrevBlock" disabled title="前一块">◀</button>
+      <span class="block-nav-info" id="blockNavInfo">块 0/0</span>
+      <button class="btn" id="btnNextBlock" disabled title="后一块">▶</button>
+      <span style="flex:1;"></span>
+      <button class="btn" id="btnPlayPause">▶ 开始</button>
+      <button class="btn" id="btnReset" disabled>↺ 重置</button>
+      <span class="chunk-info" id="chunkInfo">就绪</span>
+    </div>
+    <div class="chart-row">
+      <div class="chart-main">
+        <!-- 上部分：占比 7 -->
+        <div class="chart-section top">
+          <div class="chart-title">📈 遥测 & 预测 — 实线为遥测，虚线为预测</div>
+          <div class="chart-telemetry" id="chartTelemetry"></div>
+        </div>
+        <!-- 下部分：占比 3 -->
+        <div class="chart-section bottom">
+          <div class="chart-title">📉 异常分数 — 阈值 0.7</div>
+          <div class="chart-anomaly" id="chartAnomaly"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 模态框：新建传感器 -->
+  <div class="modal-overlay" id="modalSensor">
+    <div class="modal">
+      <h3>新建传感器</h3>
+      <label>名称</label><input id="sensorName" placeholder="如：温度传感器">
+      <label>描述</label><input id="sensorDesc" placeholder="如：仪器柜A热控">
+      <label>数据源</label><select id="sensorSource">
+        <option value="file:NASA-MSL/C-1">NASA-MSL C-1</option>
+        <option value="file:NASA-SMAP/E-1">NASA-SMAP E-1</option>
+        <option value="virtual:sine">虚拟正弦波</option>
+        <option value="virtual:multi_sine">虚拟多谐波</option>
+      </select>
+      <label>区块大小</label><input id="sensorBlockSize" type="number" value="512" min="64" max="65536" step="64">
+      <div class="btn-row">
+        <button onclick="document.getElementById('modalSensor').classList.remove('open')">取消</button>
+        <button id="confirmSensor" style="color:var(--accent-blue)">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 模态框：编辑传感器配置 -->
+  <div class="modal-overlay" id="modalEditSensor">
+    <div class="modal">
+      <h3>编辑传感器配置</h3>
+      <label>名称</label><input id="editSensorName" placeholder="传感器名称">
+      <label>描述</label><input id="editSensorDesc" placeholder="传感器描述">
+      <label>数据源 (sourceId)</label><select id="editSensorSource">
+        <option value="file:NASA-MSL/C-1">NASA-MSL C-1</option>
+        <option value="file:NASA-SMAP/E-1">NASA-SMAP E-1</option>
+        <option value="virtual:sine">虚拟正弦波</option>
+        <option value="virtual:multi_sine">虚拟多谐波</option>
+      </select>
+      <label>区块大小</label><input id="editSensorBlockSize" type="number" value="512" min="64" max="65536" step="64">
+      <div class="btn-row">
+        <button onclick="document.getElementById('modalEditSensor').classList.remove('open')">取消</button>
+        <button id="confirmEditSensor" style="color:var(--accent-blue)">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 模态框：新建文件夹 -->
+  <div class="modal-overlay" id="modalFolder">
+    <div class="modal">
+      <h3>新建文件夹</h3>
+      <label>名称</label><input id="folderName" placeholder="如：仪器柜A">
+      <div class="btn-row">
+        <button onclick="document.getElementById('modalFolder').classList.remove('open')">取消</button>
+        <button id="confirmFolder" style="color:var(--accent-blue)">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      // ========== 全局状态 ==========
+      const PREDICT_LEN = 96;          // 预测点数
+      const POLL_INTERVAL_S = 2;       // 轮询间隔（秒）
+      const BLOCK_SIZE = 1024;         // 每块数据点数
+      const DISPLAY_WINDOW_S = 30;     // 显示窗口（秒）— 只显示最近N秒
+
+      const state = {
+        playing: false,               
+        blocks: [],                   
+        currentBlock: -1,             
+        selectedDevice: 'thermal',
+        channelNames: [],
+        timer: null,
+        sampleOffset: 0,              // 全局采样偏移，保证X轴连续
+      };
+
+      // ========== 设备树 ==========
+      const deviceTreeData = [
+        { id: 'thermal', name: '热控系统', children: [
+          { id: 'pump', name: '泵组' },
+          { id: 'filter', name: '过滤器' },
+          { id: 'cooler', name: '制冷机' },
+          { id: 'controller', name: '控制器' },
+          { id: 'sensor', name: '传感器' }
+        ]},
+        { id: 'power', name: '供配电系统', children: [
+          { id: 'battery', name: '电池' }
+        ]}
+      ];
+
+      // ========== ECharts 配置化生成 ==========
+      let telemetryChart, anomalyChart;
+
+      function initCharts() {
+        const telDom = document.getElementById('chartTelemetry');
+        if (telemetryChart) telemetryChart.dispose();
+        telemetryChart = echarts.init(telDom);
+        telemetryChart.setOption(getTelemetryOption());
+
+        const anomDom = document.getElementById('chartAnomaly');
+        if (anomalyChart) anomalyChart.dispose();
+        anomalyChart = echarts.init(anomDom);
+        anomalyChart.setOption(getAnomalyOption());
+      }
+
+      function getTelemetryOption() {
+        return {
+          backgroundColor: 'transparent',
+          grid: { left: 55, right: 35, top: 10, bottom: 25 },
+          xAxis: { 
+            type: 'time',
+            name: '时间',
+            nameTextStyle: { color: '#8e9bb5', fontSize: 12 },
+            axisLine: { lineStyle: { color: '#2a3348' } }, 
+            axisLabel: { color: '#e0e6f0', fontSize: 11 },
+            splitLine: { show: false },
+            axisPointer: { type: 'line' } 
+          },
+          yAxis: { 
+            type: 'value', 
+            min: 0, max: 1,
+            name: '遥测值', 
+            nameTextStyle: { color: '#8e9bb5', fontSize: 12 },
+            axisLine: { lineStyle: { color: '#2a3348' } }, 
+            splitLine: { lineStyle: { color: '#2d3a5c' } }, 
+            axisLabel: { color: '#e0e6f0', fontSize: 11 } 
+          },
+          series: [
+            { name: '遥测值', type: 'line', showSymbol: false, lineStyle: { color: '#2d8cf0', width: 1.5 }, data: [],
+              encode: { x: 'time', y: 'value', tooltip: ['idx', 'time', 'value'] } },
+            { name: '预测值', type: 'line', showSymbol: false,
+              lineStyle: { color: '#19be6b', type: 'dashed', width: 2 }, data: [],
+              encode: { x: 'time', y: 'value', tooltip: ['idx', 'time', 'value'] } }
+          ],
+          tooltip: { 
+            trigger: 'axis',
+            formatter: function(params) {
+              if (!params || params.length === 0) return '';
+              let tip = '';
+              params.forEach(p => {
+                if (p.data && p.data.length >= 3) {
+                  const idx = p.data[2];  // 第3个元素是序号
+                  const ts = new Date(p.data[0]);
+                  const timeStr = ts.toTimeString().slice(0, 8);
+                  const val = p.data[1];
+                  tip += `<b>${p.seriesName}</b><br/>序号: ${idx}<br/>时间: ${timeStr}<br/>值: ${val.toFixed(4)}<br/>`;
+                }
+              });
+              return tip;
+            }
+          }
+        };
+      }
+
+      function getAnomalyOption() {
+        return {
+          backgroundColor: 'transparent',
+          grid: { left: 55, right: 35, top: 10, bottom: 25 },
+          xAxis: { 
+            type: 'time',
+            name: '时间',
+            nameTextStyle: { color: '#8e9bb5', fontSize: 12 },
+            axisLine: { lineStyle: { color: '#2a3348' } }, 
+            axisLabel: { color: '#e0e6f0', fontSize: 11 },
+            splitLine: { show: false },
+            axisPointer: { type: 'line' }
+          },
+          yAxis: { 
+            type: 'value', 
+            min: 0, max: 1, 
+            name: '异常分数', 
+            nameTextStyle: { color: '#8e9bb5', fontSize: 12 },
+            axisLine: { lineStyle: { color: '#2a3348' } }, 
+            splitLine: { lineStyle: { color: '#2d3a5c' } }, 
+            axisLabel: { color: '#e0e6f0', fontSize: 11 } 
+          },
+          series: [
+            { name: '异常分数', type: 'line', showSymbol: false,
+              lineStyle: { color: '#f5a623', width: 1.5 }, data: [],
+              encode: { x: 'time', y: 'value', tooltip: ['idx', 'time', 'value'] } },
+            { name: '阈值线', type: 'line', showSymbol: false,
+              lineStyle: { color: '#ed3f14', type: 'dashed', width: 1, opacity: 0.7 },
+              markLine: { 
+                silent: true, symbol: 'none', 
+                data: [{ yAxis: 0.7 }],
+                label: { show: true, formatter: '0.7', color: '#ed3f14', fontSize: 10, position: 'end' }
+              },
+              data: [] }
+          ],
+          tooltip: { 
+            trigger: 'axis',
+            formatter: function(params) {
+              if (!params || params.length === 0) return '';
+              let tip = '';
+              params.forEach(p => {
+                if (p.data && p.data.length >= 3) {
+                  const idx = p.data[2];
+                  const ts = new Date(p.data[0]);
+                  const timeStr = ts.toTimeString().slice(0, 8);
+                  const val = p.data[1];
+                  tip += `<b>${p.seriesName}</b><br/>序号: ${idx}<br/>时间: ${timeStr}<br/>值: ${val.toFixed(4)}<br/>`;
+                }
+              });
+              return tip;
+            }
+          }
+        };
+      }
+
+      // ========== TTM-R3 预测（调用后端API） ==========
+      let pendingForecast = null;  // 防止并发预测请求
+
+      async function computePredict(telemetry) {
+        if (!telemetry || telemetry.length < 10) return { predTele: [], predScores: [] };
+        
+        // telemetry 现在是 [sample_index, value] 格式
+        const values = telemetry.slice(-512).map(p => p[1]);
+        const lastIdx = telemetry[telemetry.length - 1][0];
+
+        try {
+          const resp = await fetch('/api/forecast', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ values })
+          });
+          if (!resp.ok) return { predTele: [], predScores: [] };
+          const data = await resp.json();
+          if (data.error) return { predTele: [], predScores: [] };
+
+          const prediction = data.prediction || [];
+          // 预测点的索引从 lastIdx+1 开始连续递增
+          const predTele = prediction.map((v, i) => [lastIdx + 1 + i, v]);
+          const predScores = prediction.map((v, i) => [lastIdx + 1 + i, 0]);
+          return { predTele, predScores };
+        } catch (e) {
+          console.warn('TTM-R3 预测失败:', e);
+          return { predTele: [], predScores: [] };
+        }
+      }
+
+      // ========== 数据拉取 ==========
+      // source_id → 后端 channel_name 映射
+      // FileSource: "file:NASA-MSL/C-1" → "C-1"
+      // VirtualSensorSource: "virtual:sine" → "VS-sine"（与 sensor_source.py 一致）
+      function sourceToChannel(sourceId) {
+        if (!sourceId) return null;
+        if (sourceId.startsWith('virtual:')) {
+          const st = sourceId.slice('virtual:'.length);
+          return 'VS-' + st;
+        }
+        if (sourceId.startsWith('file:')) {
+          const rest = sourceId.slice('file:'.length); // "NASA-MSL/C-1"
+          const parts = rest.split('/');
+          return parts[parts.length - 1];
+        }
+        return sourceId;
+      }
+
+      function _selectedSourceId() {
+        const sel = state.selectedDevice;
+        const node = sel ? _findById(sel) : null;
+        if (!node) return null;
+        // 1. 直接有 sourceId
+        if (node.sourceId) return node.sourceId;
+        // 2. 子节点中找第一个有 sourceId 的（仅文件夹展开的情况）
+        if (node.children) {
+          const child = node.children.find(c => c.sourceId);
+          if (child) return child.sourceId;
+        }
+        return null;
+      }
+
+      // 遍历设备树，返回第一个带 sourceId 的传感器（用于无选中传感器时的回退轮询）
+      function _firstSensorSourceId() {
+        for (const d of deviceTreeData) {
+          if (d.sourceId) return d.sourceId;
+          if (d.children) {
+            const c = d.children.find(x => x.sourceId);
+            if (c) return c.sourceId;
+          }
+        }
+        return null;
+      }
+
+      function _getBlockBlockSize() {
+        // 优先使用传感器配置的 blockSize
+        const sel = state.selectedDevice;
+        const node = sel ? _findById(sel) : null;
+        if (node && node.blockSize) return node.blockSize;
+        // 回退到全局输入框
+        const el = document.getElementById('inputBlockSize');
+        return el ? parseInt(el.value) || 512 : 512;
+      }
+
+      // 获取选中设备对应的通道名（与后端 channel_name 对齐）
+      function _selectedChannelName() {
+        const sel = state.selectedDevice;
+        const node = sel ? _findById(sel) : null;
+        if (!node) return null;
+        // 1. 节点显式记录了 channelName（最可靠）
+        if (node.channelName) return node.channelName;
+        // 2. 由 sourceId 派生
+        if (node.sourceId) return sourceToChannel(node.sourceId);
+        // 3. 子节点中找第一个有 sourceId 的
+        if (node.children) {
+          const child = node.children.find(c => c.sourceId || c.channelName);
+          if (child) return child.channelName || sourceToChannel(child.sourceId);
+        }
+        return null;
+      }
+
+      async function fetchBlock() {
+        // 并行模式：只要树中存在任意传感器即轮询，后端会返回当前在采的全部通道
+        const sid = _selectedSourceId() || _firstSensorSourceId();
+        if (!sid) return false;
+        const blockSize = _getBlockBlockSize();
+        try {
+          const resp = await fetch('/api/poll', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_id: sid, sample_rate: 50.0, block_size: blockSize })
+          });
+          const json = await resp.json();
+          const channels = json.channels || {};
+          const channelNames = Object.keys(channels);
+          if (channelNames.length === 0) return false;
+
+          // 去重：比较新数据首时间戳与上一块首时间戳
+          const firstCh = channelNames[0];
+          const newFirstTs = channels[firstCh].telemetry[0] ? channels[firstCh].telemetry[0][0] : null;
+          if (state.blocks.length > 0 && newFirstTs !== null) {
+            const lastBlock = state.blocks[state.blocks.length - 1];
+            const lastChData = lastBlock.channels[firstCh];
+            if (lastChData && lastChData.telemetry.length > 0) {
+              const lastFirstTs = lastChData.telemetry[0][0];
+              if (newFirstTs === lastFirstTs) {
+                // 数据未更新，跳过存储
+                return false;
+              }
+            }
+          }
+
+          // 存储所有通道数据到一个块中，记录起始采样索引
+          const block = {
+            channels: {},  // {chName: {telemetry, scores}}
+            time: Date.now(),
+            startIdx: state.sampleOffset,
+          };
+          for (const chName of channelNames) {
+            const chData = channels[chName];
+            block.channels[chName] = {
+              telemetry: chData.telemetry || [],
+              scores: chData.scores || [],
+            };
+          }
+          // 更新全局采样偏移
+          const maxPts = Math.max(...channelNames.map(ch => (channels[ch].telemetry || []).length));
+          state.sampleOffset += maxPts;
+          state.blocks.push(block);
+          state.channelNames = channelNames;
+
+          if (state.playing) {
+            state.currentBlock = state.blocks.length - 1;
+          } else if (state.currentBlock < 0) {
+            state.currentBlock = 0;
+          }
+
+          // 状态信息
+          const chCount = channelNames.length;
+          const totalPts = channelNames.reduce((s, ch) => s + (channels[ch].telemetry || []).length, 0);
+          let statusText = `块 ${state.blocks.length} | ${chCount}通道 | ${totalPts} 点`;
+          if (json.exhausted) statusText += ' ⚠️ 数据源耗尽';
+          document.getElementById('chunkInfo').textContent = statusText;
+
+          // 不再自动暂停 — 持续监测
+          // 更新设备树状态：每个传感器节点用各自通道的分数
+          updateTreeStatusAll(channels);
+
+          updateCharts();
+          updateNavButtons();
+          return true;
+        } catch (err) {
+          console.warn('API poll failed:', err);
+          return false;
+        }
+      }
+
+      // 并行模式：按每个传感器节点的 channelName 更新各自状态点
+      function updateTreeStatusAll(channels) {
+        document.querySelectorAll('.tree-item').forEach(item => {
+          const dot = item.querySelector('.status-dot');
+          if (!dot) return;
+          const node = _findById(item.dataset.device);
+          if (!node || !node.sourceId) return;
+          const chName = node.channelName || sourceToChannel(node.sourceId);
+          const chData = channels[chName];
+          if (!chData) { dot.className = 'status-dot'; return; }
+          const scores = chData.scores || [];
+          let lastScore = 0;
+          if (scores.length > 0) lastScore = scores[scores.length - 1][1] || 0;
+          if (lastScore > 0.7) dot.className = 'status-dot error';
+          else if (lastScore > 0.4) dot.className = 'status-dot warn';
+          else dot.className = 'status-dot';
+        });
+      }
+
+      function updateTreeStatus(chData) {
+        const scores = chData.scores || [];
+        let lastScore = 0;
+        if (scores.length > 0) lastScore = scores[scores.length-1][1] || 0;
+        document.querySelectorAll('.tree-item').forEach(item => {
+          const dot = item.querySelector('.status-dot');
+          if (!dot) return;
+          const node = _findById(item.dataset.device);
+          if (!node || !node.sourceId) return;
+          const sid = _selectedSourceId();
+          if (node.sourceId === sid) {
+            if (lastScore > 0.7) dot.className = 'status-dot error';
+            else if (lastScore > 0.4) dot.className = 'status-dot warn';
+            else dot.className = 'status-dot';
+          }
+        });
+      }
+
+      // ========== 图表渲染 ==========
+      // 缓存预测结果，避免重复请求
+      let lastForecastBlockIdx = -1;
+      let cachedPredTele = [];
+      let cachedPredScores = [];
+
+      // 将 [timestamp_ms, value] 转换为 [timestamp_ms, value, sample_index]
+      function toTimeData(rawData, startIdx) {
+        return rawData.map((p, i) => [p[0], p[1], startIdx + i]);
+      }
+
+      async function updateCharts() {
+        const now = Date.now();
+        if (state.currentBlock < 0 || state.currentBlock >= state.blocks.length) {
+          telemetryChart.setOption({
+            xAxis: { min: now - 30000, max: now },
+            yAxis: { min: 0, max: 1 },
+            series: [{ data: [] }, { data: [], markLine: { data: [] } }]
+          });
+          anomalyChart.setOption({
+            xAxis: { min: now - 30000, max: now },
+            series: [{ data: [] }, { 
+              data: [],
+              markLine: { 
+                silent: true, symbol: 'none', 
+                data: [{ yAxis: 0.7 }],
+                label: { show: true, formatter: '0.7', color: '#ed3f14', fontSize: 10, position: 'end' }
+              }
+            }]
+          });
+          return;
+        }
+
+        const block = state.blocks[state.currentBlock];
+        const availableChannels = Object.keys(block.channels);
+        
+        // 按选中设备过滤通道 — 精确匹配，不回退到其他通道
+        // 若该传感器通道暂无数据（如未在 space 端启用），显示明确提示
+        let chName = _selectedChannelName();
+        let chData = chName ? block.channels[chName] : null;
+        
+        if (!chData) {
+          // 该传感器无数据：清空图表，用 title 提示原因
+          const reason = !chName
+            ? '当前未选中传感器'
+            : `通道「${chName}」暂无数据（可能未在空间段启用采集）`;
+          telemetryChart.setOption({
+            xAxis: { min: now - 30000, max: now },
+            yAxis: { min: 0, max: 1 },
+            series: [{ data: [] }, { data: [] }],
+            title: { show: true, textStyle: { color: '#8e9bb5', fontSize: 14 }, subtext: reason, subtextStyle:{color:'#f5a623'}, left: 'center', top: 'middle' }
+          });
+          anomalyChart.setOption({
+            xAxis: { min: now - 30000, max: now },
+            series: [{ data: [] }, { data: [], markLine: { silent:true, symbol:'none', data:[{yAxis:0.7}], label:{show:true, formatter:'0.7', color:'#ed3f14', fontSize:10, position:'end'} } }],
+            title: { show: true, textStyle: { color: '#8e9bb5', fontSize: 14 }, subtext: reason, subtextStyle:{color:'#f5a623'}, left: 'center', top: 'middle' }
+          });
+          return;
+        }
+        // 有数据时清除可能残留的提示 title
+        telemetryChart.setOption({ title: { show: false } });
+        anomalyChart.setOption({ title: { show: false } });
+
+        const teleData = chData.telemetry;
+        const scoreData = chData.scores;
+
+        // 联动健康度评分
+        updateHealthScore(scoreData);
+
+        // 时间戳转为 [timestamp, value, idx] 格式
+        const startIdx = block.startIdx || 0;
+        const teleTime = toTimeData(teleData, startIdx);
+        const scoreTime = toTimeData(scoreData, startIdx);
+
+        // TTM-R3 预测 — 只在新块时请求
+        if (state.currentBlock !== lastForecastBlockIdx) {
+          lastForecastBlockIdx = state.currentBlock;
+          // 传给预测函数的是 [idx, value] 格式
+          const teleForPredict = teleTime.map(p => [p[2], p[1]]);
+          const result = await computePredict(teleForPredict);
+          // 预测数据转回 [timestamp, value, idx] 格式
+          const lastTs = teleData[teleData.length - 1][0];
+          const lastIdx = teleTime[teleTime.length - 1][2];
+          const interval = teleData.length > 1 ? teleData[teleData.length-1][0] - teleData[teleData.length-2][0] : 20;
+          cachedPredTele = result.predTele.map((p, i) => [lastTs + (i+1) * interval, p[1], lastIdx + 1 + i]);
+          cachedPredScores = result.predScores.map((p, i) => [lastTs + (i+1) * interval, p[1], lastIdx + 1 + i]);
+        }
+
+        const predTele = cachedPredTele;
+        const predScores = cachedPredScores;
+        
+        // 计算X轴范围（时间戳毫秒）
+        let xMin = 0, xMax = 100;
+        if (teleTime.length > 0) {
+          xMin = teleTime[0][0];
+          xMax = teleTime[teleTime.length - 1][0];
+        }
+        if (predTele.length > 0) {
+          xMax = predTele[predTele.length - 1][0];
+        }
+        // 限制显示窗口
+        const windowMs = DISPLAY_WINDOW_S * 1000;
+        if (xMax - xMin > windowMs) {
+          xMin = xMax - windowMs;
+        }
+
+        // 使用用户设定的固定Y轴范围
+        const yMinEl = document.getElementById('inputYMin');
+        const yMaxEl = document.getElementById('inputYMax');
+        const yMin = yMinEl ? parseFloat(yMinEl.value) || -1 : -1;
+        const yMax = yMaxEl ? parseFloat(yMaxEl.value) || 1 : 1;
+
+        // 更新遥测图
+        const predMarkLine = teleTime.length > 0 ? {
+          silent: true, symbol: 'none',
+          data: [{ xAxis: teleTime[teleTime.length - 1][0] }],
+          label: { show: true, formatter: '预测起点', color: '#f5a623', fontSize: 11, position: 'insideEndTop' }
+        } : undefined;
+
+        telemetryChart.setOption({
+            xAxis: { min: xMin, max: xMax },
+            yAxis: { min: yMin, max: yMax },
+            series: [
+                { data: teleTime },
+                { data: predTele, markLine: predMarkLine }
+            ]
+        });
+
+        // 更新异常分数图
+        const combinedScores = scoreTime.concat(predScores);
+        anomalyChart.setOption({
+            xAxis: { min: xMin, max: xMax },
+            series: [
+                { data: combinedScores },
+                { 
+                  data: [],
+                  markLine: { 
+                    silent: true, symbol: 'none', 
+                    data: [{ yAxis: 0.7 }],
+                    label: { show: true, formatter: '0.7', color: '#ed3f14', fontSize: 10, position: 'end' }
+                  }
+                }
+            ]
+        });
+      }
+
+      // ========== 按钮状态 ==========
+      function updateNavButtons() {
+        const total = state.blocks.length;
+        const cur = state.currentBlock;
+        document.getElementById('blockNavInfo').textContent = total > 0 ? `块 ${cur+1}/${total}` : '块 0/0';
+        document.getElementById('btnPrevBlock').disabled = (cur <= 0);
+        document.getElementById('btnNextBlock').disabled = (cur >= total - 1 || total === 0);
+      }
+
+      function updateControlButtons() {
+        const btn = document.getElementById('btnPlayPause');
+        const resetBtn = document.getElementById('btnReset');
+        if (state.playing) {
+          btn.textContent = '⏸️ 暂停';
+          btn.className = 'btn btn-pause';
+          resetBtn.disabled = true;
+        } else {
+          btn.textContent = '▶ 开始';
+          btn.className = 'btn';
+          resetBtn.disabled = false;
+        }
+        updateNavButtons();
+      }
+
+      function updateHealthScore(scores) {
+        if (!scores || scores.length === 0) return;
+        const lastScore = scores[scores.length - 1][1] || 0;
+        const health = Math.max(0, Math.min(100, Math.round((1 - lastScore) * 100)));
+        const ring = document.getElementById('healthRing');
+        ring.textContent = health;
+        // 动态更新环形颜色：健康=绿色，警告=黄色，危险=红色
+        const deg = Math.round(health / 100 * 360);
+        let color = 'var(--accent-green)';
+        if (health < 60) color = 'var(--accent-red)';
+        else if (health < 80) color = 'var(--accent-yellow)';
+        ring.style.background = `conic-gradient(${color} 0deg ${deg}deg, #2a2f3a ${deg}deg 360deg)`;
+      }
+
+      // ========== 控制逻辑 ==========
+      function togglePlayPause() {
+        if (state.playing) {
+          state.playing = false;
+          if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+        } else {
+          // 校验：树中是否有至少一个带 sourceId 的传感器
+          const hasSensor = _anySensorInTree();
+          if (!hasSensor) {
+            alert('设备树中没有设置数据源的传感器，请先添加传感器并配置数据源');
+            return;
+          }
+          state.playing = true;
+          schedulePoll();
+        }
+        updateControlButtons();
+      }
+
+      // 遍历设备树，判断是否存在任意带 sourceId 的传感器节点
+      function _anySensorInTree() {
+        for (const d of deviceTreeData) {
+          if (d.sourceId) return true;
+          if (d.children) {
+            for (const c of d.children) {
+              if (c.sourceId) return true;
+            }
+          }
+        }
+        return false;
+      }
+
+      function resetStream() {
+        if (state.playing) return;
+        if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+        state.blocks = [];
+        state.currentBlock = -1;
+        state.sampleOffset = 0;
+        lastForecastBlockIdx = -1;
+        cachedPredTele = [];
+        cachedPredScores = [];
+        fetch('/api/reset', { method: 'POST' }).catch(() => {});
+        updateCharts();
+        updateNavButtons();
+        document.getElementById('chunkInfo').textContent = '就绪';
+        updateControlButtons();
+      }
+
+      function schedulePoll() {
+        if (!state.playing) return;
+        state.timer = setTimeout(async () => {
+          await fetchBlock();
+          if (state.playing) schedulePoll();
+        }, POLL_INTERVAL_S * 1000);
+      }
+
+      function prevBlock() {
+        if (state.playing || state.currentBlock <= 0) return;
+        state.currentBlock--;
+        updateCharts();
+        updateNavButtons();
+      }
+
+      function nextBlock() {
+        if (state.playing || state.currentBlock >= state.blocks.length - 1) return;
+        state.currentBlock++;
+        updateCharts();
+        updateNavButtons();
+      }
+
+      // ========== 设备树 CRUD + 拖拽 ==========
+      let draggedEl = null;
+
+      function genId() { return 'n_' + Date.now() + '_' + Math.random().toString(36).slice(2,6); }
+
+      function renderDeviceTree() {
+        const tree = document.getElementById('deviceTree');
+        tree.innerHTML = '';
+        deviceTreeData.forEach((dev, idx) => _renderNode(dev, tree, idx));
+
+        document.querySelectorAll('.del-btn').forEach(btn => {
+          btn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            const id = this.closest('.tree-item').dataset.device;
+            _deleteById(id);
+            renderDeviceTree();
+          });
+        });
+        document.querySelectorAll('.tree-item').forEach(item => {
+          item.addEventListener('click', function() {
+            document.querySelectorAll('.tree-item').forEach(el => el.classList.remove('active'));
+            this.classList.add('active');
+            state.selectedDevice = this.dataset.device;
+            // 切换设备时清除预测缓存，重新过滤图表
+            lastForecastBlockIdx = -1;
+            cachedPredTele = [];
+            cachedPredScores = [];
+            updateCharts();
+            // 切换传感器时立即拉取一次最新数据，确保图表即时刷新
+            // （非播放状态也拉一次，让用户即刻看到该传感器数据）
+            if (state.playing) {
+              fetchBlock();
+            } else {
+              fetchBlock();
+            }
+          });
+        });
+        const first = document.querySelector('.tree-item');
+        if (first && !document.querySelector('.tree-item.active')) first.classList.add('active');
+      }
+
+      function _deleteById(id) {
+        for (let i = 0; i < deviceTreeData.length; i++) {
+          if (deviceTreeData[i].id === id) { deviceTreeData.splice(i,1); return; }
+          if (deviceTreeData[i].children) {
+            deviceTreeData[i].children = deviceTreeData[i].children.filter(c => c.id !== id);
+          }
+        }
+      }
+
+      function _findById(id) {
+        for (const d of deviceTreeData) {
+          if (d.id === id) return d;
+          if (d.children) { const f = d.children.find(c => c.id === id); if (f) return f; }
+        }
+        return null;
+      }
+
+      function _renderNode(node, parent, idx) {
+        const li = document.createElement('li');
+        const icon = (node.children || node.type === 'folder') ? '📁' : '📡';
+        li.innerHTML = `<div class="tree-item" data-device="${node.id}" draggable="true">
+          <span class="status-dot"></span>${icon} ${node.name}
+          <span class="del-btn" title="删除">✕</span>
+        </div>`;
+        const div = li.querySelector('.tree-item');
+        div.addEventListener('dragstart', e => { draggedEl = node; div.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; });
+        div.addEventListener('dragend', () => div.classList.remove('dragging'));
+        div.addEventListener('dragover', e => { e.preventDefault(); div.classList.add('drag-over'); });
+        div.addEventListener('dragleave', () => div.classList.remove('drag-over'));
+        div.addEventListener('drop', function(e) {
+          e.preventDefault(); div.classList.remove('drag-over');
+          if (!draggedEl || draggedEl.id === node.id) return;
+          _deleteById(draggedEl.id);
+          if (node.children || node.type === 'folder') {
+            if (!node.children) node.children = [];
+            node.children.push(draggedEl);
+          } else {
+            _insertAtParent(draggedEl, node.id);
+          }
+          draggedEl = null;
+          renderDeviceTree();
+        });
+        if (node.children && node.children.length > 0) {
+          const ul = document.createElement('ul');
+          ul.style.paddingLeft = '20px';
+          node.children.forEach(child => _renderNode(child, ul));
+          li.appendChild(ul);
+        }
+        parent.appendChild(li);
+      }
+
+      function _insertAtParent(moved, beforeId) {
+        for (const d of deviceTreeData) {
+          if (d.id === beforeId) { const i = deviceTreeData.indexOf(d); deviceTreeData.splice(i, 0, moved); return; }
+          if (d.children) {
+            const idx = d.children.findIndex(c => c.id === beforeId);
+            if (idx >= 0) { d.children.splice(idx, 0, moved); return; }
+          }
+        }
+        deviceTreeData.push(moved);
+      }
+
+      // ========== 模态框 ==========
+      document.getElementById('btnNewSensor').addEventListener('click', () => {
+        document.getElementById('modalSensor').classList.add('open');
+      });
+      document.getElementById('btnNewFolder').addEventListener('click', () => {
+        document.getElementById('modalFolder').classList.add('open');
+      });
+      document.getElementById('confirmSensor').addEventListener('click', () => {
+        const name = document.getElementById('sensorName').value.trim() || '新传感器';
+        const desc = document.getElementById('sensorDesc').value.trim();
+        const src = document.getElementById('sensorSource').value;
+        const bs = parseInt(document.getElementById('sensorBlockSize').value) || 512;
+        const node = { id: genId(), name, description: desc, type: 'sensor', sourceId: src, blockSize: bs, channelName: sourceToChannel(src) };
+        deviceTreeData.push(node);
+        document.getElementById('modalSensor').classList.remove('open');
+        renderDeviceTree();
+        // 新建后自动选中并立即拉取，保证新建传感器可即时看到数据
+        state.selectedDevice = node.id;
+        lastForecastBlockIdx = -1;
+        cachedPredTele = [];
+        cachedPredScores = [];
+        fetchBlock();
+      });
+      document.getElementById('confirmFolder').addEventListener('click', () => {
+        const name = document.getElementById('folderName').value.trim() || '新文件夹';
+        deviceTreeData.push({ id: genId(), name, type: 'folder', children: [] });
+        document.getElementById('modalFolder').classList.remove('open');
+        renderDeviceTree();
+      });
+      document.querySelectorAll('.modal-overlay').forEach(ov => {
+        ov.addEventListener('click', function(e) { if (e.target === ov) ov.classList.remove('open'); });
+      });
+
+      // ========== 编辑传感器配置 ==========
+      let editingDeviceId = null;
+
+      function openEditSensorModal(deviceId) {
+        const node = _findById(deviceId);
+        if (!node) return;
+        editingDeviceId = deviceId;
+        document.getElementById('editSensorName').value = node.name || '';
+        document.getElementById('editSensorDesc').value = node.description || '';
+        document.getElementById('editSensorSource').value = node.sourceId || 'file:NASA-MSL/C-1';
+        document.getElementById('editSensorBlockSize').value = node.blockSize || 512;
+        document.getElementById('modalEditSensor').classList.add('open');
+      }
+
+      document.getElementById('confirmEditSensor').addEventListener('click', () => {
+        if (!editingDeviceId) return;
+        const node = _findById(editingDeviceId);
+        if (!node) return;
+        node.name = document.getElementById('editSensorName').value.trim() || node.name;
+        node.description = document.getElementById('editSensorDesc').value.trim();
+        const newSrc = document.getElementById('editSensorSource').value;
+        node.sourceId = newSrc;
+        node.channelName = sourceToChannel(newSrc);
+        node.blockSize = parseInt(document.getElementById('editSensorBlockSize').value) || 512;
+        document.getElementById('modalEditSensor').classList.remove('open');
+        editingDeviceId = null;
+        renderDeviceTree();
+        // 编辑后若当前选中的就是该传感器，清缓存并立即刷新
+        if (state.selectedDevice === node.id) {
+          lastForecastBlockIdx = -1;
+          cachedPredTele = [];
+          cachedPredScores = [];
+          fetchBlock();
+        }
+      });
+
+      // 双击树节点打开编辑
+      document.getElementById('deviceTree').addEventListener('dblclick', (e) => {
+        const item = e.target.closest('.tree-item');
+        if (item) openEditSensorModal(item.dataset.device);
+      });
+
+      // ========== 保存配置 ==========
+      document.getElementById('btnSaveConfig').addEventListener('click', async () => {
+        try {
+          await fetch('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_tree: deviceTreeData })
+          });
+          alert('配置已保存');
+        } catch(e) { alert('保存失败: ' + e); }
+      });
+
+      // ========== 按钮事件 ==========
+      document.getElementById('btnPlayPause').addEventListener('click', togglePlayPause);
+      document.getElementById('btnReset').addEventListener('click', resetStream);
+      document.getElementById('btnPrevBlock').addEventListener('click', prevBlock);
+      document.getElementById('btnNextBlock').addEventListener('click', nextBlock);
+
+      // 窗口 resize
+      window.addEventListener('resize', () => {
+        telemetryChart?.resize();
+        anomalyChart?.resize();
+      });
+
+      // ========== 初始化 ==========
+      async function init() {
+        initCharts();
+        updateControlButtons();
+        // 立即显示本地时间，避免闪烁
+        const pad = n => String(n).padStart(2, '0');
+        const now = new Date();
+        document.getElementById('utcTime').textContent = 
+          `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+        // 从服务端加载设备树配置
+        await fetchConfig();
+        renderDeviceTree();
+        // 本地时钟
+        setInterval(() => {
+          const d = new Date();
+          document.getElementById('utcTime').textContent = 
+            `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+        }, 1000);
+        // 链路状态：基于实际连接情况更新
+        setInterval(() => {
+          const dot = document.getElementById('linkDot');
+          const text = document.getElementById('linkText');
+          // 检查最近一次 poll 是否成功（通过 state.playing 和 timer 判断）
+          if (state.playing && state.timer) {
+            dot.classList.remove('loss');
+            text.textContent = '天地链路 正常';
+          } else if (!state.playing && state.blocks.length === 0) {
+            dot.classList.remove('loss');
+            text.textContent = '天地链路 待连接';
+          }
+        }, 3000);
+      }
+
+      async function fetchConfig() {
+        try {
+          const resp = await fetch('/api/config?t=' + Date.now());
+          const cfg = await resp.json();
+          if (cfg.device_tree && cfg.device_tree.length > 0) {
+            // 用服务端配置替换硬编码数据
+            deviceTreeData.length = 0;
+            cfg.device_tree.forEach(node => deviceTreeData.push(node));
+          }
+          // 为存量节点补齐 channelName / blockSize（兼容旧配置）
+          for (const d of deviceTreeData) {
+            if (d.sourceId && !d.channelName) d.channelName = sourceToChannel(d.sourceId);
+            if (d.sourceId && !d.blockSize) d.blockSize = 512;
+            if (d.children) {
+              for (const c of d.children) {
+                if (c.sourceId && !c.channelName) c.channelName = sourceToChannel(c.sourceId);
+                if (c.sourceId && !c.blockSize) c.blockSize = 512;
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('加载配置失败，使用默认设备树:', e);
+        }
+      }
+
+      init();
+    })();
+  </script>
+</body>
+</html>

@@ -68,8 +68,9 @@ class TrendForecaster:
             train_values_for_scaler: np.ndarray or None — for StandardScaler fitting
 
         Returns:
-            context: np.ndarray [CONTEXT_LENGTH] — the input window (standardized)
-            prediction: np.ndarray [PREDICTION_LENGTH] — forecasted values (standardized)
+            context_raw: np.ndarray [CONTEXT_LENGTH] — the input window in **original** scale
+            prediction_raw: np.ndarray [PREDICTION_LENGTH] — forecasted values in **original** scale
+            scaler: the fitted StandardScaler (for additional inverse_transform if needed)
         """
         # Standardize
         if train_values_for_scaler is not None:
@@ -83,10 +84,10 @@ class TrendForecaster:
             scaled = np.concatenate(
                 [np.zeros(CONTEXT_LENGTH - len(scaled), dtype=np.float32), scaled]
             )
-        context = scaled[-CONTEXT_LENGTH:]
+        context_scaled = scaled[-CONTEXT_LENGTH:]
 
         # Build DataFrame for pipeline
-        df = pd.DataFrame({"x": context})
+        df = pd.DataFrame({"x": context_scaled})
         df["timestamp"] = pd.date_range("2020-01-01", periods=CONTEXT_LENGTH, freq="s")
 
         tsp = TimeSeriesPreprocessor(
@@ -105,6 +106,14 @@ class TrendForecaster:
 
         forecasts = fpipe(df)
         pred_raw = forecasts["x_prediction"].iloc[0]
-        prediction = np.array(pred_raw, dtype=np.float32).flatten()[-PREDICTION_LENGTH:]
+        prediction_scaled = np.array(pred_raw, dtype=np.float32).flatten()[-PREDICTION_LENGTH:]
 
-        return context, prediction
+        # Inverse-transform to original scale so curves align with telemetry
+        context_raw = scaler.inverse_transform(
+            context_scaled.reshape(-1, 1)
+        ).flatten().astype(np.float32)
+        prediction_raw = scaler.inverse_transform(
+            prediction_scaled.reshape(-1, 1)
+        ).flatten().astype(np.float32)
+
+        return context_raw, prediction_raw, scaler
