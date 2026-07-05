@@ -1,11 +1,14 @@
-"""Anomaly detection module using TSPulse (zero-shot reconstruction-based).
+"""Anomaly detection plugin — TSPulse (zero-shot reconstruction-based).
 
-This module wraps the TSPulse pre-trained model to provide real-time anomaly
-scoring on telemetry channels. It is designed to simulate the "space segment"
-(lightweight on-orbit inference) in the space-ground collaborative architecture.
+Migrated verbatim from the legacy ``ground/anomaly_detection.py``.  The
+class name (``AnomalyDetector``) and method signature are unchanged so
+existing import sites keep working.
 """
 
+from __future__ import annotations
+
 import os
+
 import numpy as np
 import pandas as pd
 import torch
@@ -17,19 +20,21 @@ from tsfm_public.toolkit.time_series_anomaly_detection_pipeline import (
     AnomalyScoreMethods,
 )
 
-# Model constants
+from .base import BaseDetector
+
+# Model constants — preserved for backwards-compatible ``from ... import
+# CONTEXT_LENGTH`` callers (e.g. ground/tests/test_models.py).
 DEFAULT_MODEL = "ibm-granite/granite-timeseries-tspulse-r1"
 CONTEXT_LENGTH = 512
 
 
-class AnomalyDetector:
+class AnomalyDetector(BaseDetector):
     """TSPulse-based anomaly detector for single-channel telemetry.
 
     Args:
         device: "cuda" or "cpu"
         model_path: HuggingFace model name or local directory path.
                    If None, uses the default online model.
-                   For fine-tuned models, pass the local checkpoint directory.
         model_revision: HuggingFace revision (ignored if model_path is local)
 
     Usage:
@@ -120,3 +125,6 @@ class AnomalyDetector:
         if len(scores) > len(values):
             scores = scores[-len(values):]
         return scores
+
+
+__all__ = ["AnomalyDetector", "DEFAULT_MODEL", "CONTEXT_LENGTH"]

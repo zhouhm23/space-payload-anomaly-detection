@@ -43,7 +43,7 @@ class TestAnomalyDetector:
 
     @pytest.mark.slow
     def test_detector_loads(self):
-        from anomaly_detection import AnomalyDetector
+        from phm.algorithm import AnomalyDetector
 
         detector = AnomalyDetector(device="cpu")
         assert detector.n_params > 0
@@ -51,7 +51,7 @@ class TestAnomalyDetector:
 
     @pytest.mark.slow
     def test_detect_returns_scores(self, sample_channel):
-        from anomaly_detection import AnomalyDetector
+        from phm.algorithm import AnomalyDetector
 
         detector = AnomalyDetector(device="cpu")
         ts = sample_channel["test_ts"][:1024].astype(np.float32)
@@ -65,7 +65,7 @@ class TestAnomalyDetector:
     @pytest.mark.slow
     def test_detect_short_input(self, sample_channel):
         """Detector should handle input shorter than CONTEXT_LENGTH."""
-        from anomaly_detection import AnomalyDetector
+        from phm.algorithm import AnomalyDetector
 
         detector = AnomalyDetector(device="cpu")
         ts = sample_channel["test_ts"][:256].astype(np.float32)  # < 512
@@ -76,7 +76,7 @@ class TestAnomalyDetector:
     @pytest.mark.slow
     def test_scores_nonnegative(self, sample_channel):
         """Anomaly scores should be non-negative."""
-        from anomaly_detection import AnomalyDetector
+        from phm.algorithm import AnomalyDetector
 
         detector = AnomalyDetector(device="cpu")
         ts = sample_channel["test_ts"][:1024].astype(np.float32)
@@ -93,14 +93,14 @@ class TestTrendForecaster:
 
     @pytest.mark.slow
     def test_forecaster_loads(self):
-        from forecasting import TrendForecaster
+        from phm.algorithm import TrendForecaster
 
         forecaster = TrendForecaster(device="cpu")
         assert forecaster.n_params > 0
 
     @pytest.mark.slow
     def test_forecast_returns_correct_lengths(self, sample_channel):
-        from forecasting import TrendForecaster, CONTEXT_LENGTH, PREDICTION_LENGTH
+        from phm.algorithm import TrendForecaster, CONTEXT_LENGTH, PREDICTION_LENGTH
 
         forecaster = TrendForecaster(device="cpu")
         ts = sample_channel["test_ts"][:1024].astype(np.float32)
@@ -115,7 +115,7 @@ class TestTrendForecaster:
     @pytest.mark.slow
     def test_forecast_short_input_padded(self, sample_channel):
         """Forecaster should pad input shorter than CONTEXT_LENGTH."""
-        from forecasting import TrendForecaster, CONTEXT_LENGTH
+        from phm.algorithm import TrendForecaster, CONTEXT_LENGTH
 
         forecaster = TrendForecaster(device="cpu")
         ts = sample_channel["test_ts"][:100].astype(np.float32)  # << 512

@@ -49,7 +49,7 @@ DAQ_CONFIG = {
     "channels": [
         # Each entry: {id, source_id, loop, signal_freq_hz(optional), enabled}
         {"id": 0, "source_id": "file:NASA-MSL/C-1",   "loop": True,  "enabled": True},
-        {"id": 1, "source_id": "file:NASA-MSL/D-14",  "loop": True,  "enabled": False},
+        {"id": 1, "source_id": "file:NASA-MSL/D-14",  "loop": True,  "enabled": True},
         {"id": 2, "source_id": "virtual:sine",         "loop": False, "signal_freq_hz": 2.0, "enabled": True},
         {"id": 3, "source_id": "virtual:multi_sine",   "loop": False, "signal_freq_hz": 5.0, "enabled": True},
     ],

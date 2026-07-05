@@ -8,26 +8,39 @@ displays telemetry and runs trend forecasting for early warning.
 ## Architecture
 
 ```
-┌─────────── Space Segment (on-orbit) ───────────┐
-│  Independent process — deployable to edge HW    │
-│                                                 │
-│  SensorSource → Preprocess → TSPulse Detect     │
-│  (DAQ card)    (impute+norm)  (anomaly score)   │
-│                                                 │
-│        TCP Server (0.0.0.0:9876)                │
-│        Receives config / sends telemetry+alerts │
-└─────────────────────────────────────────────────┘
-                    │ TCP (WiFi)
-                    ▼
-┌─────────── Ground Segment (ground station) ────┐
-│  Independent process — runs on PC               │
-│                                                 │
-│  TCP Client → Streamlit UI → TTM-R3 Forecast    │
-│  (polls space)  (waveform+alerts)  (96-step)    │
-│                                                 │
-│  Sidebar controls space: source/channel/noise   │
-└─────────────────────────────────────────────────┘
+┌─────────── Space Segment (on-orbit lightweight detection) ───────────┐
+│  Independent process — deployable to edge HW                         │
+│  4-channel DAQ (MSL C-1 / MSL D-14 / sine / multi_sine)              │
+│                                                                      │
+│  SensorSource → Preprocess → TSPulse Detect                          │
+│  (DAQ card)    (impute+norm)  (anomaly score — drives telemetry chart)│
+│                                                                      │
+│        TCP Server (0.0.0.0:9876)                                     │
+│        Receives config / sends telemetry + scores + alerts           │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │ TCP (JSON per line)
+┌──────────────────────────────▼ Ground Segment (forecast + viz) ──────┐
+│  Independent process — FastAPI :8501                                 │
+│                                                                      │
+│  phm/database/   RingBuffer + AlertStore + WarningStore              │
+│  phm/dataops/    reuse space preprocessing + feature plugin iface    │
+│  phm/algorithm/  TSPulse (joint detect) + TTM-R3 (forecast)          │
+│  phm/services/   warning state-machine:                              │
+│                  measured+forecast → joint detect → predict-segment   │
+│                  scores → threshold → pending → confirmed/false       │
+│  phm/api/        8 endpoints (poll/forecast/config/reset             │
+│                          + health/alerts/warnings/sensors)           │
+│                                                                      │
+│  Vue3 + Vite + ECharts frontend  (src/ground/frontend/)              │
+│  ← telemetry waveform + anomaly score + TTM forecast dashed overlay  │
+│  ← dashboard cards / alert bar / warning bar (3-state) / health ring │
+└──────────────────────────────────────────────────────────────────────┘
 ```
+
+The ground warning pipeline keeps **telemetry anomaly scores** (from
+space-side TSPulse) and **forecast-derived warning scores** (from the
+ground-side joint detect on measured+predicted) on separate paths, so
+forecast data never contaminates the measured anomaly display.
 
 ## Quick Start
 
@@ -53,49 +66,76 @@ DAQ_CONFIG = {
 
 See available sources: `python -c "from space.sensor_source import list_all_sources; [print(s['id']) for s in list_all_sources()]"`
 
-### 2. Ground Segment (ECharts HTML frontend)
+### 2. Ground Segment (FastAPI + Vue3 frontend)
 
 ```bash
-python ground/server.py
+python ground/server.py        # serves API on :8501 + static frontend/dist
 ```
 
-Open `http://localhost:8501`.  The HTML frontend provides:
+Open `http://localhost:8501`.  Build the frontend first:
 
-- **Device tree** — create/edit sensors and racks, drag-and-drop, save config
-- **Telemetry charts** — ECharts real-time waveforms + anomaly scores
-- **Alerts & early warnings** — TSPulse detection + TTM-R3 forecast cascade
+```bash
+cd ground/frontend && npm install && npm run build    # outputs dist/
+```
+
+For hot-reload dev mode (proxies `/api` to :8501):
+
+```bash
+cd ground/frontend && npm run dev    # → http://localhost:5173
+```
+
+The Vue3 frontend provides:
+
+- **Device tree** — create/edit sensors and racks, drag-and-drop, persisted via `/api/config`
+- **Telemetry & anomaly charts** — ECharts real-time waveforms + 0.7 threshold + TTM-R3 forecast dashed overlay
+- **Dashboard cards** — per-sensor latest value / score / health, click to switch main chart source
+- **Alert bar** — measured anomalies (score > 0.7) from space-side TSPulse
+- **Warning bar** — forecast-derived early warnings with pending/confirmed/false lifecycle
 
 ### 3. (Legacy) Streamlit frontend
 
 ```bash
-streamlit run ground/app.py   # alternative ground UI
+streamlit run ground/app.py   # alternative ground UI (uses phm.algorithm under the hood)
 ```
 
 ## Directory Structure
 
 ```
 src/
-├── space/                     Space segment (self-contained)
-│   ├── main.py                Entry CLI: python -m space.main
+├── space/                     Space segment (self-contained, on-orbit)
+│   ├── main.py                Entry CLI: python -m space.main (DAQ_CONFIG: 4 channels)
 │   ├── preprocessing.py       Impute + normalize (no filtering)
 │   ├── sensor_source.py       Simulated DAQ (dataset replay / synthetic)
 │   ├── comm.py                TCP server
 │   ├── data_loader.py         NASA-SMAP/MSL data loading
-│   ├── anomaly_detection.py   TSPulse anomaly detection (direct MSE, per-point)
+│   ├── anomaly_detection.py   TSPulse anomaly detection (space-side copy)
 │   └── tests/
-├── ground/                    Ground segment (self-contained)
-│   ├── server.py              FastAPI: serves HTML + TCP bridge
-│   ├── app.py                 Legacy Streamlit entry
-│   ├── 空间站有效载荷…html     ECharts frontend
-│   ├── settings.json          Persisted settings
+├── ground/                    Ground segment
+│   ├── server.py              FastAPI entry: serves frontend/dist + includes phm routers
+│   ├── app.py                 Legacy Streamlit entry (imports phm.algorithm)
 │   ├── comm.py                TCP client (polls space + sends config)
-│   ├── forecasting.py         TTM-R3 trend forecasting
-│   ├── i18n.py                Bilingual (zh/en) text
 │   ├── data_loader.py         NASA data loading
-│   ├── anomaly_detection.py   TSPulse detection (reused on ground)
+│   ├── i18n.py                Bilingual (zh/en) text
+│   ├── settings.json          Persisted settings
+│   ├── device_config.json     Persisted device tree
+│   ├── frontend/              Vue3 + Vite + ECharts frontend工程
+│   │   ├── src/{api,stores,composables,components,views,styles,layers}/
+│   │   ├── tests/uat/         Playwright UAT (10-step user acceptance)
+│   │   └── dist/              Build output (git-ignored, served by server.py)
+│   ├── phm/                   ★ Four-layer PHM architecture
+│   │   ├── database/          RingBuffer + AlertStore + WarningStore (real-time)
+│   │   ├── dataops/           Reuse space preprocessing + feature plugin iface
+│   │   ├── algorithm/         TSPulse (tspulse.py) + TTM-R3 (ttm.py) + base ABC
+│   │   ├── model/             Model registry (placeholder, not implemented)
+│   │   ├── services/          telemetry/forecast/health/alert/warning/config
+│   │   ├── api/               8 FastAPI routers + deps container
+│   │   ├── config.py          Thresholds (ANOMALY_THRESHOLD=0.7, etc.)
+│   │   └── tests/             Layer unit tests (health formula, warning lifecycle)
 │   └── tests/
+│       ├── test_i18n.py
+│       └── test_models.py     (imports phm.algorithm)
 ├── tests/
-│   └── test_e2e.py            End-to-end integration test
+│   └── test_e2e.py            End-to-end integration test (golden values)
 ├── .conda-env/                Shared conda environment
 ├── .hf_cache/                 Model weight cache (git-ignored)
 ├── pytest.ini

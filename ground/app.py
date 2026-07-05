@@ -226,7 +226,7 @@ DEFAULT_DISPLAY_WINDOW = 512   # visible samples on oscilloscope
 # ---------------------------------------------------------------------------
 @st.cache_resource
 def _load_forecaster():
-    from forecasting import TrendForecaster
+    from phm.algorithm import TrendForecaster
     return TrendForecaster(device="cpu")
 
 

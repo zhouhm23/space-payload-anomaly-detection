@@ -1,12 +1,13 @@
-"""Forecasting module using TTM-R3 (zero-shot prediction).
+"""Forecasting plugin — TTM-R3 (zero-shot prediction).
 
-This module wraps the TTM-R3 pre-trained model to provide future value
-forecasting for telemetry channels. It is designed to simulate the "ground
-segment" (deeper analysis with prediction capability) in the space-ground
-collaborative architecture.
+Migrated verbatim from the legacy ``ground/forecasting.py``.  The class
+name (``TrendForecaster``) and method signature are unchanged.
 """
 
+from __future__ import annotations
+
 import os
+
 import numpy as np
 import pandas as pd
 import torch
@@ -18,13 +19,15 @@ from tsfm_public.toolkit.time_series_forecasting_pipeline import (
 )
 from tsfm_public.toolkit.time_series_preprocessor import TimeSeriesPreprocessor
 
-# Model constants
+from .base import BaseForecaster
+
+# Model constants — preserved for backwards-compatible imports.
 DEFAULT_MODEL = "ibm-research/ttm-r3"
 CONTEXT_LENGTH = 512
 PREDICTION_LENGTH = 96
 
 
-class TrendForecaster:
+class TrendForecaster(BaseForecaster):
     """TTM-R3-based forecaster for single-channel telemetry.
 
     Args:
@@ -117,3 +120,6 @@ class TrendForecaster:
         ).flatten().astype(np.float32)
 
         return context_raw, prediction_raw, scaler
+
+
+__all__ = ["TrendForecaster", "DEFAULT_MODEL", "CONTEXT_LENGTH", "PREDICTION_LENGTH"]

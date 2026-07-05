@@ -240,7 +240,7 @@ class TestE2E:
         # Set offline env before loading model (avoids SSL errors)
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["HF_HOME"] = os.path.join(_SRC, ".hf_cache")
-        from ground.forecasting import TrendForecaster
+        from ground.phm.algorithm import TrendForecaster
         f = TrendForecaster(device="cpu")
         raw = telemetry[-1].raw_values
         assert len(raw) >= 512
