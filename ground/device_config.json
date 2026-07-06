@@ -14,9 +14,9 @@
       "name": "SMAP测试传感器",
       "description": "",
       "type": "sensor",
-      "sourceId": "virtual:multi_sine",
+      "sourceId": "file:NASA-MSL/D-14",
       "blockSize": 512,
-      "channelName": "VS-multi_sine"
+      "channelName": "D-14"
     },
     {
       "id": "n_1783178646041_coo3",

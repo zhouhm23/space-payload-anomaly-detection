@@ -1,18 +1,24 @@
 """Shared dependency container.
 
-Holds the singletons (RingBuffer, AlertStore, WarningStore, services) so
-that every route touches the same in-memory state.  ``init()`` is called
-once from ``server.py`` at startup with runtime parameters (host/port,
-config path).
+Holds the singletons (RingBuffer, AlertStore, WarningStore, SQLiteStore,
+CascadeDetector, services) so that every route touches the same in-memory
++ persistent state.  ``init()`` is called once from ``server.py`` at
+startup with runtime parameters (host/port, config path).
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..database import RingBuffer
+from ..config import (
+    SQLITE_ENABLED, SQLITE_BATCH_SIZE, SQLITE_FLUSH_INTERVAL,
+    L1_CONSTANT_STD, L1_SIGMA_K, L1_IQR_FACTOR,
+    L3_CONSTANT_STD, L3_RANGE_BOOST, L3_RATE_BOOST,
+)
+from ..database import RingBuffer, SQLiteStore
 from ..database.alert_store import AlertStore
 from ..database.warning_store import WarningStore
 from ..services.alert_service import AlertService
@@ -22,12 +28,15 @@ from ..services.health_service import HealthService
 from ..services.telemetry_service import TelemetryService
 from ..services.warning_service import WarningService
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class Container:
     ring: RingBuffer
     alerts: AlertStore
     warnings: WarningStore
+    sqlite: SQLiteStore
     telemetry: TelemetryService
     forecast: ForecastService
     health: HealthService
@@ -45,6 +54,7 @@ def init(
     space_port: int = 9876,
     config_path: Path | None = None,
     device: str = "cpu",
+    db_path: Path | None = None,
 ) -> Container:
     global _container
     ring = RingBuffer()
@@ -54,17 +64,29 @@ def init(
     if config_path is None:
         config_path = Path(__file__).resolve().parent.parent.parent / "device_config.json"
 
+    if db_path is None:
+        db_path = Path(__file__).resolve().parent.parent.parent / "data" / "phm.db"
+
+    sqlite = SQLiteStore(
+        db_path,
+        batch_size=SQLITE_BATCH_SIZE,
+        flush_interval=SQLITE_FLUSH_INTERVAL,
+        enabled=SQLITE_ENABLED,
+    )
+    sqlite.start()
+
     forecast = ForecastService(device=device)
-    telemetry = TelemetryService(ring, alerts, space_host, space_port)
+    telemetry = TelemetryService(ring, alerts, sqlite, space_host, space_port)
     health = HealthService(ring)
-    alert_service = AlertService(alerts)
-    warning_service = WarningService(ring, warnings, forecast)
+    alert_service = AlertService(alerts, sqlite)
+    warning_service = WarningService(ring, warnings, forecast, sqlite)
     config = ConfigService(config_path, space_host, space_port)
 
     _container = Container(
         ring=ring,
         alerts=alerts,
         warnings=warnings,
+        sqlite=sqlite,
         telemetry=telemetry,
         forecast=forecast,
         health=health,
@@ -81,4 +103,12 @@ def get() -> Container:
     return _container
 
 
-__all__ = ["Container", "init", "get"]
+def shutdown() -> None:
+    """Flush and close the SQLite store (call on app shutdown)."""
+    global _container
+    if _container is not None:
+        _container.sqlite.close()
+    _container = None
+
+
+__all__ = ["Container", "init", "get", "shutdown"]

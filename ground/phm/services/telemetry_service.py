@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 
-from ..database import RingBuffer
+from ..database import RingBuffer, SQLiteStore
 from ..database.alert_store import AlertStore
 
 logger = logging.getLogger(__name__)
@@ -28,17 +28,19 @@ from comm import GroundClient, TelemetryPacket, AlertPacket  # noqa: E402
 
 
 class TelemetryService:
-    """Polls the space TCP server, ingests into RingBuffer + AlertStore."""
+    """Polls the space TCP server, ingests into RingBuffer + AlertStore + SQLite."""
 
     def __init__(
         self,
         ring: RingBuffer,
         alerts: AlertStore,
+        sqlite: SQLiteStore | None = None,
         space_host: str = "127.0.0.1",
         space_port: int = 9876,
     ) -> None:
         self.ring = ring
         self.alerts = alerts
+        self.sqlite = sqlite
         self.space_host = space_host
         self.space_port = space_port
 
@@ -57,6 +59,13 @@ class TelemetryService:
         # Persist into ring buffer
         self.ring.ingest(channel_entries)
         self.alerts.extend(alerts_list)
+
+        # Persist into SQLite (async batch — non-blocking)
+        if self.sqlite is not None:
+            for ch, entries in channel_entries.items():
+                self.sqlite.enqueue_telemetry_batch(entries)
+            for alert in alerts_list:
+                self.sqlite.enqueue_alert(alert)
 
         # Slice latest block per channel for the response
         channels = self.ring.snapshot_block(block_size)

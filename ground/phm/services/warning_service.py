@@ -24,9 +24,15 @@ import time
 
 import numpy as np
 
-from ..algorithm import BaseDetector
-from ..config import ANOMALY_THRESHOLD, FORECAST_PREDICTION_LENGTH
-from ..database import RingBuffer
+from ..algorithm import BaseDetector, CascadeDetector
+from ..algorithm.classic_filter import ClassicFilter
+from ..algorithm.physical_constraint import ConstraintConfig, PhysicalConstraint
+from ..config import (
+    ANOMALY_THRESHOLD, FORECAST_PREDICTION_LENGTH,
+    L1_CONSTANT_STD, L1_SIGMA_K, L1_IQR_FACTOR,
+    L3_CONSTANT_STD, L3_RANGE_BOOST, L3_RATE_BOOST,
+)
+from ..database import RingBuffer, SQLiteStore
 from ..database.warning_store import WarningStore
 from .forecast_service import ForecastService
 
@@ -41,17 +47,21 @@ class WarningService:
         ring: RingBuffer,
         warnings: WarningStore,
         forecast_service: ForecastService,
+        sqlite: SQLiteStore | None = None,
         detector: BaseDetector | None = None,
         threshold: float = ANOMALY_THRESHOLD,
     ) -> None:
         self.ring = ring
         self.warnings = warnings
         self.forecast_service = forecast_service
+        self.sqlite = sqlite
         self._detector: BaseDetector | None = detector
         self._detector_init_failed = False
         self.threshold = threshold
         # Cache latest predict scores per channel for chart display
         self._latest_predict_scores: dict[str, dict] = {}
+        # Cache latest cascade output per channel (for /api/detection)
+        self._latest_cascade: dict[str, object] = {}
 
     # -- detector lazy load -------------------------------------------------
 
@@ -62,9 +72,28 @@ class WarningService:
             return None
         try:
             from ..algorithm import AnomalyDetector
-            self._detector = AnomalyDetector(device="cpu")
+            base_detector = AnomalyDetector(device="cpu")
+            # Wrap in three-layer cascade
+            classic = ClassicFilter(
+                constant_std=L1_CONSTANT_STD,
+                sigma_k=L1_SIGMA_K,
+                iqr_factor=L1_IQR_FACTOR,
+            )
+            constraint = PhysicalConstraint(
+                ConstraintConfig(
+                    constant_std=L3_CONSTANT_STD,
+                    range_boost=L3_RANGE_BOOST,
+                    rate_boost=L3_RATE_BOOST,
+                )
+            )
+            self._detector = CascadeDetector(
+                detector=base_detector,
+                classic=classic,
+                constraint=constraint,
+            )
+            logger.info("Ground cascade detector ready (TSPulse + L1 + L3)")
         except Exception as e:
-            logger.warning("Failed to load ground TSPulse detector: %s", e)
+            logger.warning("Failed to load ground cascade detector: %s", e)
             self._detector_init_failed = True
             return None
         return self._detector
@@ -91,13 +120,22 @@ class WarningService:
             return None
         prediction = np.array(fc_result["prediction"], dtype=np.float32)
 
-        # 3. Combined detect
+        # 3. Combined detect (three-layer cascade)
         detector = self._get_detector()
         if detector is None:
             return None
         try:
             combined = np.concatenate([raw_values, prediction]).astype(np.float32)
-            scores_all = detector.detect(combined)
+            if isinstance(detector, CascadeDetector):
+                cascade_out = detector.detect_with_layers(
+                    combined, channel=channel
+                )
+                scores_all = cascade_out.final_scores
+                self._latest_cascade[channel] = cascade_out
+                if self.sqlite is not None:
+                    self.sqlite.enqueue_detection(channel, last_ts, cascade_out)
+            else:
+                scores_all = detector.detect(combined)
         except Exception:
             logger.warning("Ground combined detect failed for %s", channel, exc_info=True)
             return None
@@ -159,9 +197,14 @@ class WarningService:
         """Return cached predict scores for a channel, or None."""
         return self._latest_predict_scores.get(channel)
 
+    def get_latest_cascade(self, channel: str):
+        """Return the latest CascadeOutput for a channel, or None."""
+        return self._latest_cascade.get(channel)
+
     def clear(self) -> None:
         self.warnings.clear()
         self._latest_predict_scores.clear()
+        self._latest_cascade.clear()
 
 
 __all__ = ["WarningService"]

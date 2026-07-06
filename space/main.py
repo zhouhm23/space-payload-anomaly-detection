@@ -118,6 +118,13 @@ def main():
         logger.info("TSPulse loaded (%d params)", detector.n_params)
     except Exception as e:
         logger.warning("Detection disabled: %s", e)
+
+    # Layer-1 classic filter — lightweight pre-screening before TSPulse.
+    # Constant channels (std < ε) are skipped to save a full forward pass.
+    from classic_filter import SpaceClassicFilter
+    l1_filter = SpaceClassicFilter()
+    logger.info("Layer-1 classic filter enabled (constant_std=%s)",
+                l1_filter.constant_std)
     # Device tree (synced from ground, enriches telemetry with display names)
     device_tree: list = []
     tree_lock = __import__('threading').Lock()
@@ -161,9 +168,27 @@ def main():
 
                 cleaned = pp.transform(raw) if pp._scaler is not None else pp.fit_transform(raw)
                 scores = None
-                if detector is not None:
+                l1_decision = "pass"
+                l1_detail: dict = {}
+
+                # --- Layer 1: classic pre-filter ---------------------------
+                try:
+                    imputed = pp._impute(raw.astype(np.float64)).astype(np.float32)
+                    l1_decision, l1_detail = l1_filter.check(imputed)
+                except Exception:
+                    logger.warning("L1 filter failed ch[%d]", ch_ids[i], exc_info=True)
+                    l1_detail = {"error": "l1_failed"}
+
+                # --- Layer 2: TSPulse (skipped for constant channels) -------
+                if l1_decision == "skip":
+                    # Constant / broken channel — force score=None, skip TSPulse
+                    scores = None
+                    if step == 0:
+                        logger.info("ch[%d] %s: L1 skip (%s), TSPulse skipped",
+                                    ch_ids[i], src.channel_name,
+                                    l1_detail.get("reason", "?"))
+                elif detector is not None:
                     try:
-                        imputed = pp._impute(raw.astype(np.float64)).astype(np.float32)
                         scores = detector.detect(imputed)
                     except Exception:
                         logger.warning("Detection failed ch[%d]", ch_ids[i], exc_info=True)
@@ -192,6 +217,8 @@ def main():
                     step=step,
                     exhausted=src.exhausted,
                     tree_meta=_tree_meta,
+                    l1_decision=l1_decision,
+                    l1_detail=l1_detail,
                 )
 
                 if scores is not None and len(scores) > 0:

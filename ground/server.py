@@ -57,6 +57,7 @@ async def _startup() -> None:
         alerts_router,
         warnings_router,
         sensors_router,
+        history_router,
     )
     for r in (
         poll_router,
@@ -67,8 +68,16 @@ async def _startup() -> None:
         alerts_router,
         warnings_router,
         sensors_router,
+        history_router,
     ):
         app.include_router(r)
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    from phm.api import deps
+    deps.shutdown()
+    logger.info("PHM deps shut down (SQLite flushed)")
 
 
 # ---- Static frontend ----
