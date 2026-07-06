@@ -14,9 +14,9 @@
       "name": "SMAP测试传感器",
       "description": "",
       "type": "sensor",
-      "sourceId": "file:NASA-SMAP/E-1",
+      "sourceId": "virtual:multi_sine",
       "blockSize": 512,
-      "channelName": "E-1"
+      "channelName": "VS-multi_sine"
     },
     {
       "id": "n_1783178646041_coo3",
