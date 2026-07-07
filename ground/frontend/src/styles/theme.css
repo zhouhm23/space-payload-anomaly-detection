@@ -340,7 +340,7 @@ body {
   border-top: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
-  flex: 1;
+  flex: 1.4;
   min-height: 0;
   overflow: hidden;
 }
@@ -352,6 +352,7 @@ body {
   background: var(--bg-card);
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
+  overflow: hidden;
 }
 .btn {
   background: var(--border-color);
@@ -387,10 +388,21 @@ body {
   user-select: none;
 }
 .chunk-info {
-  margin-left: auto;
   font-family: var(--font-mono);
   font-size: 0.85rem;
   color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+  width: 224px;
+  text-align: right;
+}
+.control-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 .chart-row {
   display: flex;

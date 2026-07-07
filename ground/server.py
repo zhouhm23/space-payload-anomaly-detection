@@ -48,6 +48,7 @@ async def _startup() -> None:
         config_path=_HERE / "device_config.json",
         device="cpu",
     )
+    _start_auto_poll()
     from phm.api import (
         poll_router,
         forecast_router,
@@ -58,6 +59,8 @@ async def _startup() -> None:
         warnings_router,
         sensors_router,
         history_router,
+        window_router,
+        export_router,
     )
     for r in (
         poll_router,
@@ -69,15 +72,86 @@ async def _startup() -> None:
         warnings_router,
         sensors_router,
         history_router,
+        window_router,
+        export_router,
     ):
         app.include_router(r)
 
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
+    _stop_auto_poll()
     from phm.api import deps
     deps.shutdown()
     logger.info("PHM deps shut down (SQLite flushed)")
+
+
+# ---- Auto-poll background thread ------------------------------------------
+# A daemon thread that periodically polls the space segment and ingests
+# data into RingBuffer + SQLite, so the frontend only needs to read from
+# SQLite via /api/window.  This decouples data ingestion from display.
+
+import threading  # noqa: E402
+
+# Block duration at 100 Hz × 512 pts = 5.12 s.  The poll interval MUST be
+# ≥ block duration; otherwise consecutive polls produce overlapping time
+# windows (each poll back-calculates timestamps from pkt_time), causing
+# interleaved/duplicated data in SQLite.
+_AUTO_POLL_INTERVAL = 6.0  # seconds between poll cycles (>5.12s block)
+_AUTO_POLL_BLOCK = 512
+
+_auto_poll_stop = threading.Event()
+_auto_poll_thread: threading.Thread | None = None
+
+
+def _auto_poll_loop() -> None:
+    from phm.api import deps
+    poll_count = 0
+    while not _auto_poll_stop.is_set():
+        try:
+            c = deps.get()
+            # Poll each configured sensor source
+            config_data = c.config.load()
+            tree = config_data.get("device_tree", [])
+            polled_any = False
+            for node in tree:
+                src = node.get("sourceId")
+                if not src:
+                    continue
+                try:
+                    c.telemetry.poll(src, 100.0, _AUTO_POLL_BLOCK)
+                    polled_any = True
+                    # Run warning evaluation for ingested channels
+                    for ch in c.ring.channels():
+                        try:
+                            c.warning_service.evaluate_channel(ch, _AUTO_POLL_BLOCK)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            if polled_any:
+                poll_count += 1
+        except Exception:
+            logger.debug("Auto-poll cycle failed", exc_info=True)
+        _auto_poll_stop.wait(_AUTO_POLL_INTERVAL)
+
+
+def _start_auto_poll() -> None:
+    _auto_poll_stop.clear()
+    global _auto_poll_thread
+    if _auto_poll_thread is not None and _auto_poll_thread.is_alive():
+        return
+    _auto_poll_thread = threading.Thread(target=_auto_poll_loop, daemon=True, name="auto-poll")
+    _auto_poll_thread.start()
+    logger.info("Auto-poll thread started (interval=%.1fs)", _AUTO_POLL_INTERVAL)
+
+
+def _stop_auto_poll() -> None:
+    _auto_poll_stop.set()
+    global _auto_poll_thread
+    if _auto_poll_thread is not None and _auto_poll_thread.is_alive():
+        _auto_poll_thread.join(timeout=5.0)
+    _auto_poll_thread = None
 
 
 # ---- Static frontend ----
@@ -103,6 +177,16 @@ else:
             "<h1>Frontend not built</h1><p>Run <code>npm run build</code> in frontend/</p>",
             status_code=404,
         )
+
+# Standalone HTML frontend — no build step, no Vue, pure HTML/CSS/JS
+_STANDALONE_HTML = FRONTEND_DIST.parent / "standalone.html"
+
+
+@app.get("/standalone", response_class=HTMLResponse)
+async def standalone():
+    if _STANDALONE_HTML.exists():
+        return HTMLResponse(_STANDALONE_HTML.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>standalone.html not found</h1>", status_code=404)
 
 
 if __name__ == "__main__":

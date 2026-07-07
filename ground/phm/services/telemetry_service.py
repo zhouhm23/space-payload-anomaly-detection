@@ -43,6 +43,13 @@ class TelemetryService:
         self.sqlite = sqlite
         self.space_host = space_host
         self.space_port = space_port
+        # Track the last assigned timestamp per channel so consecutive
+        # polls produce non-overlapping time ranges.  Without this, each
+        # poll back-calculates from time.time(), and since the poll
+        # interval (6s) is close to the block duration (5.12s), the
+        # back-calculated ranges overlap heavily, causing two data
+        # streams to interleave in SQLite (visual zig-zag in the chart).
+        self._last_ts: dict[str, float] = {}
 
     def poll(
         self,
@@ -102,8 +109,33 @@ class TelemetryService:
 
         channel_entries: dict[str, list] = {}
         alerts_list: list[dict] = []
-        pkt_time = time.time()
         pkt_sr = sample_rate if sample_rate > 0 else 1.0
+
+        # When a poll returns MULTIPLE packets for the same channel (which
+        # happens when the space segment has buffered several blocks since
+        # the last poll), each packet must get a SEPARATE, non-overlapping
+        # timestamp range.  Previously each packet used ``time.time()``
+        # independently — but multiple packets arrive within the same
+        # millisecond, so their back-calculated timestamps overlapped,
+        # producing interleaved/duplicate data in SQLite (visual zig-zag).
+        #
+        # CRITICAL: We also must not overlap with the PREVIOUS poll's
+        # timestamps.  The auto-poll interval (6s) is close to the block
+        # duration (5.12s @ 100Hz × 512), so back-calculating from
+        # time.time() every poll produces heavily overlapping ranges
+        # across consecutive polls.  We track ``self._last_ts`` per channel
+        # and ensure each new poll's timestamps start AFTER the last one.
+        total_samples_by_channel: dict[str, int] = {}
+        for p in packets:
+            if isinstance(p, TelemetryPacket):
+                total_samples_by_channel[p.channel] = (
+                    total_samples_by_channel.get(p.channel, 0) + len(p.raw_values)
+                )
+
+        now = time.time()
+
+        # Track how many samples we've already assigned for each channel
+        assigned_by_channel: dict[str, int] = {}
 
         for p in packets:
             if isinstance(p, TelemetryPacket):
@@ -112,8 +144,26 @@ class TelemetryService:
                 scores = p.scores
                 n = len(raw)
                 entries = channel_entries.setdefault(ch, [])
+
+                total_for_ch = total_samples_by_channel[ch]
+                already = assigned_by_channel.get(ch, 0)
+
+                # Determine the right-edge timestamp for THIS channel's
+                # entire batch.  Prefer wall-clock ``now``, but if that
+                # would overlap the previous poll's last timestamp, push
+                # it forward to maintain strict monotonicity.
+                batch_span = (total_for_ch - 1) / pkt_sr
+                prev_last = self._last_ts.get(ch)
+                if prev_last is not None and now - batch_span <= prev_last:
+                    # Overlap detected — shift the right edge to just
+                    # after the previous batch's last timestamp.
+                    ref_time = prev_last + total_for_ch / pkt_sr
+                else:
+                    ref_time = now
+
                 for i in range(n):
-                    sample_time = pkt_time - (n - 1 - i) / pkt_sr
+                    global_idx = already + i
+                    sample_time = ref_time - (total_for_ch - 1 - global_idx) / pkt_sr
                     entries.append({
                         "raw": float(raw[i]),
                         "score": (
@@ -124,6 +174,14 @@ class TelemetryService:
                         "received_at": sample_time,
                         "channel": ch,
                     })
+
+                assigned_by_channel[ch] = already + n
+
+                # Record the last timestamp for this channel so the next
+                # poll can avoid overlapping.
+                if entries:
+                    self._last_ts[ch] = entries[-1]["received_at"]
+
                 if p.metadata.get("exhausted", False):
                     exhausted = True
             elif isinstance(p, AlertPacket):
@@ -132,7 +190,7 @@ class TelemetryService:
                     "score": p.score,
                     "step": p.step,
                     "message": p.message or f"异常分数 {p.score:.3f} 超阈值",
-                    "time": pkt_time,
+                    "time": time.time(),
                     "type": "measured",
                 })
 

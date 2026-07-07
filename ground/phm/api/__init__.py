@@ -14,6 +14,8 @@ from .routes_alerts import router as alerts_router
 from .routes_warnings import router as warnings_router
 from .routes_sensors import router as sensors_router
 from .routes_history import router as history_router
+from .routes_window import router as window_router
+from .routes_export import router as export_router
 
 __all__ = [
     "deps",
@@ -26,4 +28,6 @@ __all__ = [
     "warnings_router",
     "sensors_router",
     "history_router",
+    "window_router",
+    "export_router",
 ]

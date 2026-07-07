@@ -1,10 +1,60 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
-import * as echarts from 'echarts'
-import { getTelemetryOption } from './options'
+/**
+ * TelemetryChart — canvas-based telemetry + prediction line chart.
+ *
+ * Wraps CanvasChart, preserving the same imperative API that
+ * BottomPanel calls (update / clear / showEmpty / hideEmpty /
+ * setPanEnabled / onPan) so the parent doesn't need to change.
+ */
 
-const dom = ref<HTMLDivElement | null>(null)
-let chart: echarts.ECharts | null = null
+import { ref, computed } from 'vue'
+import CanvasChart, { type Channel, type ChartConfig } from './CanvasChart.vue'
+
+const chartRef = ref<InstanceType<typeof CanvasChart> | null>(null)
+
+const inputYMin = ref(-1)
+const inputYMax = ref(1)
+
+// Mutable state pushed into CanvasChart via computed props
+const telemetryData = ref<[number, number][]>([])
+const predictionData = ref<[number, number][]>([])
+const panEnabled = ref(false)
+const emptyMsg = ref<string | undefined>(undefined)
+const xMin = ref(0)
+const xMax = ref(1)
+
+const channels = computed<Channel[]>(() => {
+  const list: Channel[] = [
+    {
+      name: '遥测值',
+      color: '#2d8cf0',
+      width: 1.5,
+      data: telemetryData.value,
+      glow: true,
+    },
+  ]
+  if (predictionData.value.length > 0) {
+    list.push({
+      name: '预测值',
+      color: '#19be6b',
+      width: 2,
+      dash: [6, 4],
+      data: predictionData.value,
+    })
+  }
+  return list
+})
+
+const config = computed<ChartConfig>(() => ({
+  yMin: inputYMin.value,
+  yMax: inputYMax.value,
+  xMin: xMin.value,
+  xMax: xMax.value,
+  yLabel: '遥测值',
+  xTicks: 10,
+}))
+
+// ---- imperative API (called by BottomPanel) ----
 
 interface UpdateParams {
   xMin: number
@@ -13,77 +63,62 @@ interface UpdateParams {
   yMax: number
   telemetry: number[][]
   prediction: number[][]
-  predMarkLine?: any
-}
-
-function ensureChart() {
-  if (!chart && dom.value) {
-    chart = echarts.init(dom.value)
-    chart.setOption(getTelemetryOption())
-  }
 }
 
 function update(p: UpdateParams) {
-  ensureChart()
-  if (!chart) return
-  chart.setOption({
-    xAxis: { min: p.xMin, max: p.xMax },
-    yAxis: { min: p.yMin, max: p.yMax },
-    series: [
-      { data: p.telemetry },
-      { data: p.prediction, markLine: p.predMarkLine },
-    ],
-  })
+  xMin.value = p.xMin
+  xMax.value = p.xMax
+  inputYMin.value = p.yMin
+  inputYMax.value = p.yMax
+  telemetryData.value = p.telemetry as [number, number][]
+  predictionData.value = p.prediction as [number, number][]
+  emptyMsg.value = undefined
 }
 
-function clear(xMin: number, xMax: number) {
-  ensureChart()
-  chart?.setOption({
-    xAxis: { min: xMin, max: xMax },
-    yAxis: { min: 0, max: 1 },
-    series: [{ data: [] }, { data: [], markLine: { data: [] } }],
-  })
+function clear(xMinVal: number, xMaxVal: number) {
+  xMin.value = xMinVal
+  xMax.value = xMaxVal
+  telemetryData.value = []
+  predictionData.value = []
 }
 
-function showEmpty(xMin: number, xMax: number, reason: string) {
-  ensureChart()
-  chart?.setOption({
-    xAxis: { min: xMin, max: xMax },
-    yAxis: { min: 0, max: 1 },
-    series: [{ data: [] }, { data: [] }],
-    title: {
-      show: true,
-      textStyle: { color: '#8e9bb5', fontSize: 14 },
-      subtext: reason,
-      subtextStyle: { color: '#f5a623' },
-      left: 'center',
-      top: 'middle',
-    },
-  })
+function showEmpty(xMinVal: number, xMaxVal: number, reason: string) {
+  xMin.value = xMinVal
+  xMax.value = xMaxVal
+  telemetryData.value = []
+  predictionData.value = []
+  emptyMsg.value = reason
 }
 
 function hideEmpty() {
-  chart?.setOption({ title: { show: false } })
+  emptyMsg.value = undefined
 }
 
-function onResize() {
-  chart?.resize()
+function setPanEnabled(enabled: boolean) {
+  panEnabled.value = enabled
 }
 
-onMounted(async () => {
-  await nextTick()
-  ensureChart()
-  window.addEventListener('resize', onResize)
-})
-onUnmounted(() => {
-  window.removeEventListener('resize', onResize)
-  chart?.dispose()
-  chart = null
-})
+let panCallback: ((newEndTsMs: number) => void) | null = null
 
-defineExpose({ update, clear, showEmpty, hideEmpty })
+function onPan(cb: (newEndTsMs: number) => void) {
+  panCallback = cb
+}
+
+function onCanvasPan(newEndMs: number) {
+  if (panEnabled.value) panCallback?.(newEndMs)
+}
+
+defineExpose({ update, clear, showEmpty, hideEmpty, setPanEnabled, onPan })
 </script>
 
 <template>
-  <div ref="dom" class="chart-telemetry"></div>
+  <CanvasChart
+    ref="chartRef"
+    :channels="channels"
+    :config="config"
+    :pan-enabled="panEnabled"
+    :empty-message="emptyMsg"
+    :height="280"
+    @pan="onCanvasPan"
+  />
 </template>

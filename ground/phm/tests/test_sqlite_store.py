@@ -137,6 +137,101 @@ class TestSQLiteStore:
         stats = store.stats()
         assert stats["enabled"] is True
         assert stats["raw_telemetry"] >= 2
+        assert "predictions" in stats
+
+    def test_enqueue_and_query_predictions(self, store):
+        """Predicted values + scores should be persisted and queryable."""
+        t0 = time.time()
+        store.enqueue_predictions(
+            channel="C-1",
+            origin_ts=t0,
+            predict_start=t0 + 0.02,
+            predict_end=t0 + 0.02 * 96,
+            prediction=[1.0, 2.0, 3.0],
+            predict_scores=[0.1, 0.2, 0.3],
+            model="linear",
+        )
+        time.sleep(1.0)
+        preds = store.query_predictions("C-1")
+        assert len(preds) == 1
+        p = preds[0]
+        assert p["channel"] == "C-1"
+        assert p["prediction"] == [1.0, 2.0, 3.0]
+        assert p["predict_scores"] == [0.1, 0.2, 0.3]
+        assert p["model"] == "linear"
+
+    def test_query_window_latest(self, store):
+        """query_window with end_ts=None should return latest N points."""
+        t0 = time.time()
+        for i in range(10):
+            store.enqueue_telemetry("C-1", float(i), float(i) * 0.1, t0 + i * 0.1)
+        time.sleep(1.0)
+        # Ask for latest 5
+        w = store.query_window("C-1", count=5)
+        assert w["count"] == 5
+        assert w["raw"][0]["raw"] == 5.0  # 5th-from-last
+        assert w["raw"][-1]["raw"] == 9.0  # latest
+        # end_ts should be set to the latest point
+        assert w["end_ts"] is not None
+
+    def test_query_window_with_end_ts(self, store):
+        """query_window with explicit end_ts should respect the right edge."""
+        t0 = time.time()
+        for i in range(10):
+            store.enqueue_telemetry("C-1", float(i), 0.1, t0 + i * 0.1)
+        time.sleep(1.0)
+        # Right edge = t0 + 5*0.1 (point index 5, value 5.0)
+        mid_ts = t0 + 5 * 0.1
+        w = store.query_window("C-1", count=10, end_ts=mid_ts)
+        assert w["count"] == 6  # indices 0..5
+        assert w["raw"][-1]["raw"] == 5.0
+
+    def test_query_window_includes_predictions(self, store):
+        """query_window should include predictions within the window."""
+        t0 = time.time()
+        for i in range(10):
+            store.enqueue_telemetry("C-1", float(i), 0.1, t0 + i * 0.1)
+        # Prediction with origin at the last point
+        store.enqueue_predictions(
+            channel="C-1",
+            origin_ts=t0 + 9 * 0.1,
+            predict_start=t0 + 9 * 0.1 + 0.1,
+            predict_end=t0 + 9 * 0.1 + 0.1 * 96,
+            prediction=[10.0, 11.0],
+            predict_scores=[0.5, 0.6],
+            model="linear",
+        )
+        time.sleep(1.0)
+        w = store.query_window("C-1", count=10)
+        assert w["count"] == 10
+        assert len(w["predictions"]) == 1
+        assert w["predictions"][0]["prediction"] == [10.0, 11.0]
+
+    def test_query_window_empty_channel(self, store):
+        """query_window on non-existent channel should return empty."""
+        w = store.query_window("NOPE", count=100)
+        assert w["count"] == 0
+        assert w["raw"] == []
+        assert w["predictions"] == []
+
+    def test_query_window_dedup_overlapping(self, store):
+        """query_window should deduplicate overlapping timestamps from
+        auto-poll cycles that produce overlapping blocks."""
+        t0 = time.time()
+        # First poll: points 0..9
+        for i in range(10):
+            store.enqueue_telemetry("C-1", float(i), 0.1, t0 + i * 0.1)
+        # Second poll: points 5..9 again (overlap) + 10..14 (new)
+        for i in range(5, 15):
+            store.enqueue_telemetry("C-1", float(i), 0.1, t0 + i * 0.1)
+        time.sleep(1.0)
+        # Request 20 points but only 15 unique timestamps exist
+        w = store.query_window("C-1", count=20)
+        assert w["count"] == 15  # deduped, not 20
+        # Verify strictly ascending timestamps
+        ts_list = [p["received_at"] for p in w["raw"]]
+        for i in range(1, len(ts_list)):
+            assert ts_list[i] > ts_list[i - 1], f"Non-ascending at index {i}"
 
     def test_close_drains_queue(self, db_path):
         """close() should flush remaining items before closing."""

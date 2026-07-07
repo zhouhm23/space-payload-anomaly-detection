@@ -152,13 +152,26 @@ class WarningService:
             interval = (entries[-1]["received_at"] - entries[0]["received_at"]) / max(1, len(entries) - 1)
         else:
             interval = 0.02
-        predict_timestamps = [last_ts + (i + 1) * interval for i in range(len(predict_scores))]
+        predict_start_ts = last_ts + interval
+        predict_end_ts = last_ts + len(prediction) * interval
         self._latest_predict_scores[channel] = {
-            "timestamps": predict_timestamps,
+            "timestamps": [last_ts + (i + 1) * interval for i in range(len(predict_scores))],
             "scores": predict_scores.tolist(),
-            "predict_start": last_ts,
-            "predict_end": predict_timestamps[-1] if predict_timestamps else last_ts,
+            "predict_start": predict_start_ts,
+            "predict_end": predict_end_ts,
         }
+
+        # Persist predicted values + predicted scores to SQLite
+        if self.sqlite is not None:
+            self.sqlite.enqueue_predictions(
+                channel=channel,
+                origin_ts=last_ts,
+                predict_start=predict_start_ts,
+                predict_end=predict_end_ts,
+                prediction=prediction.tolist(),
+                predict_scores=predict_scores.tolist(),
+                model=fc_result.get("model"),
+            )
 
         # 5. Emit pending warning if over threshold
         created = None

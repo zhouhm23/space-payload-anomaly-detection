@@ -85,6 +85,20 @@ CREATE TABLE IF NOT EXISTS alert_records (
     ingested_at REAL    NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_alert_channel_time ON alert_records(channel, created_at);
+
+-- Predicted values + predicted anomaly scores (batch-per-block)
+CREATE TABLE IF NOT EXISTS predictions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel         TEXT    NOT NULL,
+    origin_ts       REAL    NOT NULL,   -- timestamp of the last measured point
+    predict_start   REAL    NOT NULL,   -- first predicted-point timestamp
+    predict_end     REAL    NOT NULL,   -- last predicted-point timestamp
+    prediction      TEXT    NOT NULL,   -- JSON array of predicted raw values
+    predict_scores  TEXT,               -- JSON array of predicted anomaly scores
+    model           TEXT,               -- 'ttm-r3' / 'linear'
+    ingested_at     REAL    NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_pred_channel_origin ON predictions(channel, origin_ts);
 """
 
 
@@ -361,6 +375,10 @@ class SQLiteStore:
             (r[1], r[2], r[3], r[4], r[5], r[6], r[7])
             for r in flat if r[0] == "alert"
         ]
+        pred_rows = [
+            (r[1], r[2], r[3], r[4], r[5], r[6], r[7])
+            for r in flat if r[0] == "pred"
+        ]
 
         try:
             with self._write_lock:
@@ -384,8 +402,197 @@ class SQLiteStore:
                            VALUES (?,?,?,?,?,?,?)""",
                         alert_rows,
                     )
+                if pred_rows:
+                    self._conn.executemany(
+                        """INSERT INTO predictions
+                           (channel, origin_ts, predict_start, predict_end,
+                            prediction, predict_scores, model)
+                           VALUES (?,?,?,?,?,?,?)""",
+                        pred_rows,
+                    )
         except Exception:
             logger.warning("SQLite batch flush failed (%d items)", len(items), exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Predictions (predicted values + predicted anomaly scores)
+    # ------------------------------------------------------------------
+
+    def enqueue_predictions(
+        self,
+        channel: str,
+        origin_ts: float,
+        predict_start: float,
+        predict_end: float,
+        prediction: list[float],
+        predict_scores: list[float] | None = None,
+        model: str | None = None,
+    ) -> None:
+        if not self.enabled:
+            return
+        self._queue.put([
+            "pred",
+            channel,
+            float(origin_ts),
+            float(predict_start),
+            float(predict_end),
+            json.dumps(prediction, ensure_ascii=False),
+            json.dumps(predict_scores, ensure_ascii=False) if predict_scores is not None else None,
+            model,
+        ])
+
+    def query_predictions(
+        self,
+        channel: str,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Query recent prediction batches for a channel."""
+        if not self.enabled or self._conn is None:
+            return []
+        sql = (
+            "SELECT channel, origin_ts, predict_start, predict_end, "
+            "prediction, predict_scores, model "
+            "FROM predictions WHERE channel = ? "
+            "ORDER BY origin_ts DESC LIMIT ?"
+        )
+        try:
+            cur = self._conn.execute(sql, [channel, limit])
+            rows = cur.fetchall()
+        except Exception:
+            logger.warning("query_predictions failed", exc_info=True)
+            return []
+        results = []
+        for r in reversed(rows):
+            try:
+                pred = json.loads(r[4]) if r[4] else []
+            except Exception:
+                pred = []
+            try:
+                pscores = json.loads(r[5]) if r[5] else []
+            except Exception:
+                pscores = []
+            results.append({
+                "channel": r[0],
+                "origin_ts": r[1],
+                "predict_start": r[2],
+                "predict_end": r[3],
+                "prediction": pred,
+                "predict_scores": pscores,
+                "model": r[6],
+            })
+        return results
+
+    # ------------------------------------------------------------------
+    # Window query — latest N raw + predictions within that window
+    # ------------------------------------------------------------------
+
+    def query_window(
+        self,
+        channel: str,
+        count: int = 512,
+        end_ts: float | None = None,
+    ) -> dict:
+        """Return the latest ``count`` raw telemetry points for *channel*
+        plus any prediction batches whose origin falls within the window.
+
+        Args:
+            channel:  channel name.
+            count:    window length in points (100–10000).
+            end_ts:   right-edge epoch seconds.  If None, use the latest
+                      row in the DB (auto-scroll).
+
+        Returns dict::
+
+            {"channel": ..., "count": N, "end_ts": ..., "start_ts": ...,
+             "raw": [{raw, score, received_at}, ...],
+             "predictions": [{origin_ts, predict_start, predict_end,
+                              prediction, predict_scores}, ...]}
+        """
+        if not self.enabled or self._conn is None:
+            return {"channel": channel, "count": 0, "raw": [], "predictions": []}
+
+        try:
+            if end_ts is None:
+                row = self._conn.execute(
+                    "SELECT MAX(received_at) FROM raw_telemetry WHERE channel = ?",
+                    [channel],
+                ).fetchone()
+                end_ts = row[0] if row and row[0] is not None else None
+
+            if end_ts is None:
+                return {"channel": channel, "count": 0, "end_ts": None,
+                        "start_ts": None, "raw": [], "predictions": []}
+
+            # Fetch the *count* rows whose received_at <= end_ts, ordered
+            # descending then reversed so the result is chronological.
+            cur = self._conn.execute(
+                "SELECT raw, score, received_at FROM raw_telemetry "
+                "WHERE channel = ? AND received_at <= ? "
+                "ORDER BY received_at DESC LIMIT ?",
+                [channel, end_ts, count],
+            )
+            rows = list(reversed(cur.fetchall()))
+
+            # Deduplicate by received_at (auto-poll can produce overlapping
+            # blocks) and ensure strictly ascending timestamps so the chart
+            # renders a clean monotonic line.
+            # Use 1ms granularity (round to 3 decimal places) — finer
+            # precision lets near-duplicate timestamps through and causes
+            # visual zig-zag when two data streams interleave.
+            seen: set = set()
+            deduped: list = []
+            for r in rows:
+                ts = round(r[2], 3)  # 1ms precision for dedup
+                if ts in seen:
+                    continue
+                seen.add(ts)
+                deduped.append(r)
+
+            start_ts = deduped[0][2] if deduped else end_ts
+
+            raw = [
+                {"raw": r[0], "score": r[1], "received_at": r[2]} for r in deduped
+            ]
+
+            # Predictions: only return the single most recent batch within
+            # the window (whose origin is closest to the right edge).
+            # Returning multiple overlapping batches causes the frontend to
+            # draw interlocking dashed segments that look garbled.
+            pcur = self._conn.execute(
+                "SELECT origin_ts, predict_start, predict_end, "
+                "prediction, predict_scores, model "
+                "FROM predictions WHERE channel = ? "
+                "AND origin_ts >= ? AND origin_ts <= ? "
+                "ORDER BY origin_ts DESC LIMIT 1",
+                [channel, start_ts, end_ts],
+            )
+            preds = []
+            prow = pcur.fetchone()
+            if prow:
+                try:
+                    pred = json.loads(prow[3]) if prow[3] else []
+                except Exception:
+                    pred = []
+                try:
+                    pscores = json.loads(prow[4]) if prow[4] else []
+                except Exception:
+                    pscores = []
+                preds.append({
+                    "origin_ts": prow[0], "predict_start": prow[1],
+                    "predict_end": prow[2], "prediction": pred,
+                    "predict_scores": pscores, "model": prow[5],
+                })
+
+            return {
+                "channel": channel,
+                "count": len(raw),
+                "end_ts": end_ts,
+                "start_ts": start_ts,
+                "raw": raw,
+                "predictions": preds,
+            }
+        except Exception:
+            logger.warning("query_window failed", exc_info=True)
+            return {"channel": channel, "count": 0, "raw": [], "predictions": []}
 
     # ------------------------------------------------------------------
     # Query API (synchronous, for /api/history and /api/detection)
@@ -508,6 +715,7 @@ class SQLiteStore:
             n_raw = self._conn.execute("SELECT COUNT(*) FROM raw_telemetry").fetchone()[0]
             n_det = self._conn.execute("SELECT COUNT(*) FROM detection_results").fetchone()[0]
             n_alert = self._conn.execute("SELECT COUNT(*) FROM alert_records").fetchone()[0]
+            n_pred = self._conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
         except Exception:
             return {"enabled": True, "error": "query_failed"}
         return {
@@ -516,5 +724,6 @@ class SQLiteStore:
             "raw_telemetry": n_raw,
             "detection_results": n_det,
             "alert_records": n_alert,
+            "predictions": n_pred,
             "queue_pending": self._queue.qsize(),
         }

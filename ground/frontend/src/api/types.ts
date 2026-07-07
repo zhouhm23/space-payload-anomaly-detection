@@ -101,3 +101,41 @@ export interface SensorsResponse {
   sensors: SensorItem[]
   system_health: number
 }
+
+/** One raw telemetry point from /api/window */
+export interface WindowRawPoint {
+  raw: number | null
+  score: number | null
+  received_at: number // epoch seconds
+}
+
+/** A predicted-values batch from /api/window */
+export interface PredictionBatch {
+  origin_ts: number
+  predict_start: number
+  predict_end: number
+  prediction: number[]
+  predict_scores: number[]
+  model: string | null
+}
+
+/** Response from GET /api/window */
+export interface WindowResponse {
+  channel: string
+  count: number
+  end_ts: number | null
+  start_ts: number | null
+  raw: WindowRawPoint[]
+  predictions: PredictionBatch[]
+}
+
+/** DB statistics from GET /api/db-stats */
+export interface DbStatsResponse {
+  enabled: boolean
+  db_path?: string
+  raw_telemetry?: number
+  detection_results?: number
+  alert_records?: number
+  predictions?: number
+  queue_pending?: number
+}

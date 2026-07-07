@@ -15,6 +15,8 @@ import type {
   WarningsResponse,
   SensorsResponse,
   PredictScoresResponse,
+  WindowResponse,
+  DbStatsResponse,
 } from './types'
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {
@@ -72,5 +74,15 @@ export const api = {
 
   predictScores(channel: string): Promise<PredictScoresResponse> {
     return getJson(`/api/predict-scores?channel=${encodeURIComponent(channel)}`)
+  },
+
+  window(channel: string, count: number, endTs?: number): Promise<WindowResponse> {
+    const params = new URLSearchParams({ channel, count: String(count) })
+    if (endTs !== undefined) params.set('end_ts', String(endTs))
+    return getJson(`/api/window?${params}`)
+  },
+
+  dbStats(): Promise<DbStatsResponse> {
+    return getJson('/api/db-stats')
   },
 }
