@@ -93,65 +93,115 @@ async def _shutdown() -> None:
 
 import threading  # noqa: E402
 
-# Block duration at 100 Hz × 512 pts = 5.12 s.  The poll interval MUST be
-# ≥ block duration; otherwise consecutive polls produce overlapping time
-# windows (each poll back-calculates timestamps from pkt_time), causing
-# interleaved/duplicated data in SQLite.
-_AUTO_POLL_INTERVAL = 6.0  # seconds between poll cycles (>5.12s block)
+# Poll interval: 2 s.  The space segment produces data in 512-pt blocks
+# (5.12 s at 100 Hz) but serially across 4 channels, so a block for any
+# given channel arrives roughly every 20-40 s.  Polling at 2 s ensures we
+# drain each block as soon as it appears, rather than letting it sit in
+# the space buffer and creating gaps.  Overlapping polls (polling faster
+# than the block duration) are handled by _last_ts in telemetry_service
+# which keeps consecutive timestamp ranges non-overlapping.
+#
+# Model evaluation (TTM-R3 forecast + TSPulse detection) runs in a
+# SEPARATE thread so its latency does not delay polling.
+_AUTO_POLL_INTERVAL = 2.0
 _AUTO_POLL_BLOCK = 512
 
 _auto_poll_stop = threading.Event()
 _auto_poll_thread: threading.Thread | None = None
+_eval_stop = threading.Event()
+_eval_thread: threading.Thread | None = None
 
 
 def _auto_poll_loop() -> None:
+    from concurrent.futures import ThreadPoolExecutor
     from phm.api import deps
     poll_count = 0
     while not _auto_poll_stop.is_set():
         try:
             c = deps.get()
-            # Poll each configured sensor source
+            # Gather all configured sensor sources
             config_data = c.config.load()
             tree = config_data.get("device_tree", [])
-            polled_any = False
-            for node in tree:
-                src = node.get("sourceId")
-                if not src:
-                    continue
-                try:
-                    c.telemetry.poll(src, 100.0, _AUTO_POLL_BLOCK)
-                    polled_any = True
-                    # Run warning evaluation for ingested channels
-                    for ch in c.ring.channels():
-                        try:
-                            c.warning_service.evaluate_channel(ch, _AUTO_POLL_BLOCK)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-            if polled_any:
-                poll_count += 1
+            sources = [n.get("sourceId") for n in tree if n.get("sourceId")]
+            if not sources:
+                _auto_poll_stop.wait(_AUTO_POLL_INTERVAL)
+                continue
+
+            # Poll all sources in parallel — each source is an independent
+            # TCP connection to the space segment.  The ingest (ring +
+            # SQLite + _last_ts update) happens inside telemetry.poll() and
+            # is protected by per-resource locks (RingBuffer._lock,
+            # AlertStore._lock, SQLiteStore._queue), so concurrent polls
+            # from different sources are safe.
+            with ThreadPoolExecutor(max_workers=len(sources)) as pool:
+                list(pool.map(
+                    lambda src: _poll_one(c, src),
+                    sources,
+                ))
+
+            poll_count += 1
         except Exception:
             logger.debug("Auto-poll cycle failed", exc_info=True)
         _auto_poll_stop.wait(_AUTO_POLL_INTERVAL)
 
 
+def _poll_one(c, src: str) -> None:
+    """Poll a single source — wrapped so ThreadPoolExecutor swallows errors."""
+    try:
+        c.telemetry.poll(src, 100.0, _AUTO_POLL_BLOCK)
+    except Exception:
+        logger.debug("Poll failed for source %s", src, exc_info=True)
+
+
+def _eval_loop() -> None:
+    """Run model evaluation (forecast + detection) for all channels.
+
+    Runs in its own thread so slow model inference does not delay the
+    poll thread.  Iterates channels serially — PyTorch models are not
+    thread-safe for concurrent forward passes on the same model object.
+    """
+    from phm.api import deps
+    while not _eval_stop.is_set():
+        try:
+            c = deps.get()
+            for ch in c.ring.channels():
+                if _eval_stop.is_set():
+                    break
+                try:
+                    c.warning_service.evaluate_channel(ch, _AUTO_POLL_BLOCK)
+                except Exception:
+                    pass
+        except Exception:
+            logger.debug("Eval cycle failed", exc_info=True)
+        # Poll eval frequently; if models are slow the loop naturally
+        # throttles to one eval-cycle per (sum of per-channel inference).
+        _eval_stop.wait(1.0)
+
+
 def _start_auto_poll() -> None:
     _auto_poll_stop.clear()
-    global _auto_poll_thread
-    if _auto_poll_thread is not None and _auto_poll_thread.is_alive():
-        return
-    _auto_poll_thread = threading.Thread(target=_auto_poll_loop, daemon=True, name="auto-poll")
-    _auto_poll_thread.start()
-    logger.info("Auto-poll thread started (interval=%.1fs)", _AUTO_POLL_INTERVAL)
+    _eval_stop.clear()
+    global _auto_poll_thread, _eval_thread
+    if _auto_poll_thread is None or not _auto_poll_thread.is_alive():
+        _auto_poll_thread = threading.Thread(target=_auto_poll_loop, daemon=True, name="auto-poll")
+        _auto_poll_thread.start()
+        logger.info("Auto-poll thread started (interval=%.1fs)", _AUTO_POLL_INTERVAL)
+    if _eval_thread is None or not _eval_thread.is_alive():
+        _eval_thread = threading.Thread(target=_eval_loop, daemon=True, name="model-eval")
+        _eval_thread.start()
+        logger.info("Model-eval thread started")
 
 
 def _stop_auto_poll() -> None:
     _auto_poll_stop.set()
-    global _auto_poll_thread
+    _eval_stop.set()
+    global _auto_poll_thread, _eval_thread
     if _auto_poll_thread is not None and _auto_poll_thread.is_alive():
         _auto_poll_thread.join(timeout=5.0)
     _auto_poll_thread = None
+    if _eval_thread is not None and _eval_thread.is_alive():
+        _eval_thread.join(timeout=10.0)
+    _eval_thread = None
 
 
 # ---- Static frontend ----
@@ -187,6 +237,18 @@ async def standalone():
     if _STANDALONE_HTML.exists():
         return HTMLResponse(_STANDALONE_HTML.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>standalone.html not found</h1>", status_code=404)
+
+
+# New single-HTML dashboard (Day 10 rebuild). Lives in the repo root's
+# debug/ dir during evaluation; will move into frontend/ once finalised.
+_DASHBOARD_HTML = _HERE.parent.parent / "debug" / "空间站有效载荷预测性维护支持系统.html"
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    if _DASHBOARD_HTML.exists():
+        return HTMLResponse(_DASHBOARD_HTML.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>dashboard HTML not found</h1>", status_code=404)
 
 
 if __name__ == "__main__":

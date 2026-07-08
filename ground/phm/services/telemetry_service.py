@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 import time
+import threading
 from pathlib import Path
 
 from ..database import RingBuffer, SQLiteStore
@@ -50,6 +51,10 @@ class TelemetryService:
         # back-calculated ranges overlap heavily, causing two data
         # streams to interleave in SQLite (visual zig-zag in the chart).
         self._last_ts: dict[str, float] = {}
+        # Guards _last_ts read-modify-write during parallel auto-poll.
+        # Each source maps to a distinct channel, but the dict access is a
+        # compound operation (read → compute → write) so we serialise it.
+        self._ts_lock = threading.Lock()
 
     def poll(
         self,
@@ -152,35 +157,41 @@ class TelemetryService:
                 # entire batch.  Prefer wall-clock ``now``, but if that
                 # would overlap the previous poll's last timestamp, push
                 # it forward to maintain strict monotonicity.
+                #
+                # This read-modify-write on _last_ts is guarded by
+                # _ts_lock so parallel polls (different sources map to
+                # different channels, but we serialise to be safe) do not
+                # race on the dict.
                 batch_span = (total_for_ch - 1) / pkt_sr
-                prev_last = self._last_ts.get(ch)
-                if prev_last is not None and now - batch_span <= prev_last:
-                    # Overlap detected — shift the right edge to just
-                    # after the previous batch's last timestamp.
-                    ref_time = prev_last + total_for_ch / pkt_sr
-                else:
-                    ref_time = now
+                with self._ts_lock:
+                    prev_last = self._last_ts.get(ch)
+                    if prev_last is not None and now - batch_span <= prev_last:
+                        # Overlap detected — shift the right edge to just
+                        # after the previous batch's last timestamp.
+                        ref_time = prev_last + total_for_ch / pkt_sr
+                    else:
+                        ref_time = now
 
-                for i in range(n):
-                    global_idx = already + i
-                    sample_time = ref_time - (total_for_ch - 1 - global_idx) / pkt_sr
-                    entries.append({
-                        "raw": float(raw[i]),
-                        "score": (
-                            float(scores[i])
-                            if scores is not None and i < len(scores)
-                            else None
-                        ),
-                        "received_at": sample_time,
-                        "channel": ch,
-                    })
+                    for i in range(n):
+                        global_idx = already + i
+                        sample_time = ref_time - (total_for_ch - 1 - global_idx) / pkt_sr
+                        entries.append({
+                            "raw": float(raw[i]),
+                            "score": (
+                                float(scores[i])
+                                if scores is not None and i < len(scores)
+                                else None
+                            ),
+                            "received_at": sample_time,
+                            "channel": ch,
+                        })
 
-                assigned_by_channel[ch] = already + n
+                    assigned_by_channel[ch] = already + n
 
-                # Record the last timestamp for this channel so the next
-                # poll can avoid overlapping.
-                if entries:
-                    self._last_ts[ch] = entries[-1]["received_at"]
+                    # Record the last timestamp for this channel so the next
+                    # poll can avoid overlapping.
+                    if entries:
+                        self._last_ts[ch] = entries[-1]["received_at"]
 
                 if p.metadata.get("exhausted", False):
                     exhausted = True

@@ -1,5 +1,7 @@
 """GET /api/history — query persisted telemetry from SQLite.
+DELETE /api/history — delete telemetry rows by channel/time range.
 GET /api/detection — query three-layer cascade detection results.
+DELETE /api/detection — delete detection rows by channel/time range.
 GET /api/db-stats — SQLite row counts / health.
 """
 
@@ -31,6 +33,29 @@ async def api_history(
     return JSONResponse({"count": len(rows), "data": rows})
 
 
+@router.delete("/api/history")
+async def api_delete_history(
+    channel: str | None = Query(None),
+    start: float | None = Query(None, description="Epoch seconds (inclusive)"),
+    end: float | None = Query(None, description="Epoch seconds (inclusive)"),
+    confirm: bool = Query(False, description="Required when deleting all rows"),
+):
+    """Delete raw telemetry rows matching the filter.
+
+    When no filter is supplied (``channel``, ``start``, ``end`` all absent)
+    the request would clear the entire ``raw_telemetry`` table — this is
+    refused unless ``confirm=true`` is passed to guard against accidents.
+    """
+    c = deps.get()
+    if not channel and start is None and end is None and not confirm:
+        return JSONResponse(
+            {"deleted": 0, "error": "confirm_required"},
+            status_code=400,
+        )
+    deleted = c.sqlite.delete_history(channel=channel, start_time=start, end_time=end)
+    return JSONResponse({"deleted": deleted})
+
+
 @router.get("/api/detection")
 async def api_detection(
     channel: str | None = Query(None),
@@ -53,6 +78,27 @@ async def api_detection(
         "data": rows,
         "latest": latest,
     })
+
+
+@router.delete("/api/detection")
+async def api_delete_detection(
+    channel: str | None = Query(None),
+    start: float | None = Query(None, description="Epoch seconds (inclusive)"),
+    end: float | None = Query(None, description="Epoch seconds (inclusive)"),
+    confirm: bool = Query(False, description="Required when deleting all rows"),
+):
+    """Delete detection-result rows matching the filter.
+
+    Same ``confirm`` guard as ``DELETE /api/history`` when no filter is given.
+    """
+    c = deps.get()
+    if not channel and start is None and end is None and not confirm:
+        return JSONResponse(
+            {"deleted": 0, "error": "confirm_required"},
+            status_code=400,
+        )
+    deleted = c.sqlite.delete_detection(channel=channel, start_time=start, end_time=end)
+    return JSONResponse({"deleted": deleted})
 
 
 @router.get("/api/db-stats")

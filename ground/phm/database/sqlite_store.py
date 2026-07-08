@@ -45,17 +45,6 @@ __all__ = ["SQLiteStore"]
 _DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "phm.db"
 
 _SCHEMA = """
--- Raw telemetry samples (one row per sample point)
-CREATE TABLE IF NOT EXISTS raw_telemetry (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    channel     TEXT    NOT NULL,
-    raw         REAL,
-    score       REAL,
-    received_at REAL    NOT NULL,
-    ingested_at REAL    NOT NULL DEFAULT (unixepoch())
-);
-CREATE INDEX IF NOT EXISTS idx_raw_channel_time ON raw_telemetry(channel, received_at);
-
 -- Per-block three-layer cascade detection results
 CREATE TABLE IF NOT EXISTS detection_results (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,20 +74,6 @@ CREATE TABLE IF NOT EXISTS alert_records (
     ingested_at REAL    NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_alert_channel_time ON alert_records(channel, created_at);
-
--- Predicted values + predicted anomaly scores (batch-per-block)
-CREATE TABLE IF NOT EXISTS predictions (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    channel         TEXT    NOT NULL,
-    origin_ts       REAL    NOT NULL,   -- timestamp of the last measured point
-    predict_start   REAL    NOT NULL,   -- first predicted-point timestamp
-    predict_end     REAL    NOT NULL,   -- last predicted-point timestamp
-    prediction      TEXT    NOT NULL,   -- JSON array of predicted raw values
-    predict_scores  TEXT,               -- JSON array of predicted anomaly scores
-    model           TEXT,               -- 'ttm-r3' / 'linear'
-    ingested_at     REAL    NOT NULL DEFAULT (unixepoch())
-);
-CREATE INDEX IF NOT EXISTS idx_pred_channel_origin ON predictions(channel, origin_ts);
 """
 
 
@@ -131,6 +106,7 @@ class SQLiteStore:
         self._thread: threading.Thread | None = None
         self._conn: sqlite3.Connection | None = None
         self._write_lock = threading.Lock()  # guards _conn writes
+        self._created_tables: set[str] = set()  # cache of per-channel tables
 
         if self.enabled:
             self._init_db()
@@ -150,6 +126,41 @@ class SQLiteStore:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(_SCHEMA)
         logger.info("SQLiteStore initialised: %s", self.db_path)
+
+    # Per-channel telemetry tables: each channel gets its own table
+    # (e.g. ``telemetry_C_1``, ``telemetry_VS_multi_sine``) so channels
+    # are fully isolated.  Table names are derived from the channel name
+    # by replacing non-alphanumeric characters with underscores.
+    _created_tables: set[str] = None  # set per-instance in __init__
+
+    @staticmethod
+    def _tel_table(channel: str) -> str:
+        """Convert a channel name to a safe telemetry table name."""
+        safe = "".join(c if c.isalnum() else "_" for c in channel)
+        return f"telemetry_{safe}"
+
+    def _ensure_tel_table(self, channel: str) -> str:
+        """Create the per-channel telemetry table if it doesn't exist yet."""
+        table = self._tel_table(channel)
+        if self._created_tables is not None and table in self._created_tables:
+            return table
+        self._conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS "{table}" (
+                timestamp                   REAL    NOT NULL PRIMARY KEY,
+                raw_value                   REAL,
+                anomaly_score               REAL,
+                predicted_value             REAL,
+                predicted_anomaly_score     REAL,
+                origin_ts                   REAL,
+                ingested_at                 REAL    NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        self._conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "idx_{table}_ts" ON "{table}"(timestamp)'
+        )
+        if self._created_tables is not None:
+            self._created_tables.add(table)
+        return table
 
     def start(self) -> None:
         """Start the background flush thread."""
@@ -364,7 +375,7 @@ class SQLiteStore:
                 flat.append(it)
 
         raw_rows = [
-            (r[1], r[2], r[3], r[4])
+            (r[1], r[4], r[2], r[3])   # (channel, timestamp=received_at, raw_value=raw, anomaly_score=score)
             for r in flat if r[0] == "raw"
         ]
         det_rows = [
@@ -375,18 +386,31 @@ class SQLiteStore:
             (r[1], r[2], r[3], r[4], r[5], r[6], r[7])
             for r in flat if r[0] == "alert"
         ]
+        # Predictions are now individual UPSERTs into the unified telemetry
+        # table (one row per predicted point), not a batch JSON blob.
         pred_rows = [
-            (r[1], r[2], r[3], r[4], r[5], r[6], r[7])
+            (r[1], r[2], r[3], r[4], r[5])  # channel, ts, pred_val, pred_score, origin_ts
             for r in flat if r[0] == "pred"
         ]
 
         try:
             with self._write_lock:
+                # Raw rows: group by channel, each channel has its own table.
+                # raw_rows format: (channel, timestamp, raw_value, anomaly_score)
                 if raw_rows:
-                    self._conn.executemany(
-                        "INSERT INTO raw_telemetry(channel, raw, score, received_at) VALUES (?,?,?,?)",
-                        raw_rows,
-                    )
+                    by_ch: dict[str, list] = {}
+                    for row in raw_rows:
+                        by_ch.setdefault(row[0], []).append(row[1:])  # drop channel, keep (ts, raw, score)
+                    for ch, rows in by_ch.items():
+                        table = self._ensure_tel_table(ch)
+                        self._conn.executemany(
+                            f'INSERT INTO "{table}" (timestamp, raw_value, anomaly_score) '
+                            f'VALUES (?,?,?) '
+                            f'ON CONFLICT(timestamp) DO UPDATE SET '
+                            f'raw_value = excluded.raw_value, '
+                            f'anomaly_score = excluded.anomaly_score',
+                            rows,
+                        )
                 if det_rows:
                     self._conn.executemany(
                         """INSERT INTO detection_results
@@ -402,14 +426,24 @@ class SQLiteStore:
                            VALUES (?,?,?,?,?,?,?)""",
                         alert_rows,
                     )
+                # Pred rows: group by channel, same per-channel table.
+                # pred_rows format: (channel, timestamp, pred_val, pred_score, origin_ts)
                 if pred_rows:
-                    self._conn.executemany(
-                        """INSERT INTO predictions
-                           (channel, origin_ts, predict_start, predict_end,
-                            prediction, predict_scores, model)
-                           VALUES (?,?,?,?,?,?,?)""",
-                        pred_rows,
-                    )
+                    by_ch_p: dict[str, list] = {}
+                    for row in pred_rows:
+                        by_ch_p.setdefault(row[0], []).append(row[1:])  # drop channel
+                    for ch, rows in by_ch_p.items():
+                        table = self._ensure_tel_table(ch)
+                        self._conn.executemany(
+                            f'INSERT INTO "{table}" '
+                            f'(timestamp, predicted_value, predicted_anomaly_score, origin_ts) '
+                            f'VALUES (?,?,?,?) '
+                            f'ON CONFLICT(timestamp) DO UPDATE SET '
+                            f'predicted_value = excluded.predicted_value, '
+                            f'predicted_anomaly_score = excluded.predicted_anomaly_score, '
+                            f'origin_ts = excluded.origin_ts',
+                            rows,
+                        )
         except Exception:
             logger.warning("SQLite batch flush failed (%d items)", len(items), exc_info=True)
 
@@ -427,62 +461,34 @@ class SQLiteStore:
         predict_scores: list[float] | None = None,
         model: str | None = None,
     ) -> None:
+        """Enqueue predicted values as individual UPSERT rows.
+
+        Each predicted point becomes a separate row in the unified
+        ``telemetry`` table, keyed by (channel, timestamp).  The timestamp
+        is computed by linear interpolation between predict_start and
+        predict_end — matching the real data's time axis so both lines
+        align on the same X coordinate.
+        """
         if not self.enabled:
             return
-        self._queue.put([
-            "pred",
-            channel,
-            float(origin_ts),
-            float(predict_start),
-            float(predict_end),
-            json.dumps(prediction, ensure_ascii=False),
-            json.dumps(predict_scores, ensure_ascii=False) if predict_scores is not None else None,
-            model,
-        ])
-
-    def query_predictions(
-        self,
-        channel: str,
-        limit: int = 50,
-    ) -> list[dict]:
-        """Query recent prediction batches for a channel."""
-        if not self.enabled or self._conn is None:
-            return []
-        sql = (
-            "SELECT channel, origin_ts, predict_start, predict_end, "
-            "prediction, predict_scores, model "
-            "FROM predictions WHERE channel = ? "
-            "ORDER BY origin_ts DESC LIMIT ?"
-        )
-        try:
-            cur = self._conn.execute(sql, [channel, limit])
-            rows = cur.fetchall()
-        except Exception:
-            logger.warning("query_predictions failed", exc_info=True)
-            return []
-        results = []
-        for r in reversed(rows):
-            try:
-                pred = json.loads(r[4]) if r[4] else []
-            except Exception:
-                pred = []
-            try:
-                pscores = json.loads(r[5]) if r[5] else []
-            except Exception:
-                pscores = []
-            results.append({
-                "channel": r[0],
-                "origin_ts": r[1],
-                "predict_start": r[2],
-                "predict_end": r[3],
-                "prediction": pred,
-                "predict_scores": pscores,
-                "model": r[6],
-            })
-        return results
+        n = len(prediction)
+        if n == 0:
+            return
+        step = (predict_end - predict_start) / (n - 1) if n > 1 else 0.0
+        scores = predict_scores if predict_scores is not None else [None] * n
+        for i in range(n):
+            ts = predict_start + i * step
+            self._queue.put([
+                "pred",
+                channel,
+                float(ts),
+                float(prediction[i]) if prediction[i] is not None else None,
+                float(scores[i]) if i < len(scores) and scores[i] is not None else None,
+                float(origin_ts),
+            ])
 
     # ------------------------------------------------------------------
-    # Window query — latest N raw + predictions within that window
+    # Window query — unified telemetry (raw + prediction in same rows)
     # ------------------------------------------------------------------
 
     def query_window(
@@ -491,108 +497,72 @@ class SQLiteStore:
         count: int = 512,
         end_ts: float | None = None,
     ) -> dict:
-        """Return the latest ``count`` raw telemetry points for *channel*
-        plus any prediction batches whose origin falls within the window.
-
-        Args:
-            channel:  channel name.
-            count:    window length in points (100–10000).
-            end_ts:   right-edge epoch seconds.  If None, use the latest
-                      row in the DB (auto-scroll).
+        """Return the latest ``count`` rows from the per-channel telemetry
+        table.  Each row may have raw_value and/or predicted_value filled.
 
         Returns dict::
 
             {"channel": ..., "count": N, "end_ts": ..., "start_ts": ...,
-             "raw": [{raw, score, received_at}, ...],
-             "predictions": [{origin_ts, predict_start, predict_end,
-                              prediction, predict_scores}, ...]}
+             "data": [{timestamp, raw_value, anomaly_score,
+                       predicted_value, predicted_anomaly_score}, ...]}
         """
         if not self.enabled or self._conn is None:
-            return {"channel": channel, "count": 0, "raw": [], "predictions": []}
+            return {"channel": channel, "count": 0, "data": []}
 
+        table = self._ensure_tel_table(channel)
         try:
             if end_ts is None:
                 row = self._conn.execute(
-                    "SELECT MAX(received_at) FROM raw_telemetry WHERE channel = ?",
-                    [channel],
+                    f'SELECT MAX(timestamp) FROM "{table}"'
                 ).fetchone()
                 end_ts = row[0] if row and row[0] is not None else None
 
             if end_ts is None:
                 return {"channel": channel, "count": 0, "end_ts": None,
-                        "start_ts": None, "raw": [], "predictions": []}
+                        "start_ts": None, "data": []}
 
-            # Fetch the *count* rows whose received_at <= end_ts, ordered
-            # descending then reversed so the result is chronological.
             cur = self._conn.execute(
-                "SELECT raw, score, received_at FROM raw_telemetry "
-                "WHERE channel = ? AND received_at <= ? "
-                "ORDER BY received_at DESC LIMIT ?",
-                [channel, end_ts, count],
+                f'SELECT timestamp, raw_value, anomaly_score, '
+                f'predicted_value, predicted_anomaly_score '
+                f'FROM "{table}" WHERE timestamp <= ? '
+                f'ORDER BY timestamp DESC LIMIT ?',
+                [end_ts, count],
             )
             rows = list(reversed(cur.fetchall()))
 
-            # Deduplicate by received_at (auto-poll can produce overlapping
-            # blocks) and ensure strictly ascending timestamps so the chart
-            # renders a clean monotonic line.
-            # Use 1ms granularity (round to 3 decimal places) — finer
-            # precision lets near-duplicate timestamps through and causes
-            # visual zig-zag when two data streams interleave.
+            # Deduplicate by timestamp (1ms granularity)
             seen: set = set()
             deduped: list = []
             for r in rows:
-                ts = round(r[2], 3)  # 1ms precision for dedup
+                ts = round(r[0], 3)
                 if ts in seen:
                     continue
                 seen.add(ts)
                 deduped.append(r)
 
-            start_ts = deduped[0][2] if deduped else end_ts
+            start_ts = deduped[0][0] if deduped else end_ts
 
-            raw = [
-                {"raw": r[0], "score": r[1], "received_at": r[2]} for r in deduped
+            data = [
+                {
+                    "timestamp": r[0],
+                    "raw_value": r[1],
+                    "anomaly_score": r[2],
+                    "predicted_value": r[3],
+                    "predicted_anomaly_score": r[4],
+                }
+                for r in deduped
             ]
-
-            # Predictions: only return the single most recent batch within
-            # the window (whose origin is closest to the right edge).
-            # Returning multiple overlapping batches causes the frontend to
-            # draw interlocking dashed segments that look garbled.
-            pcur = self._conn.execute(
-                "SELECT origin_ts, predict_start, predict_end, "
-                "prediction, predict_scores, model "
-                "FROM predictions WHERE channel = ? "
-                "AND origin_ts >= ? AND origin_ts <= ? "
-                "ORDER BY origin_ts DESC LIMIT 1",
-                [channel, start_ts, end_ts],
-            )
-            preds = []
-            prow = pcur.fetchone()
-            if prow:
-                try:
-                    pred = json.loads(prow[3]) if prow[3] else []
-                except Exception:
-                    pred = []
-                try:
-                    pscores = json.loads(prow[4]) if prow[4] else []
-                except Exception:
-                    pscores = []
-                preds.append({
-                    "origin_ts": prow[0], "predict_start": prow[1],
-                    "predict_end": prow[2], "prediction": pred,
-                    "predict_scores": pscores, "model": prow[5],
-                })
 
             return {
                 "channel": channel,
-                "count": len(raw),
+                "count": len(data),
                 "end_ts": end_ts,
                 "start_ts": start_ts,
-                "raw": raw,
-                "predictions": preds,
+                "data": data,
             }
         except Exception:
             logger.warning("query_window failed", exc_info=True)
-            return {"channel": channel, "count": 0, "raw": [], "predictions": []}
+            return {"channel": channel, "count": 0, "data": []}
 
     # ------------------------------------------------------------------
     # Query API (synchronous, for /api/history and /api/detection)
@@ -605,30 +575,56 @@ class SQLiteStore:
         end_time: float | None = None,
         limit: int = 1000,
     ) -> list[dict]:
-        """Query raw telemetry history."""
+        """Query telemetry history (raw_value only; NULLs excluded).
+
+        If *channel* is given, queries that channel's per-channel table.
+        If None, queries all telemetry_* tables via UNION.
+        """
         if not self.enabled or self._conn is None:
             return []
-        sql = "SELECT channel, raw, score, received_at FROM raw_telemetry WHERE 1=1"
-        params: list = []
-        if channel:
-            sql += " AND channel = ?"
-            params.append(channel)
-        if start_time is not None:
-            sql += " AND received_at >= ?"
-            params.append(start_time)
-        if end_time is not None:
-            sql += " AND received_at <= ?"
-            params.append(end_time)
-        sql += " ORDER BY received_at DESC LIMIT ?"
-        params.append(limit)
         try:
-            cur = self._conn.execute(sql, params)
-            rows = cur.fetchall()
+            if channel:
+                table = self._ensure_tel_table(channel)
+                sql = (f'SELECT timestamp, raw_value, anomaly_score '
+                       f'FROM "{table}" WHERE raw_value IS NOT NULL')
+                params: list = []
+                if start_time is not None:
+                    sql += " AND timestamp >= ?"
+                    params.append(start_time)
+                if end_time is not None:
+                    sql += " AND timestamp <= ?"
+                    params.append(end_time)
+                sql += " ORDER BY timestamp DESC LIMIT ?"
+                params.append(limit)
+                cur = self._conn.execute(sql, params)
+                rows = cur.fetchall()
+            else:
+                # No channel: query all telemetry_* tables
+                tables = self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'telemetry_%'"
+                ).fetchall()
+                if not tables:
+                    return []
+                unions = []
+                for (t,) in tables:
+                    unions.append(f'SELECT "{channel}" AS channel, timestamp, raw_value, anomaly_score '
+                                   f'FROM "{t}" WHERE raw_value IS NOT NULL')
+                # Actually we don't know channel from table name easily here;
+                # for the no-channel case, just return from all tables with
+                # the table name as channel proxy.
+                unions = []
+                for (t,) in tables:
+                    ch_name = t[len("telemetry_"):]
+                    unions.append(f"SELECT '{ch_name}' AS channel, timestamp, raw_value, anomaly_score "
+                                  f'FROM "{t}" WHERE raw_value IS NOT NULL')
+                sql = " UNION ALL ".join(unions) + " ORDER BY timestamp DESC LIMIT ?"
+                cur = self._conn.execute(sql, [limit])
+                rows = cur.fetchall()
         except Exception:
             logger.warning("query_history failed", exc_info=True)
             return []
         return [
-            {"channel": r[0], "raw": r[1], "score": r[2], "received_at": r[3]}
+            {"channel": r[0], "received_at": r[1], "raw": r[2], "score": r[3]}
             for r in reversed(rows)  # chronological order
         ]
 
@@ -681,11 +677,11 @@ class SQLiteStore:
         return results
 
     def query_alerts(self, limit: int = 50) -> list[dict]:
-        """Query persisted alert records."""
+        """Query persisted alert records (with ``id`` for PATCH support)."""
         if not self.enabled or self._conn is None:
             return []
         sql = (
-            "SELECT channel, alert_type, score, message, created_at, status, verified_at "
+            "SELECT id, channel, alert_type, score, message, created_at, status, verified_at "
             "FROM alert_records ORDER BY created_at DESC LIMIT ?"
         )
         try:
@@ -696,34 +692,170 @@ class SQLiteStore:
             return []
         return [
             {
-                "channel": r[0],
-                "alert_type": r[1],
-                "score": r[2],
-                "message": r[3],
-                "created_at": r[4],
-                "status": r[5],
-                "verified_at": r[6],
+                "id": r[0],
+                "channel": r[1],
+                "alert_type": r[2],
+                "score": r[3],
+                "message": r[4],
+                "created_at": r[5],
+                "status": r[6],
+                "verified_at": r[7],
             }
             for r in reversed(rows)
         ]
+
+    # ------------------------------------------------------------------
+    # Mutation API (synchronous, for DELETE / PATCH endpoints)
+    # ------------------------------------------------------------------
+
+    def delete_history(
+        self,
+        channel: str | None = None,
+        start_time: float | None = None,
+        end_time: float | None = None,
+    ) -> int:
+        """Delete telemetry rows matching the filter.
+
+        If *channel* is given, deletes from that channel's per-channel
+        table.  If None, deletes from ALL telemetry_* tables.
+        """
+        if not self.enabled or self._conn is None:
+            return 0
+        try:
+            with self._write_lock:
+                if channel:
+                    table = self._ensure_tel_table(channel)
+                    sql = f'DELETE FROM "{table}" WHERE 1=1'
+                    params: list = []
+                    if start_time is not None:
+                        sql += " AND timestamp >= ?"
+                        params.append(start_time)
+                    if end_time is not None:
+                        sql += " AND timestamp <= ?"
+                        params.append(end_time)
+                    cur = self._conn.execute(sql, params)
+                    return cur.rowcount if cur.rowcount is not None else 0
+                else:
+                    # Delete from all telemetry_* tables
+                    tables = self._conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'telemetry_%'"
+                    ).fetchall()
+                    total = 0
+                    for (t,) in tables:
+                        sql = f'DELETE FROM "{t}" WHERE 1=1'
+                        params = []
+                        if start_time is not None:
+                            sql += " AND timestamp >= ?"
+                            params.append(start_time)
+                        if end_time is not None:
+                            sql += " AND timestamp <= ?"
+                            params.append(end_time)
+                        cur = self._conn.execute(sql, params)
+                        total += cur.rowcount if cur.rowcount is not None else 0
+                    return total
+        except Exception:
+            logger.warning("delete_history failed", exc_info=True)
+            return 0
+
+    def delete_detection(
+        self,
+        channel: str | None = None,
+        start_time: float | None = None,
+        end_time: float | None = None,
+    ) -> int:
+        """Delete detection-result rows matching the filter.
+
+        Note the time column is ``timestamp`` here, not ``received_at``.
+        """
+        return self._delete_rows(
+            "detection_results", "timestamp",
+            channel=channel, start_time=start_time, end_time=end_time,
+        )
+
+    def _delete_rows(
+        self,
+        table: str,
+        time_col: str,
+        *,
+        channel: str | None,
+        start_time: float | None,
+        end_time: float | None,
+    ) -> int:
+        """Shared DELETE builder for a table with ``channel`` + time column."""
+        if not self.enabled or self._conn is None:
+            return 0
+        sql = f"DELETE FROM {table} WHERE 1=1"
+        params: list = []
+        if channel:
+            sql += " AND channel = ?"
+            params.append(channel)
+        if start_time is not None:
+            sql += f" AND {time_col} >= ?"
+            params.append(start_time)
+        if end_time is not None:
+            sql += f" AND {time_col} <= ?"
+            params.append(end_time)
+        try:
+            with self._write_lock:
+                cur = self._conn.execute(sql, params)
+                return cur.rowcount if cur.rowcount is not None else 0
+        except Exception:
+            logger.warning("delete from %s failed", table, exc_info=True)
+            return 0
+
+    # Statuses the frontend may set via PATCH /api/alerts/{id}.
+    # ``active`` is the default for measured alerts and is not meant to be
+    # reassigned by hand, so it is excluded from the allow-list.
+    _PATCHABLE_ALERT_STATUSES = frozenset({"pending", "confirmed", "false"})
+
+    def update_alert_status(self, alert_id: int, status: str) -> bool:
+        """Update an alert record's lifecycle status.
+
+        Only ``pending`` / ``confirmed`` / ``false`` are accepted; ``active``
+        is reserved for the initial measured-alert state. Returns True if a
+        row was updated, False if the id was not found or status is invalid.
+        """
+        if not self.enabled or self._conn is None:
+            return False
+        if status not in self._PATCHABLE_ALERT_STATUSES:
+            return False
+        try:
+            with self._write_lock:
+                cur = self._conn.execute(
+                    "UPDATE alert_records SET status = ?, verified_at = ? WHERE id = ?",
+                    [status, time.time(), alert_id],
+                )
+                return cur.rowcount > 0
+        except Exception:
+            logger.warning("update_alert_status failed", exc_info=True)
+            return False
 
     def stats(self) -> dict:
         """Return row counts for each table (for monitoring)."""
         if not self.enabled or self._conn is None:
             return {"enabled": False}
         try:
-            n_raw = self._conn.execute("SELECT COUNT(*) FROM raw_telemetry").fetchone()[0]
+            # Sum row counts across all per-channel telemetry_* tables
+            tables = self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'telemetry_%'"
+            ).fetchall()
+            n_tel = 0
+            tel_by_channel: dict[str, int] = {}
+            for (t,) in tables:
+                cnt = self._conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+                n_tel += cnt
+                ch_name = t[len("telemetry_"):]
+                tel_by_channel[ch_name] = cnt
             n_det = self._conn.execute("SELECT COUNT(*) FROM detection_results").fetchone()[0]
             n_alert = self._conn.execute("SELECT COUNT(*) FROM alert_records").fetchone()[0]
-            n_pred = self._conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
         except Exception:
             return {"enabled": True, "error": "query_failed"}
         return {
             "enabled": True,
             "db_path": str(self.db_path),
-            "raw_telemetry": n_raw,
+            "telemetry": n_tel,
+            "telemetry_by_channel": tel_by_channel,
             "detection_results": n_det,
             "alert_records": n_alert,
-            "predictions": n_pred,
             "queue_pending": self._queue.qsize(),
         }

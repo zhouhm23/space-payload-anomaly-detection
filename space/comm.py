@@ -84,7 +84,12 @@ class SpaceServer:
                  max_buffer: int = 500):
         self.host = host
         self.port = port
-        self._buffer: deque[dict] = deque(maxlen=max_buffer)
+        self.max_buffer = max_buffer
+        # Per-channel buffers so a ground poll for one source does not
+        # drain data belonging to other sources.  Keyed by channel name.
+        self._buffers: dict[str, deque[dict]] = {}
+        # source_id → channel name mapping (registered by main.py at startup)
+        self._source_map: dict[str, str] = {}
         self._lock = threading.Lock()
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
@@ -92,6 +97,20 @@ class SpaceServer:
         self.config: dict = {}          # latest ground config
         self._config_lock = threading.Lock()
         self._on_config_cb: callable | None = None  # (config_dict) -> None
+
+    # -- public API --
+
+    def register_source(self, source_id: str, channel: str) -> None:
+        """Map a source_id to its channel name so _serve can filter."""
+        self._source_map[source_id] = channel
+
+    def _buf_for(self, channel: str) -> deque[dict]:
+        """Get (or lazily create) the per-channel buffer."""
+        buf = self._buffers.get(channel)
+        if buf is None:
+            buf = deque(maxlen=self.max_buffer)
+            self._buffers[channel] = buf
+        return buf
 
     # -- public API --
 
@@ -151,8 +170,9 @@ class SpaceServer:
     # -- internals --
 
     def _enqueue(self, data: dict):
+        ch = data.get("channel", "")
         with self._lock:
-            self._buffer.append(data)
+            self._buf_for(ch).append(data)
 
     def _loop(self):
         while self._running.is_set():
@@ -174,6 +194,7 @@ class SpaceServer:
 
     def _serve(self, sock: socket.socket):
         # Read config line from ground (may be empty)
+        cfg = {}
         try:
             sock.settimeout(1.0)
             first = b""
@@ -192,11 +213,28 @@ class SpaceServer:
         except Exception:
             pass
 
-        # Send buffered data
+        # Determine which channel this connection wants.
+        # Ground sends source_id in the config; we map it to a channel
+        # name and drain ONLY that channel's buffer — other channels'
+        # data is preserved for their own poll connections.
+        target_channel = None
+        src_id = cfg.get("source_id") if cfg else None
+        if src_id:
+            target_channel = self._source_map.get(src_id)
+
         sock.settimeout(5.0)
         with self._lock:
-            items = list(self._buffer)
-            self._buffer.clear()
+            if target_channel is not None:
+                buf = self._buffers.get(target_channel)
+                items = list(buf) if buf else []
+                if buf:
+                    buf.clear()
+            else:
+                # No source_id or unknown: drain all channels (legacy fallback)
+                items = []
+                for b in self._buffers.values():
+                    items.extend(b)
+                    b.clear()
         for item in items:
             line = json.dumps(item, cls=_NumpyEncoder, ensure_ascii=False) + "\n"
             sock.sendall(line.encode("utf-8"))

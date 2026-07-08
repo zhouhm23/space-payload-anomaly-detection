@@ -132,6 +132,12 @@ def main():
     from comm import SpaceServer
     server = SpaceServer(host=host, port=port)
 
+    # Register source_id → channel mapping so the server can drain
+    # per-channel buffers independently (each ground poll for one source
+    # no longer clears other sources' data).
+    for src, ch in zip(sources, channels):
+        server.register_source(ch["source_id"], src.channel_name)
+
     def _on_config(cfg: dict):
         nonlocal device_tree
         if "device_tree" in cfg:
@@ -181,10 +187,13 @@ def main():
 
                 # --- Layer 2: TSPulse (skipped for constant channels) -------
                 if l1_decision == "skip":
-                    # Constant / broken channel — force score=None, skip TSPulse
-                    scores = None
+                    # Constant / broken channel — TSPulse is skipped to save
+                    # CPU, but the anomaly score MUST still be set (to zeros),
+                    # not None.  A None score leaves a gap in the chart's
+                    # anomaly-score curve and makes the channel look broken.
+                    scores = np.zeros(len(raw), dtype=np.float32)
                     if step == 0:
-                        logger.info("ch[%d] %s: L1 skip (%s), TSPulse skipped",
+                        logger.info("ch[%d] %s: L1 skip (%s), TSPulse skipped, scores=zeros",
                                     ch_ids[i], src.channel_name,
                                     l1_detail.get("reason", "?"))
                 elif detector is not None:
