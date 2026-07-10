@@ -62,6 +62,10 @@ class WarningService:
         self._latest_predict_scores: dict[str, dict] = {}
         # Cache latest cascade output per channel (for /api/detection)
         self._latest_cascade: dict[str, object] = {}
+        # Remember the last raw timestamp evaluated per channel so we can
+        # skip re-evaluation when no new raw has arrived (the eval thread
+        # fires every 1s but new data only arrives every ~2s via auto-poll).
+        self._last_eval_ts: dict[str, float] = {}
 
     # -- detector lazy load -------------------------------------------------
 
@@ -113,6 +117,15 @@ class WarningService:
             return None
         raw_values = np.array([e["raw"] for e in entries], dtype=np.float32)
         last_ts = entries[-1]["received_at"]
+
+        # Skip if no new raw has arrived since the last evaluation.  The eval
+        # thread fires every 1s but new data arrives only every ~2s (auto-
+        # poll), so without this guard each pred interval is re-evaluated
+        # 2-3x — wasting TTM-R3 + TSPulse inference and making the predicted
+        # anomaly score visibly jump until raw locks it in.
+        if self._last_eval_ts.get(channel) == last_ts:
+            return None
+        self._last_eval_ts[channel] = last_ts
 
         # 2. Forecast
         fc_result = self.forecast_service.forecast(raw_values.tolist())
