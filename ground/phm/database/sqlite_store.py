@@ -522,8 +522,15 @@ class SQLiteStore:
         # sample_interval = 1/sample_rate (the true sensor cadence) and
         # origin_q is the quantised last raw timestamp.  This guarantees
         # UPSERT merges pred into the same row as the future raw sample.
+        #
+        # _ts_quantum is already 1/sample_rate (see __init__), so use it
+        # directly.  A previous version multiplied by 2 here (a leftover
+        # from when _ts_quantum was half the sampling interval) which made
+        # the pred step TWICE the raw step — pred landed on .65/.67/.69
+        # while raw lived on every position, leaving "holes" (.64/.66/...)
+        # with no row at all on the chart timeline.
         origin_q = self._quantize_ts(origin_ts)
-        sample_interval = self._ts_quantum * 2  # = 1/sample_rate
+        sample_interval = self._ts_quantum
         for i in range(n):
             ts = self._quantize_ts(origin_q + (i + 1) * sample_interval)
             self._queue.put([

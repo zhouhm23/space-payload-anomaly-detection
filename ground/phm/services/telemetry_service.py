@@ -153,38 +153,61 @@ class TelemetryService:
                 total_for_ch = total_samples_by_channel[ch]
                 already = assigned_by_channel.get(ch, 0)
 
-                # Determine the right-edge timestamp for THIS channel's
-                # entire batch.  Prefer wall-clock ``now``, but if that
-                # would overlap the previous poll's last timestamp, push
-                # it forward to maintain strict monotonicity.
-                #
-                # This read-modify-write on _last_ts is guarded by
-                # _ts_lock so parallel polls (different sources map to
-                # different channels, but we serialise to be safe) do not
-                # race on the dict.
-                batch_span = (total_for_ch - 1) / pkt_sr
+                # Timestamp strategy:
+                # - If space sent t_acq_start (newer builds), anchor the
+                #   channel timeline ONCE at the first packet's collection
+                #   moment; every subsequent sample (within this packet,
+                #   across packets in the same poll, and across polls)
+                #   advances strictly by 1/pkt_sr off the previous sample.
+                #   This yields a perfectly equidistant grid with no fake
+                #   gaps, regardless of TCP buffering jitter or pacing
+                #   imprecision — exactly what pred needs for row alignment.
+                # - Otherwise (old space builds), fall back to the legacy
+                #   wall-clock back-calculation with _last_ts anti-overlap.
                 with self._ts_lock:
-                    prev_last = self._last_ts.get(ch)
-                    if prev_last is not None and now - batch_span <= prev_last:
-                        # Overlap detected — shift the right edge to just
-                        # after the previous batch's last timestamp.
-                        ref_time = prev_last + total_for_ch / pkt_sr
+                    if p.t_acq_start is not None:
+                        prev_last = self._last_ts.get(ch)
+                        # base = previous sample + 1 step (seamless), or the
+                        # true collection time if this is the very first
+                        # packet for the channel.
+                        base = (prev_last + 1.0 / pkt_sr) if prev_last is not None \
+                            else p.t_acq_start
+                        for i in range(n):
+                            sample_time = base + i / pkt_sr
+                            entries.append({
+                                "raw": float(raw[i]),
+                                "score": (
+                                    float(scores[i])
+                                    if scores is not None and i < len(scores)
+                                    else None
+                                ),
+                                "received_at": sample_time,
+                                "channel": ch,
+                            })
                     else:
-                        ref_time = now
+                        # Legacy: back-calculate from wall-clock now.
+                        batch_span = (total_for_ch - 1) / pkt_sr
+                        prev_last = self._last_ts.get(ch)
+                        if prev_last is not None and now - batch_span <= prev_last:
+                            # Overlap detected — shift the right edge to just
+                            # after the previous batch's last timestamp.
+                            ref_time = prev_last + total_for_ch / pkt_sr
+                        else:
+                            ref_time = now
 
-                    for i in range(n):
-                        global_idx = already + i
-                        sample_time = ref_time - (total_for_ch - 1 - global_idx) / pkt_sr
-                        entries.append({
-                            "raw": float(raw[i]),
-                            "score": (
-                                float(scores[i])
-                                if scores is not None and i < len(scores)
-                                else None
-                            ),
-                            "received_at": sample_time,
-                            "channel": ch,
-                        })
+                        for i in range(n):
+                            global_idx = already + i
+                            sample_time = ref_time - (total_for_ch - 1 - global_idx) / pkt_sr
+                            entries.append({
+                                "raw": float(raw[i]),
+                                "score": (
+                                    float(scores[i])
+                                    if scores is not None and i < len(scores)
+                                    else None
+                                ),
+                                "received_at": sample_time,
+                                "channel": ch,
+                            })
 
                     assigned_by_channel[ch] = already + n
 

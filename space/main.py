@@ -171,6 +171,11 @@ def main():
                 if len(raw) == 0:
                     continue  # loop source will never hit this
                 any_data = True
+                # Record the acquisition moment so ground can stamp each
+                # sample with t_acq + i/sr (strict equidistant) instead of
+                # back-calculating from its own wall-clock (which produces
+                # fake gaps when data buffers in TCP).
+                t_acq = time.time()
 
                 cleaned = pp.transform(raw) if pp._scaler is not None else pp.fit_transform(raw)
                 scores = None
@@ -223,11 +228,13 @@ def main():
                     channel=src.channel_name,
                     raw_values=raw,
                     scores=scores,
+                    sample_rate=sr,
                     step=step,
                     exhausted=src.exhausted,
                     tree_meta=_tree_meta,
                     l1_decision=l1_decision,
                     l1_detail=l1_detail,
+                    t_acq_start=t_acq,
                 )
 
                 if scores is not None and len(scores) > 0:

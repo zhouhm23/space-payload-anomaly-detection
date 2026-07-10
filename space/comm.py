@@ -57,6 +57,11 @@ class TelemetryPacket:
     timestamp: float = field(default_factory=time.time)
     sample_rate: float = 1.0
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Acquisition-start wall-clock set by space right after read().  When
+    # present, ground stamps each sample as t_acq_start + i/sample_rate
+    # (strict equidistant) instead of back-calculating from its own
+    # receive time (which produces fake gaps across poll boundaries).
+    t_acq_start: float | None = None
 
 
 @dataclass
@@ -117,6 +122,9 @@ class SpaceServer:
     def enqueue_telemetry(self, channel: str, raw_values: np.ndarray,
                           scores: np.ndarray | None = None,
                           sample_rate: float = 1.0, **meta):
+        # t_acq_start is promoted to a top-level field (not buried in
+        # metadata) so ground can find it without unpacking metadata.
+        t_acq_start = meta.pop("t_acq_start", None)
         self._enqueue({
             "type": "telemetry",
             "channel": channel,
@@ -124,6 +132,7 @@ class SpaceServer:
             "scores": scores,
             "sample_rate": sample_rate,
             "metadata": meta,
+            "t_acq_start": t_acq_start,
         })
 
     def enqueue_alert(self, channel: str, score: float, step: int,

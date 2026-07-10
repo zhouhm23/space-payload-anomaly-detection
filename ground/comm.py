@@ -57,6 +57,10 @@ class TelemetryPacket:
     timestamp: float = field(default_factory=time.time)
     sample_rate: float = 1.0
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Acquisition-start wall-clock sent by space (None for old space builds).
+    # When present, consumers should stamp samples as
+    # t_acq_start + i/sample_rate instead of back-calculating from now.
+    t_acq_start: float | None = None
 
 
 @dataclass
@@ -231,6 +235,7 @@ class GroundClient:
                                 if obj.get("scores") else None),
                         sample_rate=obj.get("sample_rate", 1.0),
                         metadata=obj.get("metadata", {}),
+                        t_acq_start=obj.get("t_acq_start"),
                     ))
                 elif obj.get("type") == "alert":
                     packets.append(AlertPacket(

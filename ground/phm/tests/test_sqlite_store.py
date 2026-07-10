@@ -43,14 +43,16 @@ def store(db_path):
 class TestSQLiteStore:
 
     def test_init_creates_tables(self, db_path):
-        """init() should create all three tables."""
+        """init() should create the fixed tables.
+
+        Per-channel telemetry_* tables are created on demand, so only the
+        fixed detection_results / alert_records tables must exist at init.
+        """
         s = SQLiteStore(db_path, enabled=True)
-        # Tables should exist even before start()
         tables = s._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
         names = {t[0] for t in tables}
-        assert "raw_telemetry" in names
         assert "detection_results" in names
         assert "alert_records" in names
         s.close()
@@ -131,16 +133,23 @@ class TestSQLiteStore:
 
     def test_stats(self, store):
         """stats() should return row counts."""
-        store.enqueue_telemetry("C-1", 1.0, 0.5, time.time())
-        store.enqueue_telemetry("C-1", 2.0, 0.6, time.time())
+        t0 = time.time()
+        store.enqueue_telemetry("C-1", 1.0, 0.5, t0)
+        store.enqueue_telemetry("C-1", 2.0, 0.6, t0 + 1)
         time.sleep(1.0)
         stats = store.stats()
         assert stats["enabled"] is True
-        assert stats["raw_telemetry"] >= 2
-        assert "predictions" in stats
+        assert stats["telemetry"] >= 2
+        # Channel names in stats are derived from table names (sanitised:
+        # non-alphanumeric → underscore), so "C-1" appears as "C_1".
+        assert "C_1" in stats["telemetry_by_channel"]
 
     def test_enqueue_and_query_predictions(self, store):
-        """Predicted values + scores should be persisted and queryable."""
+        """Predicted values + scores should be persisted and queryable.
+
+        Predictions are now individual UPSERT rows in the unified telemetry
+        table (one row per predicted point), so query via query_window.
+        """
         t0 = time.time()
         store.enqueue_predictions(
             channel="C-1",
@@ -152,13 +161,11 @@ class TestSQLiteStore:
             model="linear",
         )
         time.sleep(1.0)
-        preds = store.query_predictions("C-1")
-        assert len(preds) == 1
-        p = preds[0]
-        assert p["channel"] == "C-1"
-        assert p["prediction"] == [1.0, 2.0, 3.0]
-        assert p["predict_scores"] == [0.1, 0.2, 0.3]
-        assert p["model"] == "linear"
+        w = store.query_window("C-1", count=100)
+        preds = [d for d in w["data"] if d["predicted_value"] is not None]
+        assert len(preds) == 3
+        assert preds[0]["predicted_value"] == 1.0
+        assert preds[0]["predicted_anomaly_score"] == pytest.approx(0.1)
 
     def test_query_window_latest(self, store):
         """query_window with end_ts=None should return latest N points."""
@@ -169,8 +176,8 @@ class TestSQLiteStore:
         # Ask for latest 5
         w = store.query_window("C-1", count=5)
         assert w["count"] == 5
-        assert w["raw"][0]["raw"] == 5.0  # 5th-from-last
-        assert w["raw"][-1]["raw"] == 9.0  # latest
+        assert w["data"][0]["raw_value"] == 5.0  # 5th-from-last
+        assert w["data"][-1]["raw_value"] == 9.0  # latest
         # end_ts should be set to the latest point
         assert w["end_ts"] is not None
 
@@ -184,10 +191,14 @@ class TestSQLiteStore:
         mid_ts = t0 + 5 * 0.1
         w = store.query_window("C-1", count=10, end_ts=mid_ts)
         assert w["count"] == 6  # indices 0..5
-        assert w["raw"][-1]["raw"] == 5.0
+        assert w["data"][-1]["raw_value"] == 5.0
 
     def test_query_window_includes_predictions(self, store):
-        """query_window should include predictions within the window."""
+        """query_window should include predictions within the window.
+
+        Predictions are now merged into the unified data rows via UPSERT,
+        so check predicted_value on the data entries.
+        """
         t0 = time.time()
         for i in range(10):
             store.enqueue_telemetry("C-1", float(i), 0.1, t0 + i * 0.1)
@@ -202,17 +213,16 @@ class TestSQLiteStore:
             model="linear",
         )
         time.sleep(1.0)
-        w = store.query_window("C-1", count=10)
-        assert w["count"] == 10
-        assert len(w["predictions"]) == 1
-        assert w["predictions"][0]["prediction"] == [10.0, 11.0]
+        w = store.query_window("C-1", count=100)
+        preds = [d for d in w["data"] if d["predicted_value"] is not None]
+        assert len(preds) == 2
+        assert preds[0]["predicted_value"] == 10.0
 
     def test_query_window_empty_channel(self, store):
         """query_window on non-existent channel should return empty."""
         w = store.query_window("NOPE", count=100)
         assert w["count"] == 0
-        assert w["raw"] == []
-        assert w["predictions"] == []
+        assert w["data"] == []
 
     def test_query_window_dedup_overlapping(self, store):
         """query_window should deduplicate overlapping timestamps from
@@ -229,7 +239,7 @@ class TestSQLiteStore:
         w = store.query_window("C-1", count=20)
         assert w["count"] == 15  # deduped, not 20
         # Verify strictly ascending timestamps
-        ts_list = [p["received_at"] for p in w["raw"]]
+        ts_list = [d["timestamp"] for d in w["data"]]
         for i in range(1, len(ts_list)):
             assert ts_list[i] > ts_list[i - 1], f"Non-ascending at index {i}"
 
@@ -237,9 +247,12 @@ class TestSQLiteStore:
         """close() should flush remaining items before closing."""
         s = SQLiteStore(db_path, batch_size=1000, flush_interval=100, enabled=True)
         s.start()
-        # Enqueue items that won't trigger a batch flush (batch_size=1000)
+        # Enqueue items that won't trigger a batch flush (batch_size=1000).
+        # Use strictly increasing timestamps so they don't quantise to the
+        # same PRIMARY KEY (quantum = 1/sample_rate = 0.01s).
+        t0 = time.time()
         for i in range(10):
-            s.enqueue_telemetry("C-1", float(i), 0.1, time.time())
+            s.enqueue_telemetry("C-1", float(i), 0.1, t0 + i)
         # close() should drain
         s.close()
         # Re-open and verify
@@ -252,10 +265,15 @@ class TestSQLiteStore:
         """Concurrent enqueues from multiple threads should not lose data."""
         import threading
 
+        # Each thread uses a distinct timestamp base so points don't
+        # quantise to the same PRIMARY KEY (quantum = 0.01s).
+        t0 = time.time()
+
         def writer(thread_id):
             for i in range(20):
                 store.enqueue_telemetry(
-                    f"ch-{thread_id}", float(i), 0.1, time.time()
+                    f"ch-{thread_id}", float(i), 0.1,
+                    t0 + thread_id * 100 + i,
                 )
 
         threads = [threading.Thread(target=writer, args=(t,)) for t in range(4)]
@@ -326,8 +344,9 @@ class TestStoreMutations:
 
     def test_delete_history_all_requires_no_filter(self, store):
         """delete_history() with no filter clears the whole table."""
+        t0 = time.time()
         for i in range(3):
-            store.enqueue_telemetry("C-1", float(i), 0.1, time.time())
+            store.enqueue_telemetry("C-1", float(i), 0.1, t0 + i)
         time.sleep(1.0)
         deleted = store.delete_history()
         assert deleted == 3
