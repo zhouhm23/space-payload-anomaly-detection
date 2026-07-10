@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import queue
 import sqlite3
 import threading
@@ -95,11 +96,37 @@ class SQLiteStore:
         batch_size: int = 200,
         flush_interval: float = 2.0,
         enabled: bool = True,
+        sample_rate: float = 100.0,
     ) -> None:
+        """Persistent SQLite store with background batch writer.
+
+        Args:
+            db_path:         path to the ``.db`` file.  Parent dirs are created.
+            batch_size:      max items buffered before a flush (default 200).
+            flush_interval:  max seconds between flushes (default 2.0).
+            enabled:         if False, all enqueue/query calls are no-ops.
+                             Useful for tests or when persistence is unwanted.
+            sample_rate:     sensor sample rate in Hz.  Timestamps are
+                             quantised to half the sampling interval so that
+                             raw and prediction points computed via different
+                             float paths collapse onto the same PRIMARY KEY,
+                             while adjacent genuine samples never merge.
+        """
         self.db_path = Path(db_path) if db_path else _DEFAULT_DB_PATH
         self.batch_size = batch_size
         self.flush_interval = flush_interval
         self.enabled = enabled
+        # Quantise timestamps to the sampling interval (not half).  Since pred
+        # timestamps are computed as origin_q + k*sample_interval, using the
+        # full interval as quantum guarantees pred lands on the EXACT same
+        # grid points as raw — no odd/even grid phase mismatch.
+        sample_interval = 1.0 / sample_rate if sample_rate > 0 else 0.01
+        self._ts_quantum = sample_interval
+        # Gap threshold: one acquisition block (512 samples @ sample_rate).
+        # Gaps larger than this are treated as monitoring interruptions
+        # (system shutdown / comms loss), not accidental packet drops.
+        from ..config import FORECAST_CONTEXT_LENGTH
+        self._gap_threshold = FORECAST_CONTEXT_LENGTH * sample_interval
 
         self._queue: queue.Queue[list | None] = queue.Queue()
         self._stop_event = threading.Event()
@@ -110,6 +137,12 @@ class SQLiteStore:
 
         if self.enabled:
             self._init_db()
+
+    def _quantize_ts(self, ts: float) -> float:
+        """Snap a timestamp to the nearest quantum grid point."""
+        if self._ts_quantum <= 0:
+            return float(ts)
+        return float(math.floor(ts / self._ts_quantum + 0.5) * self._ts_quantum)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -213,6 +246,11 @@ class SQLiteStore:
 
         Each entry must have keys: ``channel``, ``raw``, ``score``, ``received_at``.
         Puts all items in a single ``queue.put`` to minimise lock contention.
+
+        Timestamps are quantised to the sensor sampling grid so raw and
+        prediction rows computed via different float paths collapse onto
+        the same PRIMARY KEY (otherwise a ~1ms offset splits them into two
+        rows and the predicted curve breaks up).
         """
         if not self.enabled:
             return
@@ -221,7 +259,7 @@ class SQLiteStore:
             batch.append([
                 "raw", e["channel"], float(e["raw"]),
                 float(e["score"]) if e.get("score") is not None else None,
-                float(e["received_at"]),
+                self._quantize_ts(e["received_at"]),
             ])
         if batch:
             self._queue.put(batch)
@@ -460,28 +498,38 @@ class SQLiteStore:
         prediction: list[float],
         predict_scores: list[float] | None = None,
         model: str | None = None,
+        timestamps: list[float] | None = None,
     ) -> None:
         """Enqueue predicted values as individual UPSERT rows.
 
         Each predicted point becomes a separate row in the unified
-        ``telemetry`` table, keyed by (channel, timestamp).  The timestamp
-        is computed by linear interpolation between predict_start and
-        predict_end — matching the real data's time axis so both lines
-        align on the same X coordinate.
+        ``telemetry`` table, keyed by (channel, timestamp).
+
+        If *timestamps* is provided, those exact timestamps are used
+        (quantised) — this avoids recomputing timestamps via a different
+        float path than the raw data, which previously caused raw and pred
+        to land on different PRIMARY KEYs.  When *timestamps* is None, falls
+        back to linear interpolation between predict_start and predict_end.
         """
         if not self.enabled:
             return
         n = len(prediction)
         if n == 0:
             return
-        step = (predict_end - predict_start) / (n - 1) if n > 1 else 0.0
         scores = predict_scores if predict_scores is not None else [None] * n
+        # Pred timestamps must land on the EXACT same quantum grid as raw.
+        # The raw grid is origin_q + k * sample_interval (k=1,2,...), where
+        # sample_interval = 1/sample_rate (the true sensor cadence) and
+        # origin_q is the quantised last raw timestamp.  This guarantees
+        # UPSERT merges pred into the same row as the future raw sample.
+        origin_q = self._quantize_ts(origin_ts)
+        sample_interval = self._ts_quantum * 2  # = 1/sample_rate
         for i in range(n):
-            ts = predict_start + i * step
+            ts = self._quantize_ts(origin_q + (i + 1) * sample_interval)
             self._queue.put([
                 "pred",
                 channel,
-                float(ts),
+                ts,
                 float(prediction[i]) if prediction[i] is not None else None,
                 float(scores[i]) if i < len(scores) and scores[i] is not None else None,
                 float(origin_ts),
@@ -542,6 +590,21 @@ class SQLiteStore:
 
             start_ts = deduped[0][0] if deduped else end_ts
 
+            # Detect monitoring gaps: consecutive rows whose timestamp
+            # difference exceeds one acquisition block (system shutdown /
+            # comms interruption).  Accidental single-point drops are NOT
+            # flagged (they are far shorter than a block).
+            gaps: list[dict] = []
+            for i in range(1, len(deduped)):
+                dt = deduped[i][0] - deduped[i - 1][0]
+                if dt > self._gap_threshold:
+                    gaps.append({
+                        "start": deduped[i - 1][0],
+                        "end": deduped[i][0],
+                        "duration": dt,
+                        "index": i,  # position in data[] where the gap ends
+                    })
+
             data = [
                 {
                     "timestamp": r[0],
@@ -558,11 +621,13 @@ class SQLiteStore:
                 "count": len(data),
                 "end_ts": end_ts,
                 "start_ts": start_ts,
+                "gap_threshold": self._gap_threshold,
+                "gaps": gaps,
                 "data": data,
             }
         except Exception:
             logger.warning("query_window failed", exc_info=True)
-            return {"channel": channel, "count": 0, "data": []}
+            return {"channel": channel, "count": 0, "data": [], "gaps": []}
 
     # ------------------------------------------------------------------
     # Query API (synchronous, for /api/history and /api/detection)
@@ -585,7 +650,7 @@ class SQLiteStore:
         try:
             if channel:
                 table = self._ensure_tel_table(channel)
-                sql = (f'SELECT timestamp, raw_value, anomaly_score '
+                sql = (f"SELECT '{channel}' AS channel, timestamp, raw_value, anomaly_score "
                        f'FROM "{table}" WHERE raw_value IS NOT NULL')
                 params: list = []
                 if start_time is not None:
@@ -599,19 +664,13 @@ class SQLiteStore:
                 cur = self._conn.execute(sql, params)
                 rows = cur.fetchall()
             else:
-                # No channel: query all telemetry_* tables
+                # No channel: query all telemetry_* tables via UNION.
+                # Derive channel name from table name (e.g. telemetry_C_1 → C-1).
                 tables = self._conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'telemetry_%'"
                 ).fetchall()
                 if not tables:
                     return []
-                unions = []
-                for (t,) in tables:
-                    unions.append(f'SELECT "{channel}" AS channel, timestamp, raw_value, anomaly_score '
-                                   f'FROM "{t}" WHERE raw_value IS NOT NULL')
-                # Actually we don't know channel from table name easily here;
-                # for the no-channel case, just return from all tables with
-                # the table name as channel proxy.
                 unions = []
                 for (t,) in tables:
                     ch_name = t[len("telemetry_"):]

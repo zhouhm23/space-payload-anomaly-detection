@@ -148,20 +148,27 @@ class WarningService:
         max_pred = float(np.nanmax(predict_scores)) if len(predict_scores) else 0.0
 
         # 4b. Cache predict scores with timestamps for chart display
+        #     Predict timestamps continue the raw grid: last_ts + (i+1)*interval.
+        #     Using the SAME arithmetic as raw (interval from actual entries)
+        #     ensures pred lands on the same quantum grid as raw after
+        #     quantisation, so UPSERT merges them into one row.
         if len(entries) >= 2:
             interval = (entries[-1]["received_at"] - entries[0]["received_at"]) / max(1, len(entries) - 1)
         else:
             interval = 0.02
-        predict_start_ts = last_ts + interval
-        predict_end_ts = last_ts + len(prediction) * interval
+        pred_timestamps = [last_ts + (i + 1) * interval for i in range(len(prediction))]
+        predict_start_ts = pred_timestamps[0] if pred_timestamps else last_ts
+        predict_end_ts = pred_timestamps[-1] if pred_timestamps else last_ts
         self._latest_predict_scores[channel] = {
-            "timestamps": [last_ts + (i + 1) * interval for i in range(len(predict_scores))],
+            "timestamps": pred_timestamps[:len(predict_scores)],
             "scores": predict_scores.tolist(),
             "predict_start": predict_start_ts,
             "predict_end": predict_end_ts,
         }
 
         # Persist predicted values + predicted scores to SQLite
+        #     Pass explicit timestamps so SQLiteStore doesn't recompute them
+        #     via a different float path (which caused raw/ped row splitting).
         if self.sqlite is not None:
             self.sqlite.enqueue_predictions(
                 channel=channel,
@@ -171,6 +178,7 @@ class WarningService:
                 prediction=prediction.tolist(),
                 predict_scores=predict_scores.tolist(),
                 model=fc_result.get("model"),
+                timestamps=pred_timestamps,
             )
 
         # 5. Emit pending warning if over threshold

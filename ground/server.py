@@ -239,9 +239,9 @@ async def standalone():
     return HTMLResponse("<h1>standalone.html not found</h1>", status_code=404)
 
 
-# New single-HTML dashboard (Day 10 rebuild). Lives in the repo root's
-# debug/ dir during evaluation; will move into frontend/ once finalised.
-_DASHBOARD_HTML = _HERE.parent.parent / "debug" / "空间站有效载荷预测性维护支持系统.html"
+# New single-HTML dashboard (Day 10 rebuild). Lives alongside standalone.html
+# inside the public product repo's frontend/ dir — no cross-repo dependency.
+_DASHBOARD_HTML = FRONTEND_DIST.parent / "dashboard.html"
 
 
 @app.get("/dashboard", response_class=HTMLResponse)

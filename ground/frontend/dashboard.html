@@ -1,0 +1,1777 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>空间站有效载荷预测性维护支持系统</title>
+  <style>
+    :root {
+      --bg-primary: #0b0f1a;
+      --bg-secondary: #131825;
+      --bg-card: #1a1f2f;
+      --border-color: #2a3348;
+      --text-primary: #e0e6f0;
+      --text-secondary: #8e9bb5;
+      --accent-blue: #2d8cf0;
+      --accent-green: #19be6b;
+      --accent-yellow: #f5a623;
+      --accent-red: #ed3f14;
+      --accent-cyan: #00c9db;
+      --shadow: 0 4px 16px rgba(0,0,0,0.4);
+      --font-mono: 'Courier New', monospace;
+      --transition: 0.2s ease;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
+    }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body {
+      font-family: 'Segoe UI', 'Roboto', 'Microsoft YaHei', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      height:100vh;
+      display:flex;
+      flex-direction:column;
+      overflow:hidden;
+      user-select:none;
+    }
+    /* 滚动条 */
+    ::-webkit-scrollbar { width:6px; height:6px; }
+    ::-webkit-scrollbar-track { background:var(--bg-primary); }
+    ::-webkit-scrollbar-thumb { background:var(--border-color); border-radius:3px; }
+
+    /* 顶栏 */
+    #headerBar {
+      height:60px;
+      background:var(--bg-secondary);
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      padding:0 24px;
+      border-bottom:1px solid var(--border-color);
+      box-shadow:var(--shadow);
+      z-index:10;
+    }
+    .header-title {
+      font-size:1.3rem;
+      font-weight:600;
+      background: linear-gradient(90deg, #6ea8fe, #a6c8ff);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .header-right {
+      display:flex;
+      align-items:center;
+      gap:28px;
+    }
+    .link-status {
+      display:flex;
+      align-items:center;
+      gap:8px;
+      font-size:0.9rem;
+    }
+    .status-dot {
+      width:10px; height:10px;
+      border-radius:50%;
+      background: var(--accent-green);
+      box-shadow: 0 0 8px var(--accent-green);
+      transition: background 0.3s, box-shadow 0.3s;
+    }
+    .status-dot.lost { background: var(--accent-red); box-shadow: 0 0 8px var(--accent-red); }
+    .utc-clock {
+      font-family: var(--font-mono);
+      font-size:0.95rem;
+      color:var(--accent-cyan);
+    }
+    .health-ring-wrap {
+      display:flex;
+      align-items:center;
+      gap:10px;
+      font-size:0.9rem;
+    }
+    canvas.health-ring { width:48px; height:48px; }
+
+    /* 主内容区 */
+    #mainContent {
+      flex:1;
+      display:flex;
+      gap:1px;
+      background:var(--border-color);
+      min-height:0;
+    }
+    /* 左栏 */
+    #leftPanel {
+      width:240px;
+      background:var(--bg-secondary);
+      display:flex;
+      flex-direction:column;
+      overflow-y:auto;
+    }
+    .panel-header {
+      padding:12px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      border-bottom:1px solid var(--border-color);
+      font-weight:600;
+    }
+    .panel-header .buttons { display:flex; gap:4px; }
+    .panel-header button {
+      background:var(--bg-card);
+      border:1px solid var(--border-color);
+      color:var(--text-primary);
+      padding:4px 8px;
+      border-radius:var(--radius-sm);
+      cursor:pointer;
+      font-size:0.8rem;
+      transition: var(--transition);
+    }
+    .panel-header button:hover { border-color:var(--accent-blue); }
+    .tree-item {
+      display:flex;
+      align-items:center;
+      padding:6px 12px;
+      cursor:pointer;
+      font-size:0.9rem;
+      transition: background 0.15s;
+      position:relative;
+    }
+    .tree-item:hover { background:rgba(45,140,240,0.1); }
+    .tree-item.selected { box-shadow: 0 0 0 1px var(--accent-blue); background:rgba(45,140,240,0.15); }
+    .tree-item .item-dot {
+      width:8px; height:8px;
+      border-radius:50%;
+      margin-right:8px;
+      flex-shrink:0;
+    }
+    .tree-item .item-icon { margin-right:6px; }
+    .tree-item .item-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .tree-item .item-score {
+      font-size:0.75rem;
+      font-family: var(--font-mono);
+      margin-left:8px;
+    }
+    .tree-item .delete-btn {
+      display:none;
+      position:absolute;
+      right:8px;
+      color:var(--accent-red);
+      background:none;
+      border:none;
+      cursor:pointer;
+      font-size:1rem;
+    }
+    .tree-item:hover .delete-btn { display:block; }
+
+    /* 中央区 */
+    #centerPanel {
+      flex:1;
+      background:var(--bg-primary);
+      display:flex;
+      flex-direction:column;
+      overflow-y:auto;
+      padding:12px;
+    }
+    .device-diagram {
+      border:2px dashed var(--border-color);
+      border-radius:var(--radius-md);
+      padding:40px;
+      text-align:center;
+      color:var(--text-secondary);
+      margin-bottom:16px;
+      font-size:0.9rem;
+    }
+    .gauges-grid {
+      display:grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap:12px;
+    }
+    .gauge-card {
+      background:var(--bg-card);
+      border-radius:var(--radius-md);
+      padding:12px;
+      cursor:pointer;
+      transition: all 0.2s;
+      border:1px solid transparent;
+    }
+    .gauge-card:hover { border-color:var(--accent-blue); }
+    .gauge-card.selected { box-shadow: 0 0 0 1px var(--accent-blue); }
+    .gauge-card .card-title {
+      font-size:0.85rem;
+      color:var(--text-secondary);
+      margin-bottom:8px;
+    }
+    .gauge-value {
+      font-family: var(--font-mono);
+      font-size:1.4rem;
+      color:var(--accent-cyan);
+      margin-bottom:6px;
+    }
+    .gauge-score {
+      font-size:0.8rem;
+      margin-bottom:4px;
+    }
+    .gauge-health {
+      font-size:0.8rem;
+      font-weight:500;
+    }
+
+    /* 右栏 */
+    #rightPanel {
+      width:340px;
+      background:var(--bg-secondary);
+      display:flex;
+      flex-direction:column;
+      gap:14px;
+      padding:12px;
+      overflow-y:auto;
+    }
+    .right-card {
+      background:var(--bg-card);
+      border-radius:var(--radius-md);
+      padding:12px;
+    }
+    .right-card h3 {
+      font-size:0.9rem;
+      margin-bottom:8px;
+      display:flex;
+      align-items:center;
+      gap:6px;
+    }
+    .alert-item, .warning-item {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      padding:6px 0;
+      border-bottom:1px solid var(--border-color);
+      font-size:0.8rem;
+    }
+    .alert-item:last-child, .warning-item:last-child { border-bottom:none; }
+    .badge {
+      font-size:0.65rem;
+      padding:1px 6px;
+      border-radius:8px;
+      background:var(--accent-red);
+      color:#fff;
+    }
+    .badge.warning { background:var(--accent-yellow); }
+    .badge.pending { background:var(--accent-yellow); }
+    .badge.confirmed { background:var(--accent-red); }
+    .badge.false { background:var(--border-color); color:var(--text-secondary); }
+    .placeholder-card {
+      border:1px dashed var(--border-color);
+      color:var(--text-secondary);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:20px;
+    }
+
+    /* 底部图表区 */
+    #bottomPanel {
+      flex:1.4;
+      background:var(--bg-secondary);
+      display:flex;
+      flex-direction:column;
+      min-height:0;
+    }
+    .chart-controls {
+      height:36px;
+      display:flex;
+      align-items:center;
+      gap:12px;
+      padding:0 12px;
+      border-bottom:1px solid var(--border-color);
+      flex-wrap:wrap;
+    }
+    .chart-controls input {
+      background:var(--bg-card);
+      border:1px solid var(--border-color);
+      color:var(--text-primary);
+      padding:2px 6px;
+      border-radius:4px;
+      width:70px;
+      font-size:0.8rem;
+    }
+    .chart-controls button {
+      background:var(--bg-card);
+      border:1px solid var(--border-color);
+      color:var(--text-primary);
+      padding:3px 10px;
+      border-radius:var(--radius-sm);
+      cursor:pointer;
+      font-size:0.8rem;
+    }
+    .chart-controls button.active { background:var(--accent-blue); border-color:var(--accent-blue); }
+    .chart-wrap {
+      flex:1;
+      position:relative;
+      min-height:0;
+    }
+    canvas#chartCanvas {
+      width:100%;
+      height:100%;
+      display:block;
+    }
+
+    /* 模态框 */
+    .modal-overlay {
+      display:none;
+      position:fixed;
+      top:0; left:0; right:0; bottom:0;
+      background:rgba(0,0,0,0.6);
+      backdrop-filter: blur(4px);
+      z-index:1000;
+      align-items:center;
+      justify-content:center;
+    }
+    .modal-overlay.active { display:flex; }
+    .modal {
+      background:var(--bg-secondary);
+      border-radius:var(--radius-lg);
+      box-shadow:var(--shadow);
+      width:800px;
+      max-height:80vh;
+      display:flex;
+      flex-direction:column;
+    }
+    .modal-header {
+      display:flex;
+      border-bottom:1px solid var(--border-color);
+      padding:0;
+    }
+    .modal-tab {
+      padding:12px 20px;
+      cursor:pointer;
+      font-size:0.9rem;
+      border-bottom:2px solid transparent;
+      transition: var(--transition);
+      background:none;
+      color:var(--text-secondary);
+      border:none;
+    }
+    .modal-tab.active { color:var(--accent-blue); border-bottom-color:var(--accent-blue); }
+    .modal-body {
+      padding:16px;
+      overflow-y:auto;
+      flex:1;
+    }
+    .modal-close {
+      position:absolute;
+      top:8px;
+      right:16px;
+      background:none;
+      border:none;
+      color:var(--text-primary);
+      font-size:1.5rem;
+      cursor:pointer;
+    }
+    .stats-grid {
+      display:grid;
+      grid-template-columns: repeat(4,1fr);
+      gap:12px;
+      margin-bottom:16px;
+    }
+    .stat-card {
+      background:var(--bg-card);
+      padding:16px;
+      border-radius:var(--radius-md);
+      text-align:center;
+    }
+    .stat-value { font-size:1.8rem; font-weight:600; color:var(--accent-cyan); }
+    .stat-label { font-size:0.8rem; color:var(--text-secondary); }
+    table {
+      width:100%;
+      border-collapse:collapse;
+      font-size:0.8rem;
+    }
+    th, td {
+      padding:8px 6px;
+      text-align:left;
+      border-bottom:1px solid var(--border-color);
+    }
+    th { color:var(--text-secondary); font-weight:500; }
+    tr.row-alert { background:rgba(237,63,20,0.15); }
+    tr.row-skip { color:var(--text-secondary); opacity:0.7; }
+    .empty-state { text-align:center; padding:40px; color:var(--text-secondary); }
+    .btn-sm {
+      background:var(--bg-card);
+      border:1px solid var(--border-color);
+      color:var(--text-primary);
+      padding:2px 8px;
+      border-radius:4px;
+      cursor:pointer;
+      font-size:0.75rem;
+      margin:0 2px;
+    }
+    .export-form { display:flex; flex-direction:column; gap:12px; }
+    .export-channels { display:flex; flex-wrap:wrap; gap:6px; }
+    .export-channels label { font-size:0.85rem; display:flex; align-items:center; gap:4px; }
+
+    /* Tooltip 浮层 */
+    .chart-tooltip {
+      position:absolute;
+      pointer-events:none;
+      background:rgba(11,15,26,0.95);
+      border:1px solid var(--border-color);
+      border-radius:6px;
+      padding:6px 10px;
+      font-size:0.75rem;
+      font-family: var(--font-mono);
+      color: var(--text-primary);
+      white-space:nowrap;
+      z-index:5;
+      display:none;
+      box-shadow: var(--shadow);
+    }
+    .chart-tooltip .tt-label { color:var(--text-secondary); font-family:'Segoe UI',sans-serif; }
+    .chart-tooltip .tt-val { color:var(--accent-cyan); }
+
+    /* 时间轴条 */
+    .timeline-bar {
+      height:36px;
+      background:var(--bg-card);
+      border-top:1px solid var(--border-color);
+      position:relative;
+      cursor:grab;
+      flex-shrink:0;
+    }
+    .timeline-bar:active { cursor:grabbing; }
+    .timeline-track { position:absolute; left:8px; right:8px; top:8px; bottom:8px; background:var(--bg-primary); border-radius:3px; overflow:hidden; }
+    .timeline-window { position:absolute; top:0; bottom:0; background:rgba(45,140,240,0.25); border:1px solid var(--accent-blue); border-radius:2px; }
+
+    /* 树拖拽视觉 */
+    .tree-item.drag-over { border-top:2px solid var(--accent-blue); }
+    .tree-item.dragging { opacity:0.4; }
+  </style>
+</head>
+<body>
+  <!-- 顶栏 -->
+  <header id="headerBar">
+    <div class="header-title">🚀 空间站有效载荷预测性维护支持系统</div>
+    <div class="header-right">
+      <div class="link-status">
+        <span class="status-dot" id="linkDot"></span>
+        <span id="linkText">天地链路 正常</span>
+      </div>
+      <div class="utc-clock" id="utcClock"></div>
+      <div class="health-ring-wrap">
+        <span>系统健康</span>
+        <canvas class="health-ring" id="healthRing" width="96" height="96"></canvas>
+      </div>
+      <button style="background:var(--bg-card);border:1px solid var(--border-color);color:var(--text-primary);padding:4px 12px;border-radius:6px;cursor:pointer;" onclick="openDbModal()">📊 数据库</button>
+    </div>
+  </header>
+
+  <!-- 主内容 -->
+  <div id="mainContent">
+    <!-- 左栏 设备树 -->
+    <div id="leftPanel">
+      <div class="panel-header">
+        <span>📡 有效载荷设备树</span>
+        <div class="buttons">
+          <button onclick="addSensor()">➕</button>
+          <button onclick="addFolder()">📁</button>
+          <button onclick="saveConfig()">💾</button>
+        </div>
+      </div>
+      <div id="deviceTree"></div>
+    </div>
+
+    <!-- 中央传感器网格 -->
+    <div id="centerPanel">
+      <div class="device-diagram">🚧 设备示意图 — 开发中</div>
+      <div class="gauges-grid" id="gaugesGrid"></div>
+    </div>
+
+    <!-- 右栏 告警/预警 -->
+    <div id="rightPanel">
+      <div class="right-card placeholder-card">🚧 健康评估 — 开发中</div>
+      <div class="right-card placeholder-card">🚧 故障诊断 — 开发中</div>
+      <div class="right-card">
+        <h3>⚠️ 预测预警</h3>
+        <div id="warningsList"></div>
+      </div>
+      <div class="right-card">
+        <h3>🚨 实测告警</h3>
+        <div id="alertsList"></div>
+      </div>
+      <div class="right-card placeholder-card">🚧 RUL 剩余寿命 — 开发中</div>
+    </div>
+  </div>
+
+  <!-- 底部图表区 -->
+  <div id="bottomPanel">
+    <div class="chart-controls">
+      <span style="font-size:0.8rem;">窗口</span>
+      <input type="number" id="winCount" value="512" min="1" max="10000">
+      <span style="font-size:0.8rem;">Y min</span>
+      <input type="number" id="yMin" value="-1" step="0.1">
+      <span style="font-size:0.8rem;">Y max</span>
+      <input type="number" id="yMax" value="1" step="0.1">
+      <button id="btnRealTime" class="active" onclick="setMode('realtime')">▶ 实时</button>
+      <button id="btnFrozen" onclick="setMode('frozen')">⏸ 冻结</button>
+      <button onclick="resetChart()">↺ 重置</button>
+      <button onclick="openExportModal()">📥 导出</button>
+      <span id="chunkStatus" style="font-size:0.75rem;color:var(--text-secondary);"></span>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="chartCanvas"></canvas>
+      <div class="chart-tooltip" id="chartTooltip"></div>
+    </div>
+    <div class="timeline-bar" id="timelineBar">
+      <div class="timeline-track">
+        <div class="timeline-window" id="timelineWindow"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 数据库模态框 -->
+  <div class="modal-overlay" id="dbModalOverlay" onclick="if(event.target===this) closeDbModal()">
+    <div class="modal" style="position:relative;">
+      <button class="modal-close" onclick="closeDbModal()">✕</button>
+      <div class="modal-header">
+        <button class="modal-tab active" onclick="switchDbTab(0)">概览</button>
+        <button class="modal-tab" onclick="switchDbTab(1)">历史遥测</button>
+        <button class="modal-tab" onclick="switchDbTab(2)">检测明细</button>
+        <button class="modal-tab" onclick="switchDbTab(3)">告警历史</button>
+      </div>
+      <div class="modal-body" id="dbModalBody"></div>
+    </div>
+  </div>
+
+  <!-- 导出模态框 -->
+  <div class="modal-overlay" id="exportModalOverlay" onclick="if(event.target===this) closeExportModal()">
+    <div class="modal" style="width:500px; position:relative;">
+      <button class="modal-close" onclick="closeExportModal()">✕</button>
+      <div class="modal-body">
+        <h3>📥 导出数据</h3>
+        <div class="export-form">
+          <div><strong>选择通道:</strong></div>
+          <div class="export-channels" id="exportChannels"></div>
+          <div><label>开始时间: <input type="datetime-local" id="exportStart"></label></div>
+          <div><label>结束时间: <input type="datetime-local" id="exportEnd"></label></div>
+          <div>
+            <label><input type="radio" name="fmt" value="csv" checked> CSV</label>
+            <label><input type="radio" name="fmt" value="xlsx"> XLSX</label>
+          </div>
+          <button onclick="doExport()" style="align-self:flex-start;">开始导出</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 新建/编辑设备模态框 -->
+  <div class="modal-overlay" id="deviceModalOverlay" onclick="if(event.target===this) closeDeviceModal()">
+    <div class="modal" style="width:420px; position:relative;">
+      <button class="modal-close" onclick="closeDeviceModal()">✕</button>
+      <div class="modal-body">
+        <h3 id="deviceModalTitle">新建传感器</h3>
+        <div class="export-form">
+          <div><label>名称: <input type="text" id="devName" style="width:100%;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:4px 8px;"></label></div>
+          <div id="devSensorFields">
+            <div><label>通道名: <input type="text" id="devChannel" placeholder="如 C-1" style="width:100%;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:4px 8px;"></label></div>
+            <div><label>数据源: <input type="text" id="devSource" placeholder="如 file:NASA-MSL/C-1" style="width:100%;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:4px 8px;"></label></div>
+            <div><label>块大小: <input type="number" id="devBlockSize" value="512" min="64" max="4096" style="width:80px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:4px 8px;"></label></div>
+          </div>
+          <button onclick="submitDeviceModal()" style="align-self:flex-start;">确定</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  // ====================== 颜色常量（Canvas 不支持 var()，必须用 hex） ======================
+  // 与 :root 中的 CSS 变量保持同步
+  const C = {
+    bgPrimary: '#0b0f1a', bgSecondary: '#131825', bgCard: '#1a1f2f',
+    border: '#2a3348', textPri: '#e0e6f0', textSec: '#8e9bb5',
+    blue: '#2d8cf0', green: '#19be6b', yellow: '#f5a623',
+    red: '#ed3f14', cyan: '#00c9db'
+  };
+
+  // ====================== 全局状态 ======================
+  const state = {
+    currentChannel: null,
+    mode: 'realtime',           // 'realtime' | 'frozen'
+    deviceTree: [],
+    sensors: {},
+    systemHealth: 0,
+    windowData: null,
+    alerts: [],
+    warnings: [],
+    dbStats: {},
+    viewEndTs: null,            // 冻结模式右边界（epoch s）
+    pollingTimers: {},
+    linkOk: true,
+    linkFailCount: 0,
+    hoveredIdx: -1,             // 图表悬停的 raw 索引
+    hoveredPredIdx: -1,         // 图表悬停的 prediction 索引
+    chartLayout: null,          // 缓存上次 drawChart 的坐标映射，供 tooltip 用
+  };
+
+  function formatTime(ts) {
+    if (ts == null) return '—';
+    // UTC 时间显示（遥测标准）：时间戳是 epoch 秒，用 toISOString 直接转 UTC
+    const d = new Date(ts * 1000);
+    return d.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+  }
+  function fmt(n, d=3) { return n == null ? '—' : n.toFixed(d); }
+
+  // CSS 颜色（用于 DOM style，可以用 var()）
+  function colorForScore(s) {
+    if (s == null) return 'var(--text-secondary)';
+    return s > 0.7 ? 'var(--accent-red)' : 'var(--accent-yellow)';
+  }
+  function healthColor(v) {
+    if (v < 60) return 'var(--accent-red)';
+    if (v < 80) return 'var(--accent-yellow)';
+    return 'var(--accent-green)';
+  }
+
+  // ====================== API 层 ======================
+  const api = {
+    async request(method, path, body) {
+      const opts = { method, headers: {} };
+      if (body) {
+        opts.headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify(body);
+      }
+      const res = await fetch(path, opts);
+      if (path.includes('/export')) {
+        if (!res.ok) throw new Error('导出失败');
+        return res.blob();
+      }
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '请求失败');
+      return data;
+    },
+    poll(body) { return this.request('POST','/api/poll',body); },
+    forecast(values) { return this.request('POST','/api/forecast',{values}); },
+    getConfig() { return this.request('GET','/api/config'); },
+    saveConfig(tree) { return this.request('POST','/api/config',{device_tree:tree}); },
+    reset() { return this.request('POST','/api/reset'); },
+    health(blockSize) { return this.request('GET',`/api/health?block_size=${blockSize||20000}`); },
+    alerts(limit) { return this.request('GET',`/api/alerts?limit=${limit||50}`); },
+    warnings(limit) { return this.request('GET',`/api/warnings?limit=${limit||50}`); },
+    predictScores(ch) { return this.request('GET',`/api/predict-scores?channel=${encodeURIComponent(ch)}`); },
+    sensors() { return this.request('GET','/api/sensors'); },
+    history(params) { return this.request('GET','/api/history?'+new URLSearchParams(params)); },
+    deleteHistory(params) { return this.request('DELETE','/api/history?'+new URLSearchParams(params)); },
+    detection(params) { return this.request('GET','/api/detection?'+new URLSearchParams(params)); },
+    deleteDetection(params) { return this.request('DELETE','/api/detection?'+new URLSearchParams(params)); },
+    dbStats() { return this.request('GET','/api/db-stats'); },
+    window(params) { return this.request('GET','/api/window?'+new URLSearchParams(params)); },
+    alertsHistory(limit) { return this.request('GET',`/api/alerts/history?limit=${limit||50}`); },
+    patchAlert(id, status) { return this.request('PATCH',`/api/alerts/${id}`,{status}); },
+    async exportData(params) {
+      const blob = await this.request('GET','/api/export?'+new URLSearchParams(params));
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `export.${params.fmt||'csv'}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  // ====================== 轮询管理 ======================
+  const pollManager = {
+    start(name, fn, interval) {
+      this.stop(name);
+      state.pollingTimers[name] = setInterval(async () => {
+        try { await fn(); state.linkFailCount = 0; updateLinkStatus(true); }
+        catch(e) { state.linkFailCount++; if(state.linkFailCount>=3) updateLinkStatus(false); }
+      }, interval);
+    },
+    stop(name) {
+      if(state.pollingTimers[name]) { clearInterval(state.pollingTimers[name]); delete state.pollingTimers[name]; }
+    },
+    stopAll() { Object.keys(state.pollingTimers).forEach(n => this.stop(n)); }
+  };
+
+  function updateLinkStatus(ok) {
+    state.linkOk = ok;
+    document.getElementById('linkDot').className = 'status-dot' + (ok ? '' : ' lost');
+    document.getElementById('linkText').textContent = ok ? '天地链路 正常' : '天地链路 中断';
+  }
+
+  // ====================== 数据获取 ======================
+  async function fetchWindow() {
+    if(!state.currentChannel) return;
+    const params = { channel: state.currentChannel, count: parseInt(document.getElementById('winCount').value) || 512 };
+    if(state.mode === 'frozen' && state.viewEndTs != null) params.end_ts = state.viewEndTs;
+    const data = await api.window(params);
+    // 统一序列模型：data.data[] 每行含 raw_value + predicted_value 同行不同列，
+    // 不再需要预测缓存逻辑——预测和真实在同一行，要么都有要么都没有。
+    state.windowData = data;
+    // 记住窗口边界，用于冻结模式平移
+    if (data.end_ts != null && state.mode === 'frozen' && state.viewEndTs == null) {
+      state.viewEndTs = data.end_ts;
+    }
+    // drawChart 由 rAF 循环驱动，不在这里手动调
+  }
+
+  async function fetchHealth() {
+    const data = await api.health();
+    state.systemHealth = data.system;
+    drawHealthRing();
+  }
+
+  async function fetchSensors() {
+    const data = await api.sensors();
+    state.sensors = {};
+    const liveSensors = data.sensors || [];
+    if (liveSensors.length) {
+      // space 端在跑：用 RingBuffer 实时数据
+      liveSensors.forEach(s => state.sensors[s.channel] = s);
+    } else {
+      // space 端未启动：从 SQLite 拉每个通道的最新点回填仪表
+      const channels = getFlatSensors().map(n => n.channelName).filter(Boolean);
+      await Promise.all(channels.map(async (ch) => {
+        try {
+          const w = await api.window({ channel: ch, count: 1 });
+          if (w.data && w.data.length) {
+            const last = w.data[w.data.length - 1];
+            state.sensors[ch] = {
+              channel: ch,
+              latest_raw: last.raw_value,
+              latest_score: last.anomaly_score,
+              points: w.count || 0,
+              received_at: last.timestamp,
+              health: 100,
+            };
+          }
+        } catch(e) {}
+      }));
+    }
+    renderGauges();
+    renderDeviceTree();
+  }
+
+  async function fetchAlerts() {
+    const data = await api.alerts();
+    state.alerts = data.alerts || [];
+    renderAlertsList();
+  }
+
+  async function fetchWarnings() {
+    const data = await api.warnings();
+    state.warnings = data.warnings || [];
+    renderWarningsList();
+  }
+
+  async function fetchDbStats() {
+    try { state.dbStats = await api.dbStats(); } catch(e) {}
+    if(document.getElementById('dbModalOverlay').classList.contains('active') && dbCurrentTab===0) renderDbOverview();
+  }
+
+  // ====================== UI 渲染 ======================
+  function renderDeviceTree() {
+    const container = document.getElementById('deviceTree');
+    container.innerHTML = '';
+    const walk = (nodes, depth=0) => {
+      nodes.forEach(node => {
+        const div = document.createElement('div');
+        div.className = 'tree-item';
+        div.style.paddingLeft = (8 + depth*20) + 'px';
+        div.draggable = true;
+        div.dataset.id = node.id;
+        if(node.type === 'sensor' && node.channelName === state.currentChannel) div.classList.add('selected');
+
+        const dot = document.createElement('span');
+        dot.className = 'item-dot';
+        let score = null;
+        if(node.type === 'sensor' && state.sensors[node.channelName]) {
+          score = state.sensors[node.channelName].latest_score;
+        }
+        dot.style.background = score == null ? 'var(--text-secondary)' : (score>0.7?'var(--accent-red)':(score>0.4?'var(--accent-yellow)':'var(--accent-green)'));
+        div.appendChild(dot);
+
+        const icon = document.createElement('span');
+        icon.className = 'item-icon';
+        icon.textContent = node.type === 'folder' ? '📁' : '📡';
+        div.appendChild(icon);
+
+        const name = document.createElement('span');
+        name.className = 'item-name';
+        name.textContent = node.name;
+        div.appendChild(name);
+
+        if(node.type === 'sensor' && score != null) {
+          const s = document.createElement('span');
+          s.className = 'item-score';
+          s.textContent = score.toFixed(3);
+          s.style.color = colorForScore(score);
+          div.appendChild(s);
+        }
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'delete-btn';
+        delBtn.textContent = '✕';
+        delBtn.onclick = (e) => { e.stopPropagation(); deleteNode(node.id); };
+        div.appendChild(delBtn);
+
+        div.onclick = (e) => {
+          e.stopPropagation();
+          // 单击/双击区分：延迟 250ms 判断是否有第二次点击
+          if (div._clickTimer) {
+            clearTimeout(div._clickTimer);
+            div._clickTimer = null;
+            // 双击 → 编辑
+            if(node.type === 'sensor') openEditDeviceModal(node);
+          } else {
+            div._clickTimer = setTimeout(() => {
+              div._clickTimer = null;
+              // 单击 → 选中通道
+              if(node.type === 'sensor') selectChannel(node.channelName);
+            }, 250);
+          }
+        };
+
+        // 拖拽排序
+        div.addEventListener('dragstart', (e) => {
+          state.draggingId = node.id;
+          div.classList.add('dragging');
+          e.dataTransfer.effectAllowed = 'move';
+        });
+        div.addEventListener('dragend', () => { div.classList.remove('dragging'); });
+        div.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          div.classList.add('drag-over');
+        });
+        div.addEventListener('dragleave', () => div.classList.remove('drag-over'));
+        div.addEventListener('drop', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          div.classList.remove('drag-over');
+          if(state.draggingId && state.draggingId !== node.id) {
+            moveNode(state.draggingId, node.id);
+            state.draggingId = null;
+          }
+        });
+
+        container.appendChild(div);
+        if(node.children) walk(node.children, depth+1);
+      });
+    };
+    walk(state.deviceTree);
+  }
+
+  // 把 srcId 节点移到 targetId 节点前面（同层）
+  function moveNode(srcId, targetId) {
+    const findAndRemove = (nodes) => {
+      for(let i=0;i<nodes.length;i++) {
+        if(nodes[i].id === srcId) { return nodes.splice(i,1)[0]; }
+        if(nodes[i].children) { const r = findAndRemove(nodes[i].children); if(r) return r; }
+      }
+      return null;
+    };
+    const insertBefore = (nodes, target, item) => {
+      for(let i=0;i<nodes.length;i++) {
+        if(nodes[i].id === target) { nodes.splice(i,0,item); return true; }
+        if(nodes[i].children && insertBefore(nodes[i].children, target, item)) return true;
+      }
+      return false;
+    };
+    const item = findAndRemove(state.deviceTree);
+    if(item) insertBefore(state.deviceTree, targetId, item);
+    renderDeviceTree();
+  }
+
+  function renderGauges() {
+    const grid = document.getElementById('gaugesGrid');
+    // 从设备树读通道列表（而非依赖 RingBuffer 的 state.sensors）
+    // 这样即使 space 端未启动、RingBuffer 空，仪表区也会显示传感器卡片（数据为 —）
+    const sensors = getFlatSensors();
+    if(!sensors.length) {
+      grid.innerHTML = '<div class="empty-state">🚧 请先添加传感器</div>';
+      return;
+    }
+    grid.innerHTML = sensors.map(node => {
+      const ch = node.channelName || node.name;
+      const s = state.sensors[ch] || {};  // 可能为空（RingBuffer 无数据）
+      const sel = ch === state.currentChannel ? ' selected' : '';
+      return `<div class="gauge-card${sel}" onclick="selectChannel('${ch}')">
+        <div class="card-title">📡 ${node.name} [${ch}]</div>
+        <div class="gauge-value">${fmt(s.latest_raw,4)}</div>
+        <div class="gauge-score" style="color:${colorForScore(s.latest_score)}">异常分数: ${fmt(s.latest_score,4)}</div>
+        <div class="gauge-health" style="color:${healthColor(s.health != null ? s.health : 100)}">健康: ${fmt(s.health,1)}%</div>
+      </div>`;
+    }).join('');
+  }
+
+  function renderAlertsList() {
+    const container = document.getElementById('alertsList');
+    if(!state.alerts.length) { container.innerHTML = '<div class="empty-state">✅ 当前无告警</div>'; return; }
+    container.innerHTML = state.alerts.map(a => `
+      <div class="alert-item">
+        <span>${a.channel} · ${fmt(a.score)}</span>
+        <span class="badge">实报</span>
+        <span style="font-size:0.7rem;">${formatTime(a.time)}</span>
+      </div>`).join('');
+  }
+
+  function renderWarningsList() {
+    const container = document.getElementById('warningsList');
+    if(!state.warnings.length) { container.innerHTML = '<div class="empty-state">暂无预测预警</div>'; return; }
+    container.innerHTML = state.warnings.map(w => `
+      <div class="warning-item">
+        <span>${w.channel} · ${fmt(w.max_predict_score)}</span>
+        <span class="badge ${w.status}">${w.status}</span>
+        <span style="font-size:0.7rem;">${formatTime(w.created_at)}</span>
+      </div>`).join('');
+  }
+
+  function selectChannel(ch) {
+    state.currentChannel = ch;
+    state.viewEndTs = null;
+    state.hoveredIdx = -1;
+    renderDeviceTree();
+    renderGauges();
+    if(state.mode === 'realtime') {
+      pollManager.stop('chart');
+      pollManager.start('chart', fetchWindow, 2000);
+    } else {
+      // 切换通道时冻结模式也抓一次最新
+      state.viewEndTs = null;
+      fetchWindow();
+    }
+  }
+
+  function setMode(mode) {
+    state.mode = mode;
+    document.getElementById('btnRealTime').classList.toggle('active', mode==='realtime');
+    document.getElementById('btnFrozen').classList.toggle('active', mode==='frozen');
+    if(mode === 'realtime') {
+      state.viewEndTs = null;
+      pollManager.start('chart', fetchWindow, 2000);
+    } else {
+      pollManager.stop('chart');
+      // 冻结时抓一次当前最新作为起点
+      state.viewEndTs = null;
+      fetchWindow();
+    }
+  }
+
+  async function resetChart() {
+    // 调后端清空内存（RingBuffer + AlertStore + WarningStore）
+    try { await api.reset(); } catch(e) {}
+    state.viewEndTs = null;
+    state.alerts = [];
+    state.warnings = [];
+    renderAlertsList();
+    renderWarningsList();
+    setMode('realtime');
+  }
+
+  // ====================== Canvas 图表（rAF 持续重绘） ======================
+  const canvas = document.getElementById('chartCanvas');
+  const ctx = canvas.getContext('2d');
+  const tooltip = document.getElementById('chartTooltip');
+  const timelineBar = document.getElementById('timelineBar');
+  const timelineWindow = document.getElementById('timelineWindow');
+  let dpr = window.devicePixelRatio || 1;
+  let mouseX = -1, mouseY = -1;
+  let isDragging = false;
+
+  function resizeCanvas() {
+    const rect = canvas.parentElement.getBoundingClientRect();
+    // 减去 timelineBar 高度
+    const tlH = 36;
+    canvas.width = rect.width * dpr;
+    canvas.height = (rect.height - tlH) * dpr;
+    canvas.style.width = rect.width + 'px';
+    canvas.style.height = (rect.height - tlH) + 'px';
+  }
+
+  // 主绘制函数：每帧由 rAF 调用
+  function drawChart() {
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0,0,w,h);
+
+    if(!state.windowData || !state.windowData.data || !state.windowData.data.length) {
+      ctx.fillStyle = C.textSec;
+      ctx.font = `${14*dpr}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText('🚧 等待数据', w/2, h/2);
+      state.chartLayout = null;
+      updateTimeline();
+      return;
+    }
+
+    // 统一序列：每行含 timestamp + raw_value/predicted_value 等四列
+    const data = state.windowData.data;
+    const topH = h * 0.7, bottomH = h * 0.3;
+    const pad = { top: 20*dpr, right: 50*dpr, bottom: 30*dpr, left: 60*dpr };
+
+    // ---- X 轴：时间轴折叠 ----
+    // 后端返回 gaps 列表（系统中断），折叠后 gap 两侧数据紧凑排列，
+    // gap 位置画竖虚线+"中断Xh"标注。这样 tSpan 不再爆炸，拖拽不卡。
+    const tsMs = data.map(d => d.timestamp * 1000);
+    const plotW = w - pad.left - pad.right;
+    const gapList = state.windowData.gaps || [];
+
+    // 找到每个 gap 在 data 中的分界索引
+    const gapIndices = [];
+    for (const g of gapList) {
+      // g.end 是 gap 后第一个点的 timestamp（秒），转 ms 比较
+      const idx = data.findIndex(d => Math.abs(d.timestamp * 1000 - g.end * 1000) < 1);
+      if (idx > 0) gapIndices.push({ index: idx, duration_s: g.duration });
+    }
+
+    // 计算折叠后的视觉 X 坐标：数据段按真实时间比例分配宽度，
+    // gap 占固定 GAP_W 像素。先算各段真实时间跨度，再按比例分配。
+    const GAP_W = 40 * dpr;  // 每个缺口占的视觉宽度
+    let segCount = gapIndices.length + 1;
+    let totalGapW = gapIndices.length * GAP_W;
+    let dataW = plotW - totalGapW;  // 数据区总像素
+    if (dataW < plotW * 0.3) { dataW = plotW * 0.3; }  // 保证数据区至少30%
+
+    // 每段的 [startIndex, endIndex) 和真实时间跨度
+    const segments = [];
+    let segStart = 0;
+    for (const gi of gapIndices) {
+      segments.push({ start: segStart, end: gi.index, dur: tsMs[gi.index - 1] - tsMs[segStart] });
+      segStart = gi.index;
+    }
+    segments.push({ start: segStart, end: data.length, dur: tsMs[data.length - 1] - tsMs[segStart] });
+
+    // 每段真实时间跨度之和（用于按比例分配 dataW）
+    const totalDur = segments.reduce((s, seg) => s + Math.max(seg.dur, 1), 0);
+
+    // 为每个点计算折叠后的 X 坐标
+    const foldedX = new Array(data.length);
+    let cursorX = pad.left;
+    let segIdx = 0;
+    for (let i = 0; i < data.length; i++) {
+      if (segIdx < segments.length && i >= segments[segIdx].end) {
+        cursorX += GAP_W;  // 跨过 gap
+        segIdx++;
+      }
+      const seg = segments[segIdx];
+      const segW = dataW * Math.max(seg.dur, 1) / totalDur;
+      const frac = seg.dur > 0 ? (tsMs[i] - tsMs[seg.start]) / seg.dur : 0;
+      foldedX[i] = cursorX + frac * segW;
+      // 段内最后一个点时推进 cursorX
+      if (i === seg.end - 1) {
+        cursorX += segW;
+      }
+    }
+
+    // 折叠后总跨度（像素→时间）：用于拖拽计算，不含 gap
+    const tMin = tsMs[0];
+    const tMax = tsMs[tsMs.length - 1];
+    // 折叠后的"等效真实时间跨度"=数据段真实时间之和（不含gap）
+    const foldedTSpan = segments.reduce((s, seg) => s + Math.max(seg.dur, 1), 1);
+    const xOf = (i) => foldedX[i];  // 改为按索引取折叠坐标
+
+    // 缺口检测阈值（3 倍中位数间隔）——用于段内偶然丢包断线
+    const gapThreshold = (() => {
+      if (tsMs.length < 3) return Infinity;
+      const diffs = [];
+      for (let i = 1; i < tsMs.length; i++) {
+        // 跳过 gap 处（gap 已折叠，不参与中位数计算）
+        if (gapIndices.some(gi => gi.index === i)) continue;
+        diffs.push(tsMs[i] - tsMs[i-1]);
+      }
+      if (diffs.length === 0) return Infinity;
+      diffs.sort((a,b) => a-b);
+      return diffs[Math.floor(diffs.length/2)] * 3;
+    })();
+
+    // 悬停索引：在折叠坐标上找最近点
+    state.hoveredIdx = -1;
+    if (mouseX >= pad.left && mouseX <= pad.left + plotW) {
+      let best = 0, bestDist = Infinity;
+      for (let i = 0; i < foldedX.length; i++) {
+        const d = Math.abs(foldedX[i] - mouseX);
+        if (d < bestDist) { bestDist = d; best = i; }
+      }
+      state.hoveredIdx = best;
+    }
+
+    // ---- 绘制子图 ----
+    // rawKey: 实测值列名, predKey: 预测值列名
+    // fixedYRange: [min,max] 固定 Y 轴（异常分数图用 [0,1]）
+    function drawSubChart(y0, height, rawKey, predKey, rawColor, predColor, threshold, fixedYRange) {
+      let minV, maxV;
+      if (fixedYRange) {
+        minV = fixedYRange[0]; maxV = fixedYRange[1];
+      } else {
+        minV = Infinity; maxV = -Infinity;
+        for (const d of data) {
+          if (d[rawKey] != null) { if (d[rawKey] < minV) minV = d[rawKey]; if (d[rawKey] > maxV) maxV = d[rawKey]; }
+          if (d[predKey] != null) { if (d[predKey] < minV) minV = d[predKey]; if (d[predKey] > maxV) maxV = d[predKey]; }
+        }
+        const yMinInput = document.getElementById('yMin').value;
+        const yMaxInput = document.getElementById('yMax').value;
+        if (yMinInput !== '') minV = parseFloat(yMinInput);
+        if (yMaxInput !== '') maxV = parseFloat(yMaxInput);
+        if (minV === Infinity) minV = -1;
+        if (maxV === -Infinity) maxV = 1;
+        if (minV === maxV) { minV -= 0.1; maxV += 0.1; }
+      }
+      const plotH = height - pad.top - pad.bottom;
+      const yScale = plotH / (maxV - minV);
+      const yOf = (v) => y0 + pad.top + plotH - (v - minV) * yScale;
+
+      // 网格 + 纵轴标签
+      ctx.strokeStyle = C.border;
+      ctx.lineWidth = 0.5 * dpr;
+      ctx.fillStyle = C.textSec;
+      ctx.font = `${10*dpr}px monospace`;
+      ctx.textAlign = 'right';
+      for (let i = 0; i <= 4; i++) {
+        const y = y0 + pad.top + plotH * i / 4;
+        ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(w - pad.right, y); ctx.stroke();
+        ctx.fillText((maxV - (maxV-minV)*i/4).toFixed(3), pad.left - 6*dpr, y + 3*dpr);
+      }
+
+      // 实测实线（raw_value 不为 null 的点，缺口断开）
+      ctx.beginPath();
+      ctx.strokeStyle = rawColor;
+      ctx.lineWidth = 1.5 * dpr;
+      let rStarted = false, rPrevTs = null;
+      for (let i = 0; i < data.length; i++) {
+        const v = data[i][rawKey];
+        if (v == null) { rStarted = false; continue; }
+        const x = xOf(i);
+        const y = yOf(v);
+        if (!rStarted || (rPrevTs != null && tsMs[i] - rPrevTs > gapThreshold)) {
+          ctx.moveTo(x, y); rStarted = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
+        rPrevTs = tsMs[i];
+      }
+      ctx.stroke();
+
+      // 预测虚线（predicted_value 不为 null 的点，缺口断开）
+      ctx.beginPath();
+      ctx.strokeStyle = predColor;
+      ctx.lineWidth = 1.5 * dpr;
+      ctx.setLineDash([5*dpr, 3*dpr]);
+      let pStarted = false, pPrevTs = null;
+      for (let i = 0; i < data.length; i++) {
+        const v = data[i][predKey];
+        if (v == null) { pStarted = false; continue; }
+        const x = xOf(i);
+        const y = yOf(v);
+        if (!pStarted || (pPrevTs != null && tsMs[i] - pPrevTs > gapThreshold)) {
+          ctx.moveTo(x, y); pStarted = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
+        pPrevTs = tsMs[i];
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // 阈值线
+      if (threshold != null) {
+        ctx.beginPath();
+        ctx.strokeStyle = C.red;
+        ctx.lineWidth = 1 * dpr;
+        ctx.setLineDash([4*dpr, 4*dpr]);
+        const yTh = yOf(threshold);
+        ctx.moveTo(pad.left, yTh); ctx.lineTo(w - pad.right, yTh);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      return { y0, minV, maxV, yScale, plotH, yOf };
+    }
+
+    const topLayout = drawSubChart(0, topH, 'raw_value', 'predicted_value', C.blue, C.green, null, null);
+    // 异常分数图：anomaly_score(黄实线) + predicted_anomaly_score(绿虚线)，Y 轴固定 0~1
+    const botLayout = drawSubChart(topH, bottomH, 'anomaly_score', 'predicted_anomaly_score', C.yellow, C.green, 0.7, [0, 1]);
+
+    // ---- 缺口竖虚线 + "中断Xh" 标注 ----
+    for (const gi of gapIndices) {
+      const xGap = foldedX[gi.index] - GAP_W / 2;  // gap 中线
+      ctx.strokeStyle = C.textSec;
+      ctx.lineWidth = 1 * dpr;
+      ctx.setLineDash([4*dpr, 4*dpr]);
+      ctx.beginPath();
+      ctx.moveTo(xGap, pad.top);
+      ctx.lineTo(xGap, topH + bottomH - pad.bottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // 标注中断时长
+      const dur_h = gi.duration_s / 3600;
+      const label = dur_h >= 1 ? `中断 ${dur_h.toFixed(1)}h` : `中断 ${(gi.duration_s/60).toFixed(0)}min`;
+      ctx.fillStyle = C.textSec;
+      ctx.font = `${9*dpr}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText(label, xGap, pad.top - 4*dpr);
+    }
+
+    // ---- 数据未到达区间标注（有预测值但无真实值的连续段）----
+    // 这些是 pred 预测了未来但 raw 还没到的区间（poll 间隔 > pred 覆盖范围）。
+    // 用两条红色竖线标注起止，提示该区间数据不可靠。
+    const predOnlyRanges = [];
+    let poStart = -1;
+    for (let i = 0; i < data.length; i++) {
+      const hasPred = data[i].predicted_value != null;
+      const hasRaw = data[i].raw_value != null;
+      if (hasPred && !hasRaw) {
+        if (poStart < 0) poStart = i;
+      } else {
+        if (poStart >= 0 && i - poStart >= 5) {
+          predOnlyRanges.push({ start: poStart, end: i - 1 });
+        }
+        poStart = -1;
+      }
+    }
+    if (poStart >= 0 && data.length - poStart >= 5) {
+      predOnlyRanges.push({ start: poStart, end: data.length - 1 });
+    }
+    for (const r of predOnlyRanges) {
+      const x1 = foldedX[r.start];
+      const x2 = foldedX[r.end];
+      // 红色半透明背景
+      ctx.fillStyle = 'rgba(237, 63, 20, 0.08)';
+      ctx.fillRect(x1, pad.top, x2 - x1, topH + bottomH - pad.bottom - pad.top);
+      // 起止红竖线
+      ctx.strokeStyle = C.red;
+      ctx.lineWidth = 1.5 * dpr;
+      ctx.setLineDash([3*dpr, 3*dpr]);
+      ctx.beginPath();
+      ctx.moveTo(x1, pad.top); ctx.lineTo(x1, topH + bottomH - pad.bottom);
+      ctx.moveTo(x2, pad.top); ctx.lineTo(x2, topH + bottomH - pad.bottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // 标注
+      ctx.fillStyle = C.red;
+      ctx.font = `${9*dpr}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText('数据未到达', (x1 + x2) / 2, pad.top - 4*dpr);
+    }
+
+    // 十字准线 + tooltip
+    if (state.hoveredIdx >= 0) {
+      const i = state.hoveredIdx;
+      const d = data[i];
+      const x = xOf(i);
+      // 竖线
+      ctx.strokeStyle = C.textSec;
+      ctx.lineWidth = 1 * dpr;
+      ctx.setLineDash([3*dpr, 3*dpr]);
+      ctx.beginPath();
+      ctx.moveTo(x, pad.top);
+      ctx.lineTo(x, topH + bottomH - pad.bottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // 高亮点：有 raw 画蓝点，有 pred 画绿点
+      if (d.raw_value != null) {
+        ctx.fillStyle = C.blue;
+        ctx.beginPath(); ctx.arc(x, topLayout.yOf(d.raw_value), 4*dpr, 0, Math.PI*2); ctx.fill();
+      }
+      if (d.predicted_value != null) {
+        ctx.fillStyle = C.green;
+        ctx.beginPath(); ctx.arc(x, topLayout.yOf(d.predicted_value), 4*dpr, 0, Math.PI*2); ctx.fill();
+      }
+      if (d.anomaly_score != null) {
+        ctx.fillStyle = C.yellow;
+        ctx.beginPath(); ctx.arc(x, botLayout.yOf(d.anomaly_score), 4*dpr, 0, Math.PI*2); ctx.fill();
+      }
+      if (d.predicted_anomaly_score != null) {
+        ctx.fillStyle = C.green;
+        ctx.beginPath(); ctx.arc(x, botLayout.yOf(d.predicted_anomaly_score), 4*dpr, 0, Math.PI*2); ctx.fill();
+      }
+      // tooltip：同一时间点同时显示 raw 和 pred（如果有）
+      tooltip.style.display = 'block';
+      let html = `<div class="tt-label">${formatTime(d.timestamp)}</div>`;
+      if (d.raw_value != null) html += `<div>遥测: <span class="tt-val">${fmt(d.raw_value,4)}</span></div>`;
+      if (d.predicted_value != null) html += `<div style="color:${C.green}">预测: <span class="tt-val">${fmt(d.predicted_value,4)}</span></div>`;
+      if (d.anomaly_score != null) html += `<div>分数: <span class="tt-val">${fmt(d.anomaly_score,4)}</span></div>`;
+      if (d.predicted_anomaly_score != null) html += `<div style="color:${C.green}">预测分数: <span class="tt-val">${fmt(d.predicted_anomaly_score,4)}</span></div>`;
+      tooltip.innerHTML = html;
+      const cssX = x / dpr + 12;
+      const cssY = mouseY / dpr + 12;
+      const wrapW = canvas.parentElement.clientWidth;
+      tooltip.style.left = (cssX + 150 > wrapW ? cssX - 160 : cssX) + 'px';
+      tooltip.style.top = Math.max(0, cssY) + 'px';
+    } else {
+      tooltip.style.display = 'none';
+    }
+
+    // 存储真实时间的 gap 边界供拖拽跨 gap 跳跃用
+    const gapBounds = gapIndices.map(gi => ({
+      before: data[gi.index - 1].timestamp,   // gap 前最后一个点
+      after: data[gi.index].timestamp,         // gap 后第一个点
+    }));
+    state.chartLayout = { pad, topH, bottomH, tSpan: foldedTSpan, plotW, gapIndices, tsMs, gapBounds };
+
+    // 左边界红色提示线：拖拽到最早数据时显示"已无更早数据"
+    if (state._atLeftBound) {
+      ctx.strokeStyle = C.red;
+      ctx.lineWidth = 2 * dpr;
+      ctx.beginPath();
+      ctx.moveTo(pad.left, pad.top);
+      ctx.lineTo(pad.left, topH + bottomH - pad.bottom);
+      ctx.stroke();
+      ctx.fillStyle = C.red;
+      ctx.font = `${10*dpr}px sans-serif`;
+      ctx.textAlign = 'left';
+      ctx.fillText('◀ 已无更早数据', pad.left + 4*dpr, pad.top + 12*dpr);
+    }
+
+    updateTimeline();
+  }
+
+  // rAF 主循环
+  function rafLoop() {
+    drawChart();
+    requestAnimationFrame(rafLoop);
+  }
+
+  // ====================== 图表交互：拖拽平移 ======================
+  canvas.addEventListener('mousedown', (e) => {
+    if (state.mode !== 'frozen' || !state.windowData || !state.windowData.data || !state.windowData.data.length) return;
+    isDragging = true;
+    const rect = canvas.getBoundingClientRect();
+    state._dragStartX = (e.clientX - rect.left) * dpr;
+    state._dragStartEndTs = state.viewEndTs;
+    canvas.style.cursor = 'grabbing';
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    mouseX = (e.clientX - rect.left) * dpr;
+    mouseY = (e.clientY - rect.top) * dpr;
+    if (isDragging && state.chartLayout) {
+      const dx = mouseX - state._dragStartX;
+      const { tSpan, plotW, gapBounds } = state.chartLayout;
+      // 像素位移 → 时间位移（向右拖 = 看更早 = end_ts 减小）
+      let tsDeltaSec = -(dx / plotW) * tSpan / 1000;
+      let newEndTs = state._dragStartEndTs + tsDeltaSec;
+      // 跨 gap 跳跃：如果新 viewEndTs 落入某个 gap 内部，跳到 gap 的另一侧
+      // 这样拖拽不会卡在 gap 的真实时间跨度（小时级）里
+      if (gapBounds && gapBounds.length > 0) {
+        for (const g of gapBounds) {
+          // 向左拖（newEndTs 减小）：如果穿过 gap.after 进入 gap 内部，跳到 gap.before
+          if (newEndTs < g.after && newEndTs > g.before) {
+            // 判断拖拽方向：如果起点在 gap.after 之后（向左拖），跳到 gap.before
+            if (state._dragStartEndTs >= g.after) {
+              newEndTs = g.before;
+            } else {
+              newEndTs = g.after;
+            }
+            break;
+          }
+        }
+      }
+      // 边界保护：viewEndTs 不能小于当前窗口最早数据时间戳，
+      // 否则 query_window 返回行数递减 → tSpan 趋近 0 → 图表缩放爆炸。
+      // 到达边界时截断累积位移（重置拖拽起点），避免"需反向移动才能恢复"。
+      state._atLeftBound = false;
+      if (state.chartLayout.tsMs && state.chartLayout.tsMs.length > 0) {
+        const minTs = state.chartLayout.tsMs[0] / 1000;
+        if (newEndTs <= minTs) {
+          newEndTs = minTs;
+          state._atLeftBound = true;
+          // 截断：重置拖拽基准为当前值，后续拖拽从边界重新计算
+          state._dragStartX = mouseX;
+          state._dragStartEndTs = minTs;
+        }
+      }
+      state.viewEndTs = newEndTs;
+      // throttle fetch（50ms）
+      if (!state._dragFetching) {
+        state._dragFetching = true;
+        fetchWindow();
+        setTimeout(() => { state._dragFetching = false; }, 50);
+      }
+    }
+  });
+
+  canvas.addEventListener('mouseup', () => { isDragging = false; canvas.style.cursor = ''; });
+  // 全局 mouseup：鼠标移出 canvas 后松开时也能正确重置 isDragging，
+  // 否则 isDragging 卡在 true，回到 canvas 后拖拽状态混乱（卡死现象之一）
+  document.addEventListener('mouseup', () => {
+    if (isDragging) { isDragging = false; canvas.style.cursor = ''; }
+  });
+  canvas.addEventListener('mouseleave', () => {
+    // 注意：不在 mouseleave 里清 isDragging —— 拖拽时鼠标短暂移出 canvas
+    // 再回来应继续拖拽。只清 mouseX/mouseY 让 tooltip 消失。
+    mouseX = -1; mouseY = -1;
+  });
+  // 冻结模式光标提示
+  canvas.addEventListener('mouseenter', () => {
+    if (state.mode === 'frozen') canvas.style.cursor = 'grab';
+  });
+
+  // ====================== 时间轴 ======================
+  function updateTimeline() {
+    const wd = state.windowData;
+    if (!wd || wd.start_ts == null || wd.end_ts == null) {
+      timelineWindow.style.display = 'none';
+      return;
+    }
+    // 时间轴显示整个 buffer 范围，高亮当前窗口
+    // 由于后端只返回窗口数据，这里用窗口自身范围近似
+    // 窗口高亮宽度 = 100%（因为返回的就是整个可见窗口）
+    timelineWindow.style.display = 'block';
+    timelineWindow.style.left = '0%';
+    timelineWindow.style.width = '100%';
+  }
+
+  // 时间轴拖拽（冻结模式下平移）
+  timelineBar.addEventListener('mousedown', (e) => {
+    if (state.mode !== 'frozen') return;
+    isDragging = true;
+    state._tlDragStartX = e.clientX;
+    state._tlDragStartEndTs = state.viewEndTs;
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!isDragging || state.mode !== 'frozen' || !state._tlDragStartX) return;
+    const rect = timelineBar.getBoundingClientRect();
+    const dx = e.clientX - state._tlDragStartX;
+    const pct = dx / rect.width;
+    const wd = state.windowData;
+    if (wd && wd.start_ts != null && wd.end_ts != null) {
+      const span = wd.end_ts - wd.start_ts;
+      state.viewEndTs = state._tlDragStartEndTs - pct * span;
+      // throttle（同 Canvas 拖拽逻辑）
+      if (!state._dragFetching) {
+        state._dragFetching = true;
+        fetchWindow();
+        setTimeout(() => { state._dragFetching = false; }, 50);
+      }
+    }
+  });
+  document.addEventListener('mouseup', () => {
+    isDragging = false; state._tlDragStartX = null;
+  });
+
+  window.addEventListener('resize', resizeCanvas);
+
+  // ====================== 数据库面板 ======================
+  let dbCurrentTab = 0;
+  function openDbModal() {
+    document.getElementById('dbModalOverlay').classList.add('active');
+    switchDbTab(0);
+    pollManager.start('dbStats', fetchDbStats, 5000);
+    fetchDbStats();
+  }
+  function closeDbModal() {
+    document.getElementById('dbModalOverlay').classList.remove('active');
+    pollManager.stop('dbStats');
+  }
+  function switchDbTab(idx) {
+    dbCurrentTab = idx;
+    document.querySelectorAll('.modal-tab').forEach((t,i) => t.classList.toggle('active', i===idx));
+    if(idx===0) renderDbOverview();
+    else if(idx===1) renderDbHistory();
+    else if(idx===2) renderDbDetection();
+    else if(idx===3) renderDbAlertsHistory();
+  }
+
+  function renderDbOverview() {
+    const s = state.dbStats;
+    document.getElementById('dbModalBody').innerHTML = `
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-value">${s.telemetry||0}</div><div class="stat-label">遥测记录</div></div>
+        <div class="stat-card"><div class="stat-value">${s.detection_results||0}</div><div class="stat-label">检测记录</div></div>
+        <div class="stat-card"><div class="stat-value">${s.alert_records||0}</div><div class="stat-label">告警记录</div></div>
+      </div>
+      <div style="margin-top:10px;font-size:0.85rem;">DB路径: ${s.db_path||'data/phm.db'} | WAL: ON | 队列积压: ${s.queue_pending||0}</div>
+      <div style="color:var(--text-secondary);margin-top:10px;font-size:0.8rem;">每 5 秒自动刷新</div>`;
+  }
+
+  async function renderDbHistory() {
+    const channels = getFlatSensors().map(n=>n.channelName).filter(Boolean);
+    const opts = channels.map(c=>`<option value="${c}">${c}</option>`).join('');
+    document.getElementById('dbModalBody').innerHTML = `
+      <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
+        <select id="histChannel" style="background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:2px 6px;"><option value="">全部通道</option>${opts}</select>
+        <input type="datetime-local" id="histStart" style="background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:2px 6px;"> <input type="datetime-local" id="histEnd" style="background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:2px 6px;">
+        <button class="btn-sm" onclick="queryHistory()">查询</button>
+      </div>
+      <div id="histTable"></div>`;
+  }
+
+  async function queryHistory() {
+    const ch = document.getElementById('histChannel').value;
+    const startVal = document.getElementById('histStart').value;
+    const endVal = document.getElementById('histEnd').value;
+    const params = { limit: 200 };
+    if(ch) params.channel = ch;
+    if(startVal) params.start = new Date(startVal).getTime()/1000;
+    if(endVal) params.end = new Date(endVal).getTime()/1000;
+    try {
+      const data = await api.history(params);
+      const rows = data.data || [];
+      document.getElementById('histTable').innerHTML = rows.length ? `
+        <table><tr><th>时间</th><th>通道</th><th>原始值</th><th>异常分数</th><th>操作</th></tr>
+        ${rows.map(r => `<tr class="${(r.score!=null && r.score>0.7)?'row-alert':''}">
+          <td>${formatTime(r.received_at)}</td><td>${r.channel}</td><td>${fmt(r.raw)}</td><td>${fmt(r.score)}</td>
+          <td><button class="btn-sm" onclick="deleteHistory('${r.channel}',${r.received_at})">🗑</button></td>
+        </tr>`).join('')}</table>` : '<div class="empty-state">无数据</div>';
+    } catch(e) { document.getElementById('histTable').innerHTML = `<div class="empty-state">查询失败: ${e.message}</div>`; }
+  }
+
+  async function deleteHistory(ch, ts) {
+    if(!confirm(`确认删除 ${ch} 在 ${formatTime(ts)} 的遥测记录？`)) return;
+    try {
+      await api.deleteHistory({ channel:ch, start:ts, end:ts+0.001 });
+      queryHistory();
+    } catch(e) { alert('删除失败: ' + e.message); }
+  }
+
+  async function renderDbDetection() {
+    const channels = getFlatSensors().map(n=>n.channelName).filter(Boolean);
+    document.getElementById('dbModalBody').innerHTML = `
+      <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
+        <select id="detChannel" style="background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:2px 6px;"><option value="">全部通道</option>${channels.map(c=>`<option>${c}</option>`).join('')}</select>
+        <input type="number" id="detLimit" value="50" min="1" max="500" style="width:80px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:2px 6px;">
+        <button class="btn-sm" onclick="queryDetection()">查询</button>
+      </div>
+      <div id="detTable"></div>`;
+  }
+
+  async function queryDetection() {
+    const ch = document.getElementById('detChannel').value;
+    const limit = document.getElementById('detLimit').value;
+    const params = { limit };
+    if(ch) params.channel = ch;
+    try {
+      const data = await api.detection(params);
+      const rows = data.data || [];
+      document.getElementById('detTable').innerHTML = rows.length ? `
+        <table><tr><th>时间</th><th>通道</th><th>L1决策</th><th>L1分</th><th>L2分</th><th>L3规则</th><th>最终分数</th><th>操作</th></tr>
+        ${rows.map(r => `<tr class="${(r.final_score!=null && r.final_score>0.7)?'row-alert':''} ${r.l1_decision==='skip'?'row-skip':''}">
+          <td>${formatTime(r.timestamp)}</td><td>${r.channel}</td><td>${r.l1_decision||'—'}</td><td>${fmt(r.l1_score)}</td><td>${fmt(r.l2_score)}</td>
+          <td>${(r.l3_rules||[]).join(', ')||'—'}</td><td>${fmt(r.final_score)}</td>
+          <td><button class="btn-sm" onclick="deleteDetection('${r.channel}',${r.timestamp})">🗑</button></td>
+        </tr>`).join('')}</table>` : '<div class="empty-state">无数据</div>';
+    } catch(e) { document.getElementById('detTable').innerHTML = `<div class="empty-state">查询失败: ${e.message}</div>`; }
+  }
+
+  async function deleteDetection(ch, ts) {
+    if(!confirm(`确认删除 ${ch} 在 ${formatTime(ts)} 的检测记录？`)) return;
+    try {
+      await api.deleteDetection({ channel:ch, start:ts, end:ts+0.001 });
+      queryDetection();
+    } catch(e) { alert('删除失败: ' + e.message); }
+  }
+
+  async function renderDbAlertsHistory() {
+    try {
+      const data = await api.alertsHistory(100);
+      const alerts = data.alerts || [];
+      document.getElementById('dbModalBody').innerHTML = alerts.length ? `
+        <table><tr><th>ID</th><th>通道</th><th>类型</th><th>分数</th><th>消息</th><th>时间</th><th>状态</th><th>操作</th></tr>
+        ${alerts.map(a => `<tr>
+          <td>${a.id}</td><td>${a.channel}</td><td>${a.alert_type}</td><td>${fmt(a.score)}</td>
+          <td>${a.message||'—'}</td><td>${formatTime(a.created_at)}</td>
+          <td><span class="badge ${a.status}">${a.status}</span></td>
+          <td>${a.status==='pending' ? `<button class="btn-sm" onclick="patchAlert(${a.id},'confirmed')">✓确认</button>
+            <button class="btn-sm" onclick="patchAlert(${a.id},'false')">✕虚报</button>` : ''}</td>
+        </tr>`).join('')}</table>` : '<div class="empty-state">无告警历史</div>';
+    } catch(e) { document.getElementById('dbModalBody').innerHTML = `<div class="empty-state">查询失败: ${e.message}</div>`; }
+  }
+
+  async function patchAlert(id, status) {
+    try {
+      await api.patchAlert(id, status);
+      renderDbAlertsHistory();
+    } catch(e) { alert('修改失败: ' + e.message); }
+  }
+
+  // ====================== 导出 ======================
+  function openExportModal() {
+    document.getElementById('exportModalOverlay').classList.add('active');
+    const container = document.getElementById('exportChannels');
+    const sensors = getFlatSensors();
+    container.innerHTML = sensors.map(s => `<label><input type="checkbox" value="${s.channelName}"> ${s.channelName}</label>`).join('');
+    // 默认时间范围：基于数据实际时间范围（windowData 的 start_ts/end_ts），
+    // 用 UTC 填 datetime-local（遥测标准：时间戳和 UTC 时间）
+    const wd = state.windowData;
+    let endTs = (wd && wd.end_ts) ? wd.end_ts : Date.now()/1000;
+    let startTs = (wd && wd.start_ts) ? wd.start_ts : endTs - 600;
+    const toUtcInput = (epochSec) => {
+      return new Date(epochSec * 1000).toISOString().substring(0, 16);
+    };
+    document.getElementById('exportStart').value = toUtcInput(startTs);
+    document.getElementById('exportEnd').value = toUtcInput(endTs);
+  }
+  function closeExportModal() { document.getElementById('exportModalOverlay').classList.remove('active'); }
+  async function doExport() {
+    const checks = [...document.querySelectorAll('#exportChannels input:checked')].map(c=>c.value);
+    if(!checks.length) return alert('请选择通道');
+    // datetime-local 填的是 UTC 时间，加 'Z' 后缀按 UTC 解析为 epoch 秒
+    const start = new Date(document.getElementById('exportStart').value + 'Z').getTime()/1000;
+    const end = new Date(document.getElementById('exportEnd').value + 'Z').getTime()/1000;
+    if(!start || !end || start>=end) return alert('时间范围无效');
+    const fmtVal = document.querySelector('input[name="fmt"]:checked').value;
+    try { await api.exportData({ channels: checks.join(','), start, end, fmt:fmtVal }); }
+    catch(e) { alert('导出失败: ' + e.message); }
+  }
+
+  // ====================== 设备树操作 ======================
+  function getFlatSensors(nodes=state.deviceTree) {
+    let res = [];
+    (nodes||[]).forEach(n => {
+      if(n.type==='sensor') res.push(n);
+      if(n.children) res = res.concat(getFlatSensors(n.children));
+    });
+    return res;
+  }
+
+  function addSensor() { openDeviceModal('sensor'); }
+  function addFolder() { openDeviceModal('folder'); }
+
+  function openDeviceModal(kind) {
+    const isSensor = kind === 'sensor';
+    document.getElementById('deviceModalTitle').textContent = isSensor ? '新建传感器' : '新建文件夹';
+    document.getElementById('devName').value = '';
+    document.getElementById('devSensorFields').style.display = isSensor ? '' : 'none';
+    if (isSensor) {
+      document.getElementById('devChannel').value = '';
+      document.getElementById('devSource').value = '';
+      document.getElementById('devBlockSize').value = '512';
+    }
+    state._deviceModalMode = { kind: 'create', type: isSensor ? 'sensor' : 'folder' };
+    document.getElementById('deviceModalOverlay').classList.add('active');
+    setTimeout(() => document.getElementById('devName').focus(), 50);
+  }
+
+  function openEditDeviceModal(node) {
+    const isSensor = node.type === 'sensor';
+    document.getElementById('deviceModalTitle').textContent = isSensor ? '编辑传感器' : '编辑文件夹';
+    document.getElementById('devName').value = node.name || '';
+    document.getElementById('devSensorFields').style.display = isSensor ? '' : 'none';
+    if (isSensor) {
+      document.getElementById('devChannel').value = node.channelName || '';
+      document.getElementById('devSource').value = node.sourceId || '';
+      document.getElementById('devBlockSize').value = node.blockSize || 512;
+    }
+    state._deviceModalMode = { kind: 'edit', node };
+    document.getElementById('deviceModalOverlay').classList.add('active');
+    setTimeout(() => document.getElementById('devName').focus(), 50);
+  }
+
+  function closeDeviceModal() {
+    document.getElementById('deviceModalOverlay').classList.remove('active');
+    state._deviceModalMode = null;
+  }
+
+  function submitDeviceModal() {
+    const mode = state._deviceModalMode;
+    if (!mode) return;
+    const name = document.getElementById('devName').value.trim();
+    if (!name) { alert('请输入名称'); return; }
+    if (mode.kind === 'create') {
+      if (mode.type === 'sensor') {
+        const ch = document.getElementById('devChannel').value.trim() || name;
+        const src = document.getElementById('devSource').value.trim() || `file:NASA-MSL/${ch}`;
+        const bs = parseInt(document.getElementById('devBlockSize').value) || 512;
+        state.deviceTree.push({ id:'node-'+Date.now(), name, type:'sensor', sourceId:src, channelName:ch, blockSize:bs });
+      } else {
+        state.deviceTree.push({ id:'node-'+Date.now(), name, type:'folder', children:[] });
+      }
+    } else {
+      // edit
+      const node = mode.node;
+      node.name = name;
+      if (node.type === 'sensor') {
+        node.channelName = document.getElementById('devChannel').value.trim() || name;
+        node.sourceId = document.getElementById('devSource').value.trim() || `file:NASA-MSL/${node.channelName}`;
+        node.blockSize = parseInt(document.getElementById('devBlockSize').value) || 512;
+      }
+    }
+    closeDeviceModal();
+    renderDeviceTree();
+    renderGauges();
+  }
+
+  // Enter 键提交
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && document.getElementById('deviceModalOverlay').classList.contains('active')) {
+      const tag = e.target.tagName;
+      if (tag === 'INPUT') submitDeviceModal();
+    }
+  });
+
+  function deleteNode(id) {
+    const remove = (nodes) => {
+      const idx = nodes.findIndex(n=>n.id===id);
+      if(idx!==-1) { nodes.splice(idx,1); return true; }
+      return nodes.some(n => n.children && remove(n.children));
+    };
+    remove(state.deviceTree);
+    renderDeviceTree();
+  }
+
+  async function saveConfig() {
+    try {
+      await api.saveConfig(state.deviceTree);
+      alert('配置已保存');
+    } catch(e) { alert('保存失败: ' + e.message); }
+  }
+
+  // ====================== 健康环绘制 ======================
+  function drawHealthRing() {
+    const c = document.getElementById('healthRing');
+    const cx = c.getContext('2d');
+    const w = c.width, h = c.height;
+    cx.clearRect(0,0,w,h);
+    const val = (state.systemHealth || 0) / 100;
+    const color = val >= 0.8 ? C.green : (val >= 0.6 ? C.yellow : C.red);
+    const r = 36;  // 半径加大（配合 96×96 画布）
+    // 背景轨道
+    cx.beginPath();
+    cx.arc(w/2, h/2, r, 0, Math.PI*2);
+    cx.strokeStyle = '#2a2f3a';
+    cx.lineWidth = 8;
+    cx.stroke();
+    // 填充弧
+    cx.beginPath();
+    cx.arc(w/2, h/2, r, -Math.PI/2, -Math.PI/2 + Math.PI*2*val);
+    cx.strokeStyle = color;
+    cx.lineWidth = 8;
+    cx.stroke();
+    cx.fillStyle = '#fff';
+    cx.font = 'bold 16px sans-serif';
+    cx.textAlign = 'center';
+    cx.textBaseline = 'middle';
+    cx.fillText(Math.round(state.systemHealth||0)+'%', w/2, h/2+1);
+  }
+
+  // ====================== 初始化 ======================
+  async function init() {
+    try {
+      const cfg = await api.getConfig();
+      state.deviceTree = cfg.device_tree || [];
+    } catch(e) { state.deviceTree = []; }
+    renderDeviceTree();
+    renderGauges();  // 即使 RingBuffer 空，也显示设备树里的传感器卡片
+
+    const sensors = getFlatSensors();
+    if(sensors.length) selectChannel(sensors[0].channelName || sensors[0].name);
+
+    pollManager.start('health', fetchHealth, 3000);
+    pollManager.start('sensors', fetchSensors, 3000);
+    pollManager.start('alerts', fetchAlerts, 3000);
+    pollManager.start('warnings', fetchWarnings, 3000);
+
+    setInterval(() => {
+      const now = new Date();
+      document.getElementById('utcClock').textContent = now.toLocaleString('zh-CN', {
+        timeZone: 'Asia/Shanghai', hour12: false,
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+      });
+    }, 1000);
+
+    resizeCanvas();
+    requestAnimationFrame(rafLoop);  // 启动持续重绘
+  }
+
+  init();
+  </script>
+</body>
+</html>
