@@ -27,6 +27,10 @@ const isFolder = ref(false)
 /** Module dropdown candidates: distinct modules already used in the tree. */
 const moduleOptions = computed(() => tree.allModules())
 
+/** 标准数据源列表（与天基 DAQ_CONFIG 一致）。若节点 sourceId 不在其中，下拉补一个临时选项。 */
+const STANDARD_SOURCES = ['file:NASA-MSL/C-1', 'file:NASA-MSL/D-14', 'virtual:sine', 'virtual:multi_sine']
+const srcNotInList = computed(() => src.value !== '' && !STANDARD_SOURCES.includes(src.value))
+
 watch(
   () => props.nodeId,
   (id) => {
@@ -91,11 +95,11 @@ function confirm() {
       <template v-if="!isFolder">
       <label>描述</label>
       <input v-model="desc" placeholder="传感器描述" />
-      <label>数据源 (sourceId)</label>
+      <label>数据源（天基采集通道）</label>
       <select v-model="src">
-        <option value="file:NASA-MSL/C-1">NASA-MSL C-1</option>
+        <option v-if="srcNotInList" :value="src">{{ src }}（当前值，不在标准列表）</option>
+        <option value="file:NASA-MSL/C-1">NASA-MSL C-1（温度）</option>
         <option value="file:NASA-MSL/D-14">NASA-MSL D-14</option>
-        <option value="file:NASA-SMAP/E-1">NASA-SMAP E-1</option>
         <option value="virtual:sine">虚拟正弦波</option>
         <option value="virtual:multi_sine">虚拟多谐波</option>
       </select>

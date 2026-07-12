@@ -45,11 +45,10 @@ function confirm() {
       <input v-model="name" placeholder="如：温度传感器" />
       <label>描述</label>
       <input v-model="desc" placeholder="如：仪器柜A热控" />
-      <label>数据源</label>
+      <label>数据源（天基采集通道）</label>
       <select v-model="src">
-        <option value="file:NASA-MSL/C-1">NASA-MSL C-1</option>
+        <option value="file:NASA-MSL/C-1">NASA-MSL C-1（温度）</option>
         <option value="file:NASA-MSL/D-14">NASA-MSL D-14</option>
-        <option value="file:NASA-SMAP/E-1">NASA-SMAP E-1</option>
         <option value="virtual:sine">虚拟正弦波</option>
         <option value="virtual:multi_sine">虚拟多谐波</option>
       </select>

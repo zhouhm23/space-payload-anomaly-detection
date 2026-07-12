@@ -12,6 +12,7 @@ import type { AlertItem, HealthResponse, SensorItem, WarningItem } from '@/api/t
 export const useHealthStore = defineStore('health', () => {
   const systemHealth = ref(100)
   const channelHealth = ref<Record<string, number>>({})
+  const folders = ref<Record<string, { name: string; health: number; strategy: string; channels: string[] }>>({})
   const threshold = ref(0.7)
   const sensors = ref<SensorItem[]>([])
   const alerts = ref<AlertItem[]>([])
@@ -26,6 +27,7 @@ export const useHealthStore = defineStore('health', () => {
       const r: HealthResponse = await api.health()
       systemHealth.value = r.system
       channelHealth.value = r.channels
+      folders.value = r.folders || {}
       threshold.value = r.threshold
     } catch {
       /* keep last good values */
@@ -63,6 +65,7 @@ export const useHealthStore = defineStore('health', () => {
   return {
     systemHealth,
     channelHealth,
+    folders,
     threshold,
     sensors,
     alerts,

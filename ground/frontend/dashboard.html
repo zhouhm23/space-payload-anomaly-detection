@@ -174,13 +174,29 @@
       padding:12px;
     }
     .device-diagram {
-      border:2px dashed var(--border-color);
+      border:1px solid var(--border-color);
       border-radius:var(--radius-md);
-      padding:40px;
-      text-align:center;
-      color:var(--text-secondary);
+      background:var(--bg-secondary);
       margin-bottom:16px;
-      font-size:0.9rem;
+      position:relative;
+      height:260px;
+      overflow:hidden;
+    }
+    .device-diagram canvas { display:block; width:100%; height:100%; }
+    .diagram-tooltip {
+      position:absolute; display:none; pointer-events:none;
+      background:var(--bg-card); border:1px solid var(--border-color);
+      border-radius:4px; padding:6px 10px; font-size:0.75rem;
+      color:var(--text-primary); white-space:nowrap; z-index:10;
+      box-shadow:var(--shadow);
+    }
+    .diagram-legend {
+      position:absolute; bottom:6px; right:8px; display:flex; gap:10px;
+      font-size:0.65rem; color:var(--text-secondary); pointer-events:none;
+    }
+    .diagram-legend i {
+      display:inline-block; width:8px; height:8px; border-radius:50%;
+      margin-right:3px; vertical-align:middle;
     }
     .gauges-grid {
       display:grid;
@@ -482,7 +498,15 @@
 
     <!-- 中央传感器网格 -->
     <div id="centerPanel">
-      <div class="device-diagram">🚧 设备示意图 — 开发中</div>
+      <div class="device-diagram" id="deviceDiagramWrap">
+        <canvas id="deviceDiagram"></canvas>
+        <div class="diagram-tooltip" id="diagramTooltip"></div>
+        <div class="diagram-legend">
+          <span><i style="background:#19be6b"></i>健康</span>
+          <span><i style="background:#f5a623"></i>警告</span>
+          <span><i style="background:#ed3f14"></i>危险</span>
+        </div>
+      </div>
       <div class="gauges-grid" id="gaugesGrid"></div>
     </div>
 
@@ -572,8 +596,12 @@
         <div class="export-form">
           <div><label>名称: <input type="text" id="devName" style="width:100%;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:4px 8px;"></label></div>
           <div id="devSensorFields">
-            <div><label>通道名: <input type="text" id="devChannel" placeholder="如 C-1" style="width:100%;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:4px 8px;"></label></div>
-            <div><label>数据源: <input type="text" id="devSource" placeholder="如 file:NASA-MSL/C-1" style="width:100%;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:4px 8px;"></label></div>
+            <div><label>数据源（天基采集通道）: <select id="devSource" style="width:100%;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:4px 8px;">
+              <option value="file:NASA-MSL/C-1">NASA-MSL C-1（温度）</option>
+              <option value="file:NASA-MSL/D-14">NASA-MSL D-14</option>
+              <option value="virtual:sine">虚拟正弦波</option>
+              <option value="virtual:multi_sine">虚拟多谐波</option>
+            </select></label></div>
             <div><label>块大小: <input type="number" id="devBlockSize" value="512" min="64" max="4096" style="width:80px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:4px 8px;"></label></div>
             <div style="border-top:1px solid var(--border-color);padding-top:8px;margin-top:4px;">
               <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
@@ -1398,6 +1426,7 @@
   // rAF 主循环
   function rafLoop() {
     drawChart();
+    drawDeviceDiagram();
     requestAnimationFrame(rafLoop);
   }
 
@@ -1520,7 +1549,7 @@
     isDragging = false; state._tlDragStartX = null;
   });
 
-  window.addEventListener('resize', resizeCanvas);
+  window.addEventListener('resize', () => { resizeCanvas(); resizeDeviceDiagram(); });
 
   // ====================== 数据库面板 ======================
   let dbCurrentTab = 0;
@@ -1686,6 +1715,18 @@
   }
 
   // ====================== 设备树操作 ======================
+  /** sourceId → 通道名（与 stores/deviceTree.ts sourceToChannel 等价）：
+   *  virtual:sine → VS-sine；file:NASA-MSL/C-1 → C-1；否则原样返回。 */
+  function sourceToChannel(sourceId) {
+    if(!sourceId) return null;
+    if(sourceId.startsWith('virtual:')) return 'VS-' + sourceId.slice('virtual:'.length);
+    if(sourceId.startsWith('file:')) {
+      const parts = sourceId.slice('file:'.length).split('/');
+      return parts[parts.length - 1];
+    }
+    return sourceId;
+  }
+
   function getFlatSensors(nodes=state.deviceTree) {
     let res = [];
     (nodes||[]).forEach(n => {
@@ -1784,8 +1825,7 @@
     document.getElementById('devName').value = '';
     document.getElementById('devSensorFields').style.display = isSensor ? '' : 'none';
     if (isSensor) {
-      document.getElementById('devChannel').value = '';
-      document.getElementById('devSource').value = '';
+      document.getElementById('devSource').value = 'file:NASA-MSL/C-1';
       document.getElementById('devBlockSize').value = '512';
       resetPositionFields();
     }
@@ -1800,8 +1840,13 @@
     document.getElementById('devName').value = node.name || '';
     document.getElementById('devSensorFields').style.display = isSensor ? '' : 'none';
     if (isSensor) {
-      document.getElementById('devChannel').value = node.channelName || '';
-      document.getElementById('devSource').value = node.sourceId || '';
+      // 通道名从数据源自动派生，不再单独编辑；若节点的 sourceId 不在下拉选项里，补一个临时 option
+      const sel = document.getElementById('devSource');
+      const sid = node.sourceId || 'file:NASA-MSL/C-1';
+      if(!Array.from(sel.options).some(o => o.value === sid)) {
+        sel.innerHTML = `<option value="${sid}">${sid}</option>` + sel.innerHTML;
+      }
+      sel.value = sid;
       document.getElementById('devBlockSize').value = node.blockSize || 512;
       loadPositionFields(node);
     }
@@ -1842,8 +1887,8 @@
     let changed = false;
     if (mode.kind === 'create') {
       if (mode.type === 'sensor') {
-        const ch = document.getElementById('devChannel').value.trim() || name;
-        const src = document.getElementById('devSource').value.trim() || `file:NASA-MSL/${ch}`;
+        const src = document.getElementById('devSource').value;
+        const ch = sourceToChannel(src) || name;  // 通道名从数据源自动派生
         const bs = parseInt(document.getElementById('devBlockSize').value) || 512;
         const node = { id:'node-'+Date.now(), name, type:'sensor', sourceId:src, channelName:ch, blockSize:bs };
         const pos = collectPosition();
@@ -1861,8 +1906,8 @@
       const node = mode.node;
       if (node.name !== name) { node.name = name; changed = true; }
       if (node.type === 'sensor') {
-        const ch = document.getElementById('devChannel').value.trim() || name;
-        const src = document.getElementById('devSource').value.trim() || `file:NASA-MSL/${node.channelName}`;
+        const src = document.getElementById('devSource').value;
+        const ch = sourceToChannel(src) || node.channelName || name;  // 通道名随数据源自动更新
         const bs = parseInt(document.getElementById('devBlockSize').value) || 512;
         if(node.channelName !== ch) { node.channelName = ch; changed = true; }
         if(node.sourceId !== src) { node.sourceId = src; changed = true; }
@@ -1921,6 +1966,231 @@
     } catch(e) { alert('保存失败: ' + e.message); }
   }
 
+  // ====================== 设备示意图 Canvas（Slice 1） ======================
+  const diagramCanvas = document.getElementById('deviceDiagram');
+  const diagramCtx = diagramCanvas.getContext('2d');
+  const diagramTooltip = document.getElementById('diagramTooltip');
+  let diagramLayout = null;  // { modules:[{name,x,y,w,h}], dots:[{node,x,y,r,color}] } 缓存供 hit-test
+
+  // DPR 感知 sizing（与 resizeCanvas 同范式）
+  function resizeDeviceDiagram() {
+    const rect = diagramCanvas.parentElement.getBoundingClientRect();
+    diagramCanvas.width = rect.width * dpr;
+    diagramCanvas.height = rect.height * dpr;
+    diagramCanvas.style.width = rect.width + 'px';
+    diagramCanvas.style.height = rect.height + 'px';
+  }
+
+  // 模块分组：按 position.module 分桶，无 module 的归"未分组"
+  function groupSensorsByModule() {
+    const sensors = getFlatSensors();
+    const groups = {};  // { moduleName: [sensorNodes] }
+    const ungrouped = [];
+    sensors.forEach(s => {
+      const mod = s.position && s.position.module;
+      if (mod) { if(!groups[mod]) groups[mod] = []; groups[mod].push(s); }
+      else ungrouped.push(s);
+    });
+    if (ungrouped.length) groups['未分组'] = ungrouped;
+    return groups;
+  }
+
+  // 网格布局：cols = ceil(sqrt(n)), rows = ceil(n/cols)
+  function gridDims(n) {
+    if (n <= 0) return { cols: 1, rows: 1 };
+    const cols = Math.ceil(Math.sqrt(n));
+    return { cols, rows: Math.ceil(n / cols) };
+  }
+
+  // 健康度→颜色（canvas 用 hex，不能用 var()）
+  function healthColorHex(h) {
+    if (h == null) return C.textSec;
+    if (h < 60) return C.red;
+    if (h < 80) return C.yellow;
+    return C.green;
+  }
+
+  function drawDeviceDiagram() {
+    const w = diagramCanvas.width, h = diagramCanvas.height;
+    if (w === 0 || h === 0) return;
+    const dc = diagramCtx;
+    dc.clearRect(0, 0, w, h);
+
+    // 背景已由 CSS 提供，这里画机箱轮廓
+    const pad = 10 * dpr;
+    const chassisX = pad, chassisY = pad;
+    const chassisW = w - pad * 2, chassisH = h - pad * 2 - 14 * dpr; // 底部留图例空间
+    dc.strokeStyle = C.border;
+    dc.lineWidth = 1.5 * dpr;
+    roundRect(dc, chassisX, chassisY, chassisW, chassisH, 8 * dpr);
+    dc.stroke();
+
+    // 模块分组 + 网格布局
+    const groups = groupSensorsByModule();
+    const moduleNames = Object.keys(groups);
+    const { cols, rows } = gridDims(moduleNames.length);
+    const gap = 8 * dpr;
+    const cellW = (chassisW - gap * (cols - 1)) / cols;
+    const cellH = (chassisH - gap * (rows - 1)) / rows;
+
+    const modules = [];
+    const dots = [];
+    moduleNames.forEach((modName, i) => {
+      const col = i % cols, row = Math.floor(i / cols);
+      const mx = chassisX + col * (cellW + gap);
+      const my = chassisY + row * (cellH + gap);
+      modules.push({ name: modName, x: mx, y: my, w: cellW, h: cellH });
+
+      // 模块区背景（半透明）+ 标题栏
+      const folderId = findFolderIdByName(modName);
+      const fhealth = folderId && state.folders[folderId] ? state.folders[folderId].health : null;
+      const isSelFolder = state.selectedFolderId && folderId === state.selectedFolderId;
+      dc.fillStyle = isSelFolder ? 'rgba(45,140,240,0.12)' : 'rgba(255,255,255,0.03)';
+      roundRect(dc, mx, my, cellW, cellH, 6 * dpr);
+      dc.fill();
+      dc.strokeStyle = isSelFolder ? C.blue : C.border;
+      dc.lineWidth = 1 * dpr;
+      dc.stroke();
+
+      // 标题
+      dc.fillStyle = C.textSec;
+      dc.font = `${11 * dpr}px 'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif`;
+      dc.textAlign = 'left';
+      dc.textBaseline = 'top';
+      const label = modName + (fhealth != null ? ` ${fhealth.toFixed(0)}%` : '');
+      dc.fillText(label, mx + 6 * dpr, my + 4 * dpr);
+
+      // 传感器点位
+      const sensors = groups[modName];
+      const titleH = 18 * dpr;
+      const dotAreaY = my + titleH;
+      const dotAreaH = cellH - titleH - 6 * dpr;
+      sensors.forEach((node, si) => {
+        // 有 position 用之，否则在模块内 fallback 均布
+        const fx = node.position && node.position.x != null ? node.position.x : ((si + 0.5) / sensors.length);
+        const fy = node.position && node.position.y != null ? node.position.y : 0.5;
+        const dx = mx + 6 * dpr + fx * (cellW - 12 * dpr);
+        const dy = dotAreaY + fy * dotAreaH;
+        const ch = node.channelName;
+        // 点位颜色按异常分数着色（与设备树圆点一致，比健康度更敏感）：
+        // score>0.7 红 / >0.4 黄 / 否则绿；无数据灰
+        const sc = state.sensors[ch] ? state.sensors[ch].latest_score : null;
+        const color = sc == null ? C.textSec : (sc > 0.7 ? C.red : (sc > 0.4 ? C.yellow : C.green));
+        const isSel = state.currentChannel === ch;
+        const dotR = (isSel ? 7 : 5) * dpr;
+        dots.push({ node, x: dx, y: dy, r: dotR, color, isSel });
+
+        // 选中态脉冲光晕
+        if (isSel) {
+          const pulse = 1 + 0.3 * Math.sin(Date.now() / 200);
+          dc.beginPath();
+          dc.arc(dx, dy, dotR * 2 * pulse, 0, Math.PI * 2);
+          dc.fillStyle = color + '33';
+          dc.fill();
+        }
+        // 点位
+        dc.beginPath();
+        dc.arc(dx, dy, dotR, 0, Math.PI * 2);
+        dc.fillStyle = color;
+        dc.fill();
+        dc.strokeStyle = isSel ? C.textPri : 'rgba(0,0,0,0.3)';
+        dc.lineWidth = isSel ? 1.5 * dpr : 0.5 * dpr;
+        dc.stroke();
+        // 选中态显示通道名
+        if (isSel) {
+          dc.fillStyle = C.textPri;
+          dc.font = `${10 * dpr}px sans-serif`;
+          dc.textAlign = 'center';
+          dc.textBaseline = 'bottom';
+          dc.fillText(ch, dx, dy - dotR - 2 * dpr);
+        }
+      });
+    });
+
+    // 空状态提示
+    if (dots.length === 0) {
+      dc.fillStyle = C.textSec;
+      dc.font = `${12 * dpr}px sans-serif`;
+      dc.textAlign = 'center';
+      dc.textBaseline = 'middle';
+      dc.fillText('暂无传感器，请在左侧设备树添加', w / 2, h / 2);
+    }
+
+    diagramLayout = { modules, dots };
+  }
+
+  // 圆角矩形辅助（Canvas 无内置 roundRect，手动绘制）
+  function roundRect(c, x, y, w, h, r) {
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.lineTo(x + w - r, y);
+    c.quadraticCurveTo(x + w, y, x + w, y + r);
+    c.lineTo(x + w, y + h - r);
+    c.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    c.lineTo(x + r, y + h);
+    c.quadraticCurveTo(x, y + h, x, y + h - r);
+    c.lineTo(x, y + r);
+    c.quadraticCurveTo(x, y, x + r, y);
+    c.closePath();
+  }
+
+  // 按 module 名找对应 folder id（文件夹聚合健康度 key 是 folder.id）
+  function findFolderIdByName(name) {
+    const walk = (nodes) => {
+      for (const n of nodes) {
+        if (n.name === name && n.type === 'folder') return n.id;
+        if (n.children) { const r = walk(n.children); if (r) return r; }
+      }
+      return null;
+    };
+    return walk(state.deviceTree);
+  }
+
+  // hit-test：返回鼠标坐标下的传感器节点，无则 null
+  function diagramHitTest(mx, my) {
+    if (!diagramLayout) return null;
+    for (const d of diagramLayout.dots) {
+      const dx = mx - d.x, dy = my - d.y;
+      if (dx * dx + dy * dy <= (d.r + 3 * dpr) ** 2) return d;
+    }
+    return null;
+  }
+
+  diagramCanvas.addEventListener('mousemove', (e) => {
+    const rect = diagramCanvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * dpr;
+    const my = (e.clientY - rect.top) * dpr;
+    const hit = diagramHitTest(mx, my);
+    if (hit) {
+      const s = state.sensors[hit.node.channelName] || {};
+      diagramTooltip.innerHTML = `<b>${hit.node.name}</b> [${hit.node.channelName}]<br>健康: ${s.health != null ? s.health.toFixed(1) + '%' : '—'}<br>分数: ${s.latest_score != null ? s.latest_score.toFixed(3) : '—'}`;
+      diagramTooltip.style.display = 'block';
+      // 越界翻转：靠近底部时 tooltip 显示在上方，避免被面板截断
+      let tx = e.clientX - rect.left + 12;
+      let ty = e.clientY - rect.top + 12;
+      const ttH = diagramTooltip.offsetHeight || 60;
+      const ttW = diagramTooltip.offsetWidth || 160;
+      if (ty + ttH > rect.height) ty = e.clientY - rect.top - ttH - 8;
+      if (tx + ttW > rect.width) tx = rect.width - ttW - 8;
+      diagramTooltip.style.left = tx + 'px';
+      diagramTooltip.style.top = ty + 'px';
+      diagramCanvas.style.cursor = 'pointer';
+    } else {
+      diagramTooltip.style.display = 'none';
+      diagramCanvas.style.cursor = 'default';
+    }
+  });
+  diagramCanvas.addEventListener('mouseleave', () => {
+    diagramTooltip.style.display = 'none';
+  });
+  diagramCanvas.addEventListener('click', (e) => {
+    const rect = diagramCanvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * dpr;
+    const my = (e.clientY - rect.top) * dpr;
+    const hit = diagramHitTest(mx, my);
+    if (hit) selectChannel(hit.node.channelName);
+  });
+
   // ====================== 健康环绘制 ======================
   function drawHealthRing() {
     const c = document.getElementById('healthRing');
@@ -1975,6 +2245,7 @@
     }, 1000);
 
     resizeCanvas();
+    resizeDeviceDiagram();
     requestAnimationFrame(rafLoop);  // 启动持续重绘
   }
 
