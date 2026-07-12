@@ -43,7 +43,13 @@ function onDrop(target: any) {
 
 async function selectNode(id: string) {
   tree.selectedId = id
-  // fetch latest data for the newly-selected channel immediately
+  const node = tree.findById(id)
+  if (node && (node.type === 'folder' || node.children)) {
+    // Folder click toggles "create-inside-me" selection (no channel to fetch)
+    tree.selectedFolderId = tree.selectedFolderId === id ? null : id
+    return
+  }
+  // Sensor: fetch latest data for the newly-selected channel immediately
   const bs = tree.selectedBlockSize(512)
   await fetchBlock(bs)
 }
@@ -80,7 +86,7 @@ async function saveTree() {
       :key="item.node.id"
       :node="item.node"
       :depth="item.depth"
-      :active="tree.selectedId === item.node.id"
+      :active="tree.selectedId === item.node.id || tree.selectedFolderId === item.node.id"
       @select="selectNode(item.node.id)"
       @delete="deleteNode(item.node.id, $event)"
       @dblclick="openEdit(item.node.id)"

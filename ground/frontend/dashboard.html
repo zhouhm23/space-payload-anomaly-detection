@@ -443,6 +443,7 @@
 
     /* 树拖拽视觉 */
     .tree-item.drag-over { border-top:2px solid var(--accent-blue); }
+    .tree-item.drop-into { background:rgba(45,140,240,0.18); border-radius:4px; }
     .tree-item.dragging { opacity:0.4; }
   </style>
 </head>
@@ -574,6 +575,19 @@
             <div><label>通道名: <input type="text" id="devChannel" placeholder="如 C-1" style="width:100%;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:4px 8px;"></label></div>
             <div><label>数据源: <input type="text" id="devSource" placeholder="如 file:NASA-MSL/C-1" style="width:100%;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:4px 8px;"></label></div>
             <div><label>块大小: <input type="number" id="devBlockSize" value="512" min="64" max="4096" style="width:80px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:4px 8px;"></label></div>
+            <div style="border-top:1px solid var(--border-color);padding-top:8px;margin-top:4px;">
+              <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                <input type="checkbox" id="devUsePosition" onchange="togglePositionFields()" style="width:auto;">
+                <span>设置示意图位置</span>
+              </label>
+              <div id="devPositionFields" style="display:none;margin-top:8px;">
+                <div><label>所属模块（可选，留空归入"未分组"）: <input type="text" id="devModule" list="moduleCandidates" placeholder="如 电源模块（可输入新值）" style="width:100%;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:4px 8px;"></label></div>
+                <datalist id="moduleCandidates"></datalist>
+                <div><label>X 位置: <span id="devPosXLabel">0.50</span> <input type="range" id="devPosX" min="0" max="1" step="0.01" value="0.5" oninput="document.getElementById('devPosXLabel').textContent=parseFloat(this.value).toFixed(2);updatePosPreview()" style="width:100%;"></label></div>
+                <div><label>Y 位置: <span id="devPosYLabel">0.50</span> <input type="range" id="devPosY" min="0" max="1" step="0.01" value="0.5" oninput="document.getElementById('devPosYLabel').textContent=parseFloat(this.value).toFixed(2);updatePosPreview()" style="width:100%;"></label></div>
+                <div id="devPosPreview" style="position:relative;width:100%;height:60px;background:var(--bg-card);border:1px solid var(--border-color);border-radius:4px;margin-top:4px;"></div>
+              </div>
+            </div>
           </div>
           <button onclick="submitDeviceModal()" style="align-self:flex-start;">确定</button>
         </div>
@@ -594,9 +608,11 @@
   // ====================== 全局状态 ======================
   const state = {
     currentChannel: null,
+    selectedFolderId: null,     // 当前选中的文件夹（新建传感器默认父节点）
     mode: 'realtime',           // 'realtime' | 'frozen'
     deviceTree: [],
     sensors: {},
+    folders: {},                // Slice 0：文件夹聚合健康度 {folderId: {name, health, strategy, channels}}
     systemHealth: 0,
     windowData: null,
     alerts: [],
@@ -716,7 +732,10 @@
   async function fetchHealth() {
     const data = await api.health();
     state.systemHealth = data.system;
+    // Slice 0：消费后端文件夹聚合健康度（min/mean 策略），供设备树着色
+    state.folders = data.folders || {};
     drawHealthRing();
+    renderDeviceTree(); // 文件夹健康度变了 → 重绘设备树着色
   }
 
   async function fetchSensors() {
@@ -779,14 +798,23 @@
         div.draggable = true;
         div.dataset.id = node.id;
         if(node.type === 'sensor' && node.channelName === state.currentChannel) div.classList.add('selected');
+        if(node.type === 'folder' && state.selectedFolderId === node.id) div.classList.add('selected');
 
         const dot = document.createElement('span');
         dot.className = 'item-dot';
         let score = null;
+        let folderHealth = null;
         if(node.type === 'sensor' && state.sensors[node.channelName]) {
           score = state.sensors[node.channelName].latest_score;
+        } else if(node.type === 'folder' && state.folders && state.folders[node.id]) {
+          // Slice 0：文件夹圆点按聚合健康度着色（health∈[0,100]，<60红/60-80黄/>80绿）
+          folderHealth = state.folders[node.id].health;
         }
-        dot.style.background = score == null ? 'var(--text-secondary)' : (score>0.7?'var(--accent-red)':(score>0.4?'var(--accent-yellow)':'var(--accent-green)'));
+        if(node.type === 'folder') {
+          dot.style.background = folderHealth == null ? 'var(--text-secondary)' : healthColor(folderHealth);
+        } else {
+          dot.style.background = score == null ? 'var(--text-secondary)' : (score>0.7?'var(--accent-red)':(score>0.4?'var(--accent-yellow)':'var(--accent-green)'));
+        }
         div.appendChild(dot);
 
         const icon = document.createElement('span');
@@ -805,6 +833,14 @@
           s.textContent = score.toFixed(3);
           s.style.color = colorForScore(score);
           div.appendChild(s);
+        } else if(node.type === 'folder' && folderHealth != null) {
+          // Slice 0：文件夹显示聚合健康度（min 策略=最差通道决定）
+          const s = document.createElement('span');
+          s.className = 'item-score';
+          const strat = state.folders[node.id].strategy || 'min';
+          s.textContent = `${folderHealth.toFixed(0)}%${strat === 'min' ? ' ⚡' : ''}`;
+          s.style.color = healthColor(folderHealth);
+          div.appendChild(s);
         }
 
         const delBtn = document.createElement('button');
@@ -819,13 +855,18 @@
           if (div._clickTimer) {
             clearTimeout(div._clickTimer);
             div._clickTimer = null;
-            // 双击 → 编辑
-            if(node.type === 'sensor') openEditDeviceModal(node);
+            // 双击 → 编辑（传感器编辑配置，文件夹重命名）
+            openEditDeviceModal(node);
           } else {
             div._clickTimer = setTimeout(() => {
               div._clickTimer = null;
-              // 单击 → 选中通道
-              if(node.type === 'sensor') selectChannel(node.channelName);
+              // 单击 → 选中（传感器选通道，文件夹记录为"新建传感器默认父节点"）
+              if(node.type === 'sensor') {
+                selectChannel(node.channelName);
+              } else if(node.type === 'folder') {
+                state.selectedFolderId = (state.selectedFolderId === node.id) ? null : node.id;
+                renderDeviceTree(); // 切换高亮
+              }
             }, 250);
           }
         };
@@ -840,13 +881,16 @@
         div.addEventListener('dragover', (e) => {
           e.preventDefault();
           e.dataTransfer.dropEffect = 'move';
-          div.classList.add('drag-over');
+          // 文件夹高亮"拖入"背景，普通节点用顶部蓝线表示插入位置
+          if(node.type === 'folder') div.classList.add('drop-into');
+          else div.classList.add('drag-over');
         });
-        div.addEventListener('dragleave', () => div.classList.remove('drag-over'));
+        div.addEventListener('dragleave', () => { div.classList.remove('drag-over'); div.classList.remove('drop-into'); });
         div.addEventListener('drop', (e) => {
           e.preventDefault();
           e.stopPropagation();
           div.classList.remove('drag-over');
+          div.classList.remove('drop-into');
           if(state.draggingId && state.draggingId !== node.id) {
             moveNode(state.draggingId, node.id);
             state.draggingId = null;
@@ -860,12 +904,19 @@
     walk(state.deviceTree);
   }
 
-  // 把 srcId 节点移到 targetId 节点前面（同层）
+  // 拖拽移动节点：目标是文件夹 → 放入其 children 末尾；否则插到目标前面（同级排序）
   function moveNode(srcId, targetId) {
     const findAndRemove = (nodes) => {
       for(let i=0;i<nodes.length;i++) {
         if(nodes[i].id === srcId) { return nodes.splice(i,1)[0]; }
         if(nodes[i].children) { const r = findAndRemove(nodes[i].children); if(r) return r; }
+      }
+      return null;
+    };
+    const findNode = (nodes, id) => {
+      for(const n of nodes) {
+        if(n.id === id) return n;
+        if(n.children) { const r = findNode(n.children, id); if(r) return r; }
       }
       return null;
     };
@@ -876,8 +927,30 @@
       }
       return false;
     };
+    // 防止把文件夹拖进它自己的子孙（会成环）
+    const srcNode = findNode(state.deviceTree, srcId);
+    if(srcNode && srcNode.type === 'folder') {
+      const isDescendant = (parent, id) => {
+        if(!parent.children) return false;
+        for(const c of parent.children) {
+          if(c.id === id) return true;
+          if(c.type === 'folder' && isDescendant(c, id)) return true;
+        }
+        return false;
+      };
+      if(isDescendant(srcNode, targetId)) return; // 拖进自己子孙 → 拒绝
+    }
     const item = findAndRemove(state.deviceTree);
-    if(item) insertBefore(state.deviceTree, targetId, item);
+    if(!item) return;
+    const target = findNode(state.deviceTree, targetId);
+    if(target && target.type === 'folder') {
+      // 拖到文件夹上 → 成为它的子节点
+      if(!target.children) target.children = [];
+      target.children.push(item);
+    } else {
+      insertBefore(state.deviceTree, targetId, item);
+    }
+    autoSaveConfig();
     renderDeviceTree();
   }
 
@@ -1625,6 +1698,86 @@
   function addSensor() { openDeviceModal('sensor'); }
   function addFolder() { openDeviceModal('folder'); }
 
+  // ---- 示意图位置编辑辅助（Slice 0，与 Vue 端 SensorModal 等价）----
+  /** 递归收集树中所有出现过的 position.module 值（用于模块下拉候选）。 */
+  function getAllModules(nodes) {
+    nodes = nodes || state.deviceTree;
+    const seen = new Set();
+    const walk = (arr) => {
+      (arr || []).forEach(n => {
+        if (n.position && n.position.module) seen.add(n.position.module);
+        if (n.children) walk(n.children);
+      });
+    };
+    walk(nodes);
+    return Array.from(seen);
+  }
+
+  /** 刷新模块下拉候选（datalist）。 */
+  function refreshModuleCandidates() {
+    const dl = document.getElementById('moduleCandidates');
+    if (!dl) return;
+    dl.innerHTML = getAllModules().map(m => `<option value="${m}">`).join('');
+  }
+
+  /** 复选框切换：显示/隐藏位置编辑字段。 */
+  function togglePositionFields() {
+    const checked = document.getElementById('devUsePosition').checked;
+    document.getElementById('devPositionFields').style.display = checked ? '' : 'none';
+    if (checked) { refreshModuleCandidates(); updatePosPreview(); }
+  }
+
+  /** mini 预览方框：实时显示当前传感器点位。 */
+  function updatePosPreview() {
+    const preview = document.getElementById('devPosPreview');
+    if (!preview) return;
+    const x = parseFloat(document.getElementById('devPosX').value) || 0;
+    const y = parseFloat(document.getElementById('devPosY').value) || 0;
+    preview.innerHTML = `<div style="position:absolute;width:10px;height:10px;border-radius:50%;background:var(--accent-blue);left:${x*100}%;top:${y*100}%;transform:translate(-50%,-50%);"></div>`;
+  }
+
+  /** 打开模态框时重置位置字段到默认值。 */
+  function resetPositionFields() {
+    document.getElementById('devUsePosition').checked = false;
+    document.getElementById('devPositionFields').style.display = 'none';
+    document.getElementById('devModule').value = '';
+    document.getElementById('devPosX').value = 0.5;
+    document.getElementById('devPosY').value = 0.5;
+    document.getElementById('devPosXLabel').textContent = '0.50';
+    document.getElementById('devPosYLabel').textContent = '0.50';
+    updatePosPreview();
+  }
+
+  /** 编辑模态框时从节点加载已有位置。 */
+  function loadPositionFields(node) {
+    const p = node.position;
+    if (p && (p.x !== undefined || p.y !== undefined)) {
+      document.getElementById('devUsePosition').checked = true;
+      document.getElementById('devPositionFields').style.display = '';
+      document.getElementById('devModule').value = p.module || '';
+      document.getElementById('devPosX').value = p.x !== undefined ? p.x : 0.5;
+      document.getElementById('devPosY').value = p.y !== undefined ? p.y : 0.5;
+      document.getElementById('devPosXLabel').textContent = parseFloat(document.getElementById('devPosX').value).toFixed(2);
+      document.getElementById('devPosYLabel').textContent = parseFloat(document.getElementById('devPosY').value).toFixed(2);
+      refreshModuleCandidates();
+      updatePosPreview();
+    } else {
+      resetPositionFields();
+    }
+  }
+
+  /** 从表单收集 position 对象（未勾选返回 undefined）。 */
+  function collectPosition() {
+    if (!document.getElementById('devUsePosition').checked) return undefined;
+    const pos = {
+      x: parseFloat(document.getElementById('devPosX').value),
+      y: parseFloat(document.getElementById('devPosY').value),
+    };
+    const mod = document.getElementById('devModule').value.trim();
+    if (mod) pos.module = mod;
+    return pos;
+  }
+
   function openDeviceModal(kind) {
     const isSensor = kind === 'sensor';
     document.getElementById('deviceModalTitle').textContent = isSensor ? '新建传感器' : '新建文件夹';
@@ -1634,6 +1787,7 @@
       document.getElementById('devChannel').value = '';
       document.getElementById('devSource').value = '';
       document.getElementById('devBlockSize').value = '512';
+      resetPositionFields();
     }
     state._deviceModalMode = { kind: 'create', type: isSensor ? 'sensor' : 'folder' };
     document.getElementById('deviceModalOverlay').classList.add('active');
@@ -1649,6 +1803,7 @@
       document.getElementById('devChannel').value = node.channelName || '';
       document.getElementById('devSource').value = node.sourceId || '';
       document.getElementById('devBlockSize').value = node.blockSize || 512;
+      loadPositionFields(node);
     }
     state._deviceModalMode = { kind: 'edit', node };
     document.getElementById('deviceModalOverlay').classList.add('active');
@@ -1660,40 +1815,77 @@
     state._deviceModalMode = null;
   }
 
+  /** 把节点放进选中的文件夹（若有），否则放顶层。返回 true 表示放进了文件夹。 */
+  function insertIntoSelectedFolder(node) {
+    if (!state.selectedFolderId) return false;
+    const findFolder = (nodes) => {
+      for(const n of nodes) {
+        if(n.id === state.selectedFolderId && n.type === 'folder') return n;
+        if(n.children) { const r = findFolder(n.children); if(r) return r; }
+      }
+      return null;
+    };
+    const folder = findFolder(state.deviceTree);
+    if(folder) {
+      if(!folder.children) folder.children = [];
+      folder.children.push(node);
+      return true;
+    }
+    return false;
+  }
+
   function submitDeviceModal() {
     const mode = state._deviceModalMode;
     if (!mode) return;
     const name = document.getElementById('devName').value.trim();
     if (!name) { alert('请输入名称'); return; }
+    let changed = false;
     if (mode.kind === 'create') {
       if (mode.type === 'sensor') {
         const ch = document.getElementById('devChannel').value.trim() || name;
         const src = document.getElementById('devSource').value.trim() || `file:NASA-MSL/${ch}`;
         const bs = parseInt(document.getElementById('devBlockSize').value) || 512;
-        state.deviceTree.push({ id:'node-'+Date.now(), name, type:'sensor', sourceId:src, channelName:ch, blockSize:bs });
+        const node = { id:'node-'+Date.now(), name, type:'sensor', sourceId:src, channelName:ch, blockSize:bs };
+        const pos = collectPosition();
+        if (pos) node.position = pos;
+        // 优先放进选中的文件夹，否则放顶层
+        if(!insertIntoSelectedFolder(node)) state.deviceTree.push(node);
+        changed = true;
       } else {
-        state.deviceTree.push({ id:'node-'+Date.now(), name, type:'folder', children:[] });
+        const folder = { id:'node-'+Date.now(), name, type:'folder', children:[] };
+        if(!insertIntoSelectedFolder(folder)) state.deviceTree.push(folder);
+        changed = true;
       }
     } else {
-      // edit
+      // edit（传感器改配置 / 文件夹重命名）
       const node = mode.node;
-      node.name = name;
+      if (node.name !== name) { node.name = name; changed = true; }
       if (node.type === 'sensor') {
-        node.channelName = document.getElementById('devChannel').value.trim() || name;
-        node.sourceId = document.getElementById('devSource').value.trim() || `file:NASA-MSL/${node.channelName}`;
-        node.blockSize = parseInt(document.getElementById('devBlockSize').value) || 512;
+        const ch = document.getElementById('devChannel').value.trim() || name;
+        const src = document.getElementById('devSource').value.trim() || `file:NASA-MSL/${node.channelName}`;
+        const bs = parseInt(document.getElementById('devBlockSize').value) || 512;
+        if(node.channelName !== ch) { node.channelName = ch; changed = true; }
+        if(node.sourceId !== src) { node.sourceId = src; changed = true; }
+        if(node.blockSize !== bs) { node.blockSize = bs; changed = true; }
+        const pos = collectPosition();
+        if (pos) { node.position = pos; changed = true; }
+        else if(node.position) { delete node.position; changed = true; }
       }
     }
     closeDeviceModal();
-    renderDeviceTree();
-    renderGauges();
+    if (changed) {
+      renderDeviceTree();
+      renderGauges();
+      autoSaveConfig();
+    }
   }
 
-  // Enter 键提交
+  // Enter 键提交（排除 range/checkbox，避免拖滑块/勾选时误提交）
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && document.getElementById('deviceModalOverlay').classList.contains('active')) {
       const tag = e.target.tagName;
-      if (tag === 'INPUT') submitDeviceModal();
+      const t = e.target.type;
+      if (tag === 'INPUT' && t !== 'range' && t !== 'checkbox') submitDeviceModal();
     }
   });
 
@@ -1704,7 +1896,22 @@
       return nodes.some(n => n.children && remove(n.children));
     };
     remove(state.deviceTree);
+    // 若删除的是当前选中文件夹，清空选中态
+    if(state.selectedFolderId === id) state.selectedFolderId = null;
     renderDeviceTree();
+    autoSaveConfig();
+  }
+
+  // 自动保存（静默、防抖 800ms）—— 增删改设备树后保证后端 config 与前端一致，
+  // 否则后端 health 聚合 / auto-poll 采集会漏掉前端新建的节点。
+  let _autoSaveTimer = null;
+  function autoSaveConfig() {
+    if(_autoSaveTimer) clearTimeout(_autoSaveTimer);
+    _autoSaveTimer = setTimeout(async () => {
+      _autoSaveTimer = null;
+      try { await api.saveConfig(state.deviceTree); }
+      catch(e) { console.warn('自动保存配置失败:', e); }
+    }, 800);
   }
 
   async function saveConfig() {

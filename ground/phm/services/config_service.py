@@ -38,9 +38,16 @@ class ConfigService:
                 return json.loads(self.config_path.read_text(encoding="utf-8"))
             except Exception as e:
                 logger.warning("Failed to read config %s: %s", self.config_path, e)
-        return {"device_tree": []}
+        # Default skeleton — always carries a device_tree and aggregation_strategy
+        # so downstream consumers (HealthService, RulService) never miss the key.
+        return {"device_tree": [], "aggregation_strategy": "min"}
 
     def save(self, body: dict) -> dict:
+        # Preserve aggregation_strategy if the frontend omits it (older
+        # clients POST only {device_tree: [...]} and would otherwise wipe
+        # the key).  Default to "min" per Slice 0 spec.
+        if "aggregation_strategy" not in body:
+            body["aggregation_strategy"] = "min"
         self.config_path.write_text(
             json.dumps(body, indent=2, ensure_ascii=False), encoding="utf-8"
         )

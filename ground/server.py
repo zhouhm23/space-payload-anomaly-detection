@@ -119,10 +119,14 @@ def _auto_poll_loop() -> None:
     while not _auto_poll_stop.is_set():
         try:
             c = deps.get()
-            # Gather all configured sensor sources
+            # Gather all configured sensor sources — recursively walk the
+            # device tree so sensors nested inside folders are also polled.
+            # (Previously only top-level sourceId was read, which silently
+            # skipped foldered sensors.)
             config_data = c.config.load()
             tree = config_data.get("device_tree", [])
-            sources = [n.get("sourceId") for n in tree if n.get("sourceId")]
+            from phm.services.tree_utils import get_flat_sensors
+            sources = [s.get("sourceId") for s in get_flat_sensors(tree) if s.get("sourceId")]
             if not sources:
                 _auto_poll_stop.wait(_AUTO_POLL_INTERVAL)
                 continue

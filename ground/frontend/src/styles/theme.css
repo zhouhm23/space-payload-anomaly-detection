@@ -499,6 +499,31 @@ body {
 .modal input, .modal select { width: 100%; padding: 6px 10px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-primary); font-size: 0.85rem; }
 .modal .btn-row { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
 
+/* 传感器位置编辑（Slice 0）— 复选框行 + 滑块 + mini 预览方框 */
+.modal .position-section { margin-top: 12px; border-top: 1px solid var(--border-color); padding-top: 8px; }
+.modal .position-section .checkbox-row { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.modal .position-section .checkbox-row input { width: auto; }
+.modal .position-section .position-fields { margin-top: 8px; }
+.modal input[type="range"] { width: 100%; padding: 0; background: transparent; border: none; }
+.modal .mini-preview {
+  position: relative;
+  width: 100%;
+  height: 80px;
+  margin-top: 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+.modal .mini-preview-dot {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent-blue);
+  transform: translate(-50%, -50%);
+  transition: left 0.05s, top 0.05s;
+}
+
 /* 空列表提示 */
 .empty-hint {
   font-size: 0.75rem;

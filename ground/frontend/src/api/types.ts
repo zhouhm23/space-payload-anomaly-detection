@@ -43,6 +43,17 @@ export interface PredictScoresResponse {
   predict_end: number
 }
 
+/** Normalised [0,1] position of a sensor within its module region on the
+ * device diagram. ``module`` is the physical module name (e.g. "电源模块");
+ * sensors without ``module`` fall back to an "未分组" region. */
+export interface SensorPosition {
+  module?: string
+  /** 0..1 horizontal fraction within the module region */
+  x?: number
+  /** 0..1 vertical fraction within the module region */
+  y?: number
+}
+
 export interface DeviceNode {
   id: string
   name: string
@@ -51,17 +62,31 @@ export interface DeviceNode {
   sourceId?: string
   channelName?: string
   blockSize?: number
+  /** Sensor-only: diagram placement. Absent → auto-layout fallback. */
+  position?: SensorPosition
   children?: DeviceNode[]
 }
 
 export interface DeviceTreeConfig {
   device_tree: DeviceNode[]
+  /** Folder-health aggregation: 'min' (default, worst sensor wins) | 'mean'. */
+  aggregation_strategy?: 'min' | 'mean'
+}
+
+/** Folder-level health entry returned by /api/health (when folders exist). */
+export interface FolderHealth {
+  name: string
+  health: number
+  strategy: 'min' | 'mean'
+  channels: string[]
 }
 
 export interface HealthResponse {
   system: number
   channels: Record<string, number>
   threshold: number
+  /** Present only when the backend has a config with folders (Slice 0+). */
+  folders?: Record<string, FolderHealth>
 }
 
 export interface AlertsResponse {

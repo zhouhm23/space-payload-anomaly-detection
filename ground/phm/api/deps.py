@@ -77,10 +77,13 @@ def init(
 
     forecast = ForecastService(device=device)
     telemetry = TelemetryService(ring, alerts, sqlite, space_host, space_port)
-    health = HealthService(ring)
+    # ConfigService is built before HealthService so the latter can be wired
+    # with the tree (for folder-level health aggregation).  ConfigService has
+    # no upstream deps, so moving it earlier keeps the graph acyclic.
+    config = ConfigService(config_path, space_host, space_port)
+    health = HealthService(ring, config)
     alert_service = AlertService(alerts, sqlite)
     warning_service = WarningService(ring, warnings, forecast, sqlite)
-    config = ConfigService(config_path, space_host, space_port)
 
     _container = Container(
         ring=ring,

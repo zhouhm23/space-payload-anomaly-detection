@@ -121,9 +121,120 @@ class TestWarningStore:
 
     def test_verify_skips_future_window(self):
         ws = WarningStore()
-        # Use a far-future window so ``now < predict_end`` holds.
         import time as _t
         far_future = _t.time() + 10_000.0
         ws.add_pending("C-1", predict_start=far_future - 100.0, predict_end=far_future, max_predict_score=0.9)
         changed = ws.verify("C-1", [(far_future - 50.0, 0.99)])
         assert changed == 0
+
+
+# ---------------------------------------------------------------------------
+# HealthService folder aggregation (Slice 0)
+# ---------------------------------------------------------------------------
+class _FakeConfigService:
+    """Minimal stand-in for ConfigService — serves a fixed config dict."""
+
+    def __init__(self, config: dict):
+        self._config = config
+
+    def load(self) -> dict:
+        return self._config
+
+
+class TestHealthServiceFolderAggregation:
+    """Verify HealthService rolls per-channel health up to folders."""
+
+    def _entry(self, ch, raw, score, ts):
+        return {"raw": raw, "score": score, "received_at": ts, "channel": ch}
+
+    def _tree(self):
+        """3 sensors: 2 in folder_A, 1 orphan (no folder)."""
+        return [
+            {
+                "id": "folder_A",
+                "name": "电源模块",
+                "type": "folder",
+                "children": [
+                    {"id": "s1", "type": "sensor", "channelName": "C-1", "sourceId": "file:X/C-1"},
+                    {"id": "s2", "type": "sensor", "channelName": "C-2", "sourceId": "file:X/C-2"},
+                ],
+            },
+            {"id": "s3", "type": "sensor", "channelName": "C-3", "sourceId": "file:X/C-3"},
+        ]
+
+    def _ring_with_healths(self, c1_scores, c2_scores, c3_scores):
+        rb = RingBuffer()
+        rb.ingest({"C-1": [self._entry("C-1", 0.0, s, 0.0) for s in c1_scores]})
+        rb.ingest({"C-2": [self._entry("C-2", 0.0, s, 0.0) for s in c2_scores]})
+        rb.ingest({"C-3": [self._entry("C-3", 0.0, s, 0.0) for s in c3_scores]})
+        return rb
+
+    def test_min_strategy_worst_sensor_wins(self):
+        # C-1 = 100% normal, C-2 = 0% normal → folder min should be 0.0
+        rb = self._ring_with_healths([0.1, 0.2], [0.8, 0.9], [0.5, 0.5])
+        cfg = _FakeConfigService({"device_tree": self._tree(), "aggregation_strategy": "min"})
+        from phm.services.health_service import HealthService
+
+        result = HealthService(rb, cfg).system_health()
+        assert "folders" in result
+        assert result["folders"]["folder_A"]["health"] == 0.0
+        assert result["folders"]["folder_A"]["strategy"] == "min"
+        assert set(result["folders"]["folder_A"]["channels"]) == {"C-1", "C-2"}
+
+    def test_mean_strategy_averages(self):
+        # C-1 = 100% normal, C-2 = 0% normal → folder mean = 50.0
+        rb = self._ring_with_healths([0.1, 0.2], [0.8, 0.9], [0.5, 0.5])
+        cfg = _FakeConfigService({"device_tree": self._tree(), "aggregation_strategy": "mean"})
+        from phm.services.health_service import HealthService
+
+        result = HealthService(rb, cfg).system_health()
+        assert result["folders"]["folder_A"]["health"] == 50.0
+        assert result["folders"]["folder_A"]["strategy"] == "mean"
+
+    def test_orphan_sensor_excluded_from_folders(self):
+        rb = self._ring_with_healths([0.1], [0.2], [0.9])
+        cfg = _FakeConfigService({"device_tree": self._tree(), "aggregation_strategy": "min"})
+        from phm.services.health_service import HealthService
+
+        result = HealthService(rb, cfg).system_health()
+        # C-3 is an orphan — it appears in channels but NOT in any folder entry
+        assert "C-3" in result["channels"]
+        assert "folder_A" in result["folders"]
+        assert "C-3" not in result["folders"]["folder_A"]["channels"]
+
+    def test_system_health_unaffected_by_aggregation(self):
+        rb = self._ring_with_healths([0.1], [0.8], [0.5])
+        cfg = _FakeConfigService({"device_tree": self._tree(), "aggregation_strategy": "min"})
+        from phm.services.health_service import HealthService
+
+        with_cfg = HealthService(rb, cfg).system_health()
+        without_cfg = HealthService(rb, None).system_health()
+        # system / channels are identical regardless of folder aggregation
+        assert with_cfg["system"] == without_cfg["system"]
+        assert with_cfg["channels"] == without_cfg["channels"]
+        # only difference is the folders key
+        assert "folders" in with_cfg
+        assert "folders" not in without_cfg
+
+    def test_folder_with_no_data_is_skipped(self):
+        # C-1, C-2 have data; a second folder references C-4 which has no data
+        rb = self._ring_with_healths([0.1], [0.2], [])
+        tree = self._tree() + [
+            {"id": "folder_B", "name": "空模块", "type": "folder",
+             "children": [{"id": "s4", "type": "sensor", "channelName": "C-4", "sourceId": "file:X/C-4"}]}
+        ]
+        cfg = _FakeConfigService({"device_tree": tree, "aggregation_strategy": "min"})
+        from phm.services.health_service import HealthService
+
+        result = HealthService(rb, cfg).system_health()
+        assert "folder_A" in result["folders"]
+        assert "folder_B" not in result["folders"]  # no data → skipped
+
+    def test_default_strategy_is_min_when_key_missing(self):
+        rb = self._ring_with_healths([0.1], [0.9], [0.5])
+        cfg = _FakeConfigService({"device_tree": self._tree()})  # no aggregation_strategy key
+        from phm.services.health_service import HealthService
+
+        result = HealthService(rb, cfg).system_health()
+        assert result["folders"]["folder_A"]["strategy"] == "min"
+        assert result["folders"]["folder_A"]["health"] == 0.0  # C-2 is all-anomalous

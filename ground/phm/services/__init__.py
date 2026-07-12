@@ -11,6 +11,7 @@ from .health_service import HealthService
 from .alert_service import AlertService
 from .warning_service import WarningService
 from .config_service import ConfigService
+from . import tree_utils
 
 __all__ = [
     "TelemetryService",
@@ -19,4 +20,5 @@ __all__ = [
     "AlertService",
     "WarningService",
     "ConfigService",
+    "tree_utils",
 ]
