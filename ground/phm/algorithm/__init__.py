@@ -22,6 +22,10 @@ from .cascade_types import LayerResult, CascadeOutput
 from .classic_filter import ClassicFilter
 from .physical_constraint import ConstraintConfig, PhysicalConstraint
 from .cascade_detector import CascadeDetector
+# Calibration components (offline-tuned enhancements)
+from .direction_calibrator import DirectionCalibrator
+from .freq_feature import FreqFeatureExtractor
+from .calibration_config import CalibrationConfig, ChannelCalibration
 
 __all__ = [
     # Base plugin contracts
@@ -35,6 +39,11 @@ __all__ = [
     "ClassicFilter",
     "PhysicalConstraint",
     "ConstraintConfig",
+    # Calibration components
+    "DirectionCalibrator",
+    "FreqFeatureExtractor",
+    "CalibrationConfig",
+    "ChannelCalibration",
     # Cascade data types
     "LayerResult",
     "CascadeOutput",

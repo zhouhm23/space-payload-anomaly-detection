@@ -2,7 +2,18 @@
 
 This is the glue that chains the classic filter (L1), the DL anomaly
 detector (L2, e.g. TSPulse) and the physical-constraint validator (L3)
-into a single pipeline.
+into a single pipeline.  Two validated enhancements are integrated:
+
+* **L1 fusion** — the L1 classic-filter per-sample scores are blended into
+  the final score via ``max(final, l1_norm * l1_fuse_weight)`` so that sharp
+  statistical outliers (3σ / IQR) can lift the score even when L2
+  under-reacts.  Controlled by ``l1_fuse_weight`` (default 0.3, 0 disables).
+
+* **Per-channel calibration** — when a :class:`CalibrationConfig` is
+  supplied and the channel has an entry, the L2 score gets its direction
+  flipped (TSPulse reconstructs anomalous patterns well on high-anomaly
+  channels) and/or the STFT frequency feature swapped in, per the offline
+  LOO selection.  No config ⇒ default TSPulse-only path (backward compatible).
 
 Design goals:
 
@@ -26,9 +37,11 @@ from __future__ import annotations
 import logging
 
 import numpy as np
+from sklearn.preprocessing import MinMaxScaler
 
 from .base import BaseDetector
 from .base_filter import BaseFilter
+from .calibration_config import CalibrationConfig, ChannelCalibration
 from .cascade_types import (
     CascadeOutput,
     LayerResult,
@@ -40,6 +53,8 @@ from .cascade_types import (
     DECISION_SKIP,
 )
 from .classic_filter import ClassicFilter
+from .direction_calibrator import DirectionCalibrator
+from .freq_feature import FreqFeatureExtractor
 from .physical_constraint import PhysicalConstraint
 
 logger = logging.getLogger(__name__)
@@ -59,6 +74,15 @@ class CascadeDetector(BaseDetector):
         skip_l2_on_l1_alert: if True, when L1 returns ``alert`` the cascade
                     skips L2 and uses L1 per-sample scores directly.  Set
                     False to always run L2 (more thorough but slower).
+        l1_fuse_weight: weight for fusing L1 per-sample scores into the
+                    final score (``final = max(final, l1_norm * w)``).
+                    0 disables L1 fusion (legacy behaviour).  Default 0.3,
+                    validated in ``experiments/cascade_eval/benchmark_cascade.py``.
+        calibration_config: optional :class:`CalibrationConfig` carrying
+                    per-channel offline calibration (direction flip,
+                    score-type selection, freq baseline).  When None or
+                    when a channel has no entry, the cascade runs in its
+                    default (TSPulse-only, unflipped) mode.
 
     The ``n_params`` / ``model_source`` attributes are delegated to the
     wrapped L2 detector so downstream code that inspects model size still
@@ -71,11 +95,15 @@ class CascadeDetector(BaseDetector):
         classic: BaseFilter | None = None,
         constraint: BaseFilter | None = None,
         skip_l2_on_l1_alert: bool = False,
+        l1_fuse_weight: float = 0.3,
+        calibration_config: CalibrationConfig | None = None,
     ) -> None:
         self._detector = detector
         self._classic = classic or ClassicFilter()
         self._constraint = constraint or PhysicalConstraint()
         self.skip_l2_on_l1_alert = skip_l2_on_l1_alert
+        self.l1_fuse_weight = float(l1_fuse_weight)
+        self.calibration_config = calibration_config
         # Delegate model metadata
         self.n_params = getattr(detector, "n_params", 0)
         self.model_source = getattr(detector, "model_source", "cascade")
@@ -159,6 +187,60 @@ class CascadeDetector(BaseDetector):
                 detail={"model": self.model_source},
             ))
 
+            # ── Calibration: direction flip + per-channel score-type ──
+            # Offline-calibrated channels may need (a) their score direction
+            # inverted (TSPulse reconstructs anomalous patterns well on
+            # high-anomaly-ratio channels) and/or (b) the frequency feature
+            # swapped in for the TSPulse score.  Both decisions come from
+            # channel_calibration.json and are no-ops when the channel has
+            # no entry or no config was supplied.
+            cal = (
+                self.calibration_config.get(channel)
+                if self.calibration_config is not None and channel
+                else None
+            )
+            cal_detail: dict = {}
+            if cal is not None:
+                tsp_score = raw_scores
+                # Direction flip — expects MinMax-normalised input ([0,1]).
+                # AnomalyDetector.detect already normalises, so this holds.
+                tsp_score = DirectionCalibrator.flip(tsp_score, cal.flip)
+                chosen = tsp_score
+                if cal.score_type in ("freq", "fusion"):
+                    if cal.freq_band_mean is None or cal.freq_band_std is None:
+                        logger.debug(
+                            "channel %s score_type=%s but no freq baseline — "
+                            "falling back to tsp",
+                            channel, cal.score_type,
+                        )
+                    else:
+                        try:
+                            fe = FreqFeatureExtractor(
+                                band_mean=cal.freq_band_mean,
+                                band_std=cal.freq_band_std,
+                            )
+                            freq_score = fe.transform(v)
+                            # Align length defensively
+                            if len(freq_score) != len(tsp_score):
+                                freq_score = freq_score[: len(tsp_score)]
+                            if cal.score_type == "freq":
+                                chosen = freq_score.astype(np.float32)
+                            else:  # fusion
+                                chosen = np.maximum(tsp_score, freq_score).astype(np.float32)
+                        except Exception:
+                            logger.warning(
+                                "freq feature failed for channel %s — using tsp",
+                                channel, exc_info=True,
+                            )
+                raw_scores = chosen
+                cal_detail = {
+                    "flip": cal.flip,
+                    "score_type": cal.score_type,
+                    "threshold": cal.threshold,
+                    "threshold_name": cal.threshold_name,
+                }
+                l2_scores = raw_scores
+
         # ── Layer 3: Physical constraint ────────────────────────────
         try:
             l3 = self._constraint.filter(v, raw_scores)
@@ -177,6 +259,31 @@ class CascadeDetector(BaseDetector):
         if non_finite.any():
             final = final.copy()
             final[non_finite] = 0.0
+
+        # ── L1 fusion ───────────────────────────────────────────────
+        # Blend the L1 classic-filter per-sample scores into the final
+        # score: ``final = max(final, l1_norm * l1_fuse_weight)``.  This
+        # lets sharp statistical outliers (3σ / IQR) lift the final score
+        # even when the DL detector under-reacts.  Disabled when
+        # ``l1_fuse_weight == 0`` (legacy behaviour) or when L1 produced no
+        # per-sample scores.  Validated in
+        # experiments/cascade_eval/benchmark_cascade.py (L1_FUSE_WEIGHT).
+        if self.l1_fuse_weight > 0.0 and l1_scores is not None:
+            try:
+                l1_arr = np.asarray(l1_scores, dtype=np.float32).ravel()
+                if len(l1_arr) == len(final):
+                    l1_range = float(l1_arr.max() - l1_arr.min())
+                    if l1_range > 1e-12:
+                        l1_norm = (
+                            MinMaxScaler().fit_transform(l1_arr.reshape(-1, 1)).ravel()
+                        )
+                    else:
+                        l1_norm = np.zeros_like(l1_arr)
+                    final = np.maximum(final, l1_norm * self.l1_fuse_weight).astype(
+                        np.float32
+                    )
+            except Exception:
+                logger.debug("L1 fusion failed for channel %s", channel, exc_info=True)
 
         return CascadeOutput(
             channel=channel,

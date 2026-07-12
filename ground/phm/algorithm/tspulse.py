@@ -12,7 +12,7 @@ import os
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 from tsfm_public.models.tspulse.modeling_tspulse import TSPulseForReconstruction
 from tsfm_public.toolkit.time_series_anomaly_detection_pipeline import (
@@ -67,7 +67,12 @@ class AnomalyDetector(BaseDetector):
             train_values_for_scaler: np.ndarray or None — training data for StandardScaler
 
         Returns:
-            scores: np.ndarray [T] float32 — anomaly scores (higher = more anomalous)
+            scores: np.ndarray [T] float32 — anomaly scores **MinMax-normalised
+            to [0, 1]** (higher = more anomalous).  The normalisation aligns
+            the score with the global ``ANOMALY_THRESHOLD = 0.7`` and makes
+            the downstream direction-flip (``1 - score``) well-defined.  On
+            constant-score inputs (e.g. all-zero) the raw values are returned
+            unchanged.
         """
         # Standardize
         if train_values_for_scaler is not None:
@@ -106,15 +111,27 @@ class AnomalyDetector(BaseDetector):
             ],
             aggregation_length=64,
             aggr_function="max",
-            smoothing_length=1,
+            smoothing_length=8,
+            least_significant_scale=0.01,
+            least_significant_score=0.1,
         )
 
         result = pipeline(df)
-        raw_scores = result["anomaly_score"].iloc[0]
-        if isinstance(raw_scores, (list, np.ndarray)):
-            raw_scores = np.array(raw_scores, dtype=np.float32).flatten()
+        # Pipeline returns anomaly_score as a column whose first row holds the
+        # per-sample array.  Read it defensively: .iloc[0] may return a scalar
+        # on degenerate single-window outputs, so flatten whatever shape we
+        # get and let the length-alignment below trim/pad as needed.
+        col = result["anomaly_score"]
+        if hasattr(col, "iloc"):
+            first = col.iloc[0]
         else:
-            raw_scores = result["anomaly_score"].values.astype(np.float32)
+            first = col[0]
+        if isinstance(first, (list, tuple, np.ndarray)):
+            raw_scores = np.array(first, dtype=np.float32).ravel()
+        else:
+            # Scalar (single-window degenerate case) — fall back to the
+            # full column so we keep one value per output sample.
+            raw_scores = np.asarray(col, dtype=np.float32).ravel()
 
         # Align to original input length
         n_out = min(len(raw_scores), T)
@@ -124,7 +141,15 @@ class AnomalyDetector(BaseDetector):
         # Trim padding (both front-padding from tiling and back-padding from +1)
         if len(scores) > len(values):
             scores = scores[-len(values):]
-        return scores
+
+        # MinMax-normalise to [0, 1] so the score is comparable to the
+        # ANOMALY_THRESHOLD (0.7) configured in phm.config, and so the
+        # direction-flip (1 - score) downstream is well-defined.  Matches
+        # the eval-pipeline convention (experiments/tspulse_eval/*).
+        rng = float(scores.max() - scores.min())
+        if rng > 1e-12:  # avoid division by zero on constant-score inputs
+            scores = MinMaxScaler().fit_transform(scores.reshape(-1, 1)).ravel()
+        return scores.astype(np.float32)
 
 
 __all__ = ["AnomalyDetector", "DEFAULT_MODEL", "CONTEXT_LENGTH"]
