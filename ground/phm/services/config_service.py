@@ -48,6 +48,13 @@ class ConfigService:
         # the key).  Default to "min" per Slice 0 spec.
         if "aggregation_strategy" not in body:
             body["aggregation_strategy"] = "min"
+        # Defensive uniqueness check: duplicate sourceId would make two
+        # sensors share the same ring-buffer channel and SQLite table,
+        # silently corrupting data.  The frontend also checks this, but a
+        # client can bypass it.
+        dup = self._find_duplicate_source(body.get("device_tree", []))
+        if dup:
+            return {"status": "error", "message": f"重复的数据源标识: {dup}"}
         self.config_path.write_text(
             json.dumps(body, indent=2, ensure_ascii=False), encoding="utf-8"
         )
@@ -58,6 +65,30 @@ class ConfigService:
         except Exception:
             pass
         return {"status": "ok"}
+
+    @staticmethod
+    def _find_duplicate_source(tree: list) -> str | None:
+        """Return the first duplicate sourceId in the tree, or None."""
+        seen: set[str] = set()
+
+        def walk(nodes):
+            for n in nodes:
+                if not isinstance(n, dict):
+                    continue
+                if n.get("type") == "sensor":
+                    sid = n.get("sourceId") or n.get("source_id")
+                    if sid:
+                        if sid in seen:
+                            return sid
+                        seen.add(sid)
+                children = n.get("children")
+                if children:
+                    found = walk(children)
+                    if found:
+                        return found
+            return None
+
+        return walk(tree)
 
 
 __all__ = ["ConfigService"]

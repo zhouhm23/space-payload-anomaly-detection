@@ -32,6 +32,17 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
 logger = logging.getLogger("space")
 
+# ===========================================================================
+# Anomaly-scoring constants
+# ===========================================================================
+# Alert threshold — a measured-block anomaly score above this triggers an
+# alert packet downstream.  Tuned at 0.5 (clip-normalised pipeline scores):
+# normal sine blocks stay ~0.3-0.4 (no false alarm), multi_sine ~0.45 (low
+# false alarm ~14%), while genuine anomalies like MSL T-4 reach ~0.68 and
+# C-1 ~0.50.  This is a compromise — see experiments notes for the full
+# sweep (0.5 gives sine 0% FP, multi_sine 14% FP, C-1 67% block recall).
+ALERT_THRESHOLD: float = 0.5
+
 
 # ===========================================================================
 # DAQ card hardware configuration
@@ -155,6 +166,11 @@ def main():
         logger.info("  ch[%d]: %s (loop=%s)", ch["id"], src.channel_name, ch.get("loop", False))
 
     step = 0
+    # Per-channel previous-block cache for overlap detection context.
+    # Keyed by channel name; value is the previous raw block (np.ndarray).
+    # Passed to detector.detect(context=...) so the pipeline has enough
+    # context for aggregation/smoothing on short blocks.
+    _prev_blocks: dict[str, np.ndarray] = {}
     running = True
 
     def _shutdown(sig, frame):
@@ -203,7 +219,13 @@ def main():
                                     l1_detail.get("reason", "?"))
                 elif detector is not None:
                     try:
-                        scores = detector.detect(imputed)
+                        # Pass previous block as context for pipeline overlap.
+                        # Without it, the pipeline's aggregation produces
+                        # near-zero scores on short blocks of slowly-varying
+                        # channels (e.g. MSL C-1).  See experiments notes.
+                        ctx = _prev_blocks.get(src.channel_name)
+                        scores = detector.detect(imputed, context=ctx)
+                        _prev_blocks[src.channel_name] = imputed.copy()
                     except Exception:
                         logger.warning("Detection failed ch[%d]", ch_ids[i], exc_info=True)
 
@@ -238,8 +260,13 @@ def main():
                 )
 
                 if scores is not None and len(scores) > 0:
+                    # Alert when the block's max score exceeds the threshold.
+                    # Same logic as the ground segment's WarningService
+                    # (max_pred > ANOMALY_THRESHOLD).  Both segments now use
+                    # the same pipeline + MinMax scores so the threshold has
+                    # the same meaning on both sides.
                     mx = float(np.nanmax(scores))
-                    if mx > 0.5:
+                    if mx > ALERT_THRESHOLD:
                         server.enqueue_alert(
                             channel=src.channel_name,
                             score=mx,

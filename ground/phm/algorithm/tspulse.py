@@ -12,7 +12,7 @@ import os
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.preprocessing import StandardScaler
 
 from tsfm_public.models.tspulse.modeling_tspulse import TSPulseForReconstruction
 from tsfm_public.toolkit.time_series_anomaly_detection_pipeline import (
@@ -59,12 +59,18 @@ class AnomalyDetector(BaseDetector):
         self.n_params = sum(p.numel() for p in self.model.parameters())
         self.model_source = path
 
-    def detect(self, values, train_values_for_scaler=None):
+    def detect(self, values, train_values_for_scaler=None, context=None):
         """Run anomaly detection on a 1-D telemetry array.
 
         Args:
             values: np.ndarray [T] float32 — telemetry values to score
             train_values_for_scaler: np.ndarray or None — training data for StandardScaler
+            context: optional preceding block (np.ndarray [C]) prepended to
+                ``values`` before pipeline inference to give the pipeline's
+                aggregation/smoothing enough context.  Only the last T scores
+                (corresponding to ``values``) are returned.  Without context,
+                the pipeline produces near-zero scores on short blocks of
+                slowly-varying channels.
 
         Returns:
             scores: np.ndarray [T] float32 — anomaly scores **MinMax-normalised
@@ -75,11 +81,19 @@ class AnomalyDetector(BaseDetector):
             unchanged.
         """
         # Standardize
+        n_target = len(values)
         if train_values_for_scaler is not None:
             scaler = StandardScaler().fit(train_values_for_scaler.reshape(-1, 1))
         else:
             scaler = StandardScaler().fit(values.reshape(-1, 1))
         scaled = scaler.transform(values.reshape(-1, 1)).flatten().astype(np.float32)
+
+        # Prepend context (also standardized) for pipeline inference.
+        context_len = 0
+        if context is not None and len(context) > 0:
+            ctx_scaled = scaler.transform(np.asarray(context, dtype=np.float32).reshape(-1, 1)).flatten().astype(np.float32)
+            scaled = np.concatenate([ctx_scaled, scaled])
+            context_len = len(ctx_scaled)
 
         T = len(scaled)
         # Ensure enough points: tile if shorter than one window
@@ -138,18 +152,18 @@ class AnomalyDetector(BaseDetector):
         scores = np.zeros(T, dtype=np.float32)
         scores[:n_out] = raw_scores[:n_out]
 
-        # Trim padding (both front-padding from tiling and back-padding from +1)
-        if len(scores) > len(values):
-            scores = scores[-len(values):]
+        # Trim to target block: drop context-prefix scores and padding.
+        if context_len > 0:
+            scores = scores[context_len:]
+        if len(scores) > n_target:
+            scores = scores[-n_target:]
 
-        # MinMax-normalise to [0, 1] so the score is comparable to the
-        # ANOMALY_THRESHOLD (0.7) configured in phm.config, and so the
-        # direction-flip (1 - score) downstream is well-defined.  Matches
-        # the eval-pipeline convention (experiments/tspulse_eval/*).
-        rng = float(scores.max() - scores.min())
-        if rng > 1e-12:  # avoid division by zero on constant-score inputs
-            scores = MinMaxScaler().fit_transform(scores.reshape(-1, 1)).ravel()
-        return scores.astype(np.float32)
+        # Clip to [0, 1].  Per-window MinMax was removed: it forced every
+        # window's max to 1.0, causing false alarms on normal periodic
+        # waveforms whose relative-max reconstruction error is small but got
+        # stretched to 1.0.  Pipeline output (standardised MSE) is already in
+        # meaningful units — normal stays low (~0.3-0.4), anomalies stand out.
+        return np.clip(scores, 0.0, 1.0).astype(np.float32)
 
 
 __all__ = ["AnomalyDetector", "DEFAULT_MODEL", "CONTEXT_LENGTH"]

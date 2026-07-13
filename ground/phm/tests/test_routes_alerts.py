@@ -36,7 +36,7 @@ def client(tmp_path, monkeypatch):
     # routes_alerts uses c.sqlite and c.alert_service.threshold
     fake = SimpleNamespace(
         sqlite=sqlite,
-        alert_service=SimpleNamespace(threshold=0.7),
+        alert_service=SimpleNamespace(threshold=0.5),
     )
     monkeypatch.setattr(deps, "_container", fake)
     app = FastAPI()
@@ -62,7 +62,7 @@ class TestAlertsHistory:
         resp = client.get("/api/alerts/history")
         assert resp.status_code == 200
         body = resp.json()
-        assert body["threshold"] == 0.7
+        assert body["threshold"] == 0.5
         assert len(body["alerts"]) == 1
         a = body["alerts"][0]
         assert a["id"] == 1

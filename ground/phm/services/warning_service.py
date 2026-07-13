@@ -25,6 +25,7 @@ import time
 import numpy as np
 
 from ..algorithm import BaseDetector, CascadeDetector
+from ..algorithm.calibration_config import CalibrationConfig
 from ..algorithm.classic_filter import ClassicFilter
 from ..algorithm.physical_constraint import ConstraintConfig, PhysicalConstraint
 from ..config import (
@@ -90,12 +91,20 @@ class WarningService:
                     rate_boost=L3_RATE_BOOST,
                 )
             )
+            # Load per-channel offline calibration (direction flip + score-type
+            # selection + threshold).  Missing JSON ⇒ empty config, cascade
+            # falls back to default TSPulse-only path (backward compatible).
+            calibration = CalibrationConfig()
             self._detector = CascadeDetector(
                 detector=base_detector,
                 classic=classic,
                 constraint=constraint,
+                calibration_config=calibration,
             )
-            logger.info("Ground cascade detector ready (TSPulse + L1 + L3)")
+            logger.info(
+                "Ground cascade detector ready (TSPulse + L1 + L3, %d calibrated channels)",
+                len(calibration.channels),
+            )
         except Exception as e:
             logger.warning("Failed to load ground cascade detector: %s", e)
             self._detector_init_failed = True
@@ -111,11 +120,18 @@ class WarningService:
         Side effect: also triggers verification of older pending warnings
         for this channel against any newly arrived measured data.
         """
-        # 1. Pull measured raw values from the ring buffer
-        entries = self.ring.raw_block_entries(channel, block_size)
+        # 1. Pull measured raw values from the ring buffer.
+        # Fetch 2× block: the earlier half serves as overlap context for the
+        # pipeline (without it, short blocks of slowly-varying channels
+        # produce near-zero scores — see AnomalyDetector.detect docstring).
+        entries = self.ring.raw_block_entries(channel, block_size * 2)
         if len(entries) < 10:
             return None
-        raw_values = np.array([e["raw"] for e in entries], dtype=np.float32)
+        # Split: earlier half = context, later half = target raw_values
+        split = max(block_size, len(entries) - block_size)
+        context_arr = np.array([e["raw"] for e in entries[:split]], dtype=np.float32) if len(entries) > block_size else None
+        target_entries = entries[split:] if len(entries) > block_size else entries
+        raw_values = np.array([e["raw"] for e in target_entries], dtype=np.float32)
         last_ts = entries[-1]["received_at"]
 
         # Skip if no new raw has arrived since the last evaluation.  The eval
@@ -141,7 +157,7 @@ class WarningService:
             combined = np.concatenate([raw_values, prediction]).astype(np.float32)
             if isinstance(detector, CascadeDetector):
                 cascade_out = detector.detect_with_layers(
-                    combined, channel=channel
+                    combined, channel=channel, context=context_arr
                 )
                 scores_all = cascade_out.final_scores
                 self._latest_cascade[channel] = cascade_out

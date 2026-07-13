@@ -8,9 +8,10 @@ from __future__ import annotations
 
 # ── Thresholds ──────────────────────────────────────────────────────────────
 # Anomaly score above which a sample is considered anomalous.  Aligns with
-# the 0.7 reference line drawn on the anomaly chart and with the space-side
-# alert trigger (space/comm.py).
-ANOMALY_THRESHOLD: float = 0.7
+# the space-side alert trigger (space/main.py ALERT_THRESHOLD).  Tuned at
+# 0.5 for clip-normalised pipeline scores (see config notes): normal
+# periodic waveforms stay below 0.5 while genuine anomalies exceed it.
+ANOMALY_THRESHOLD: float = 0.5
 
 # Forecaster (TTM-R3) context / prediction lengths.  Mirror the values used
 # by ``algorithm/ttm.py`` so callers do not need to import the model module

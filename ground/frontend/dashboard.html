@@ -331,13 +331,13 @@
       display:block;
     }
 
-    /* 模态框 */
+    /* 模态框 — 不用 backdrop-filter(blur)，它叠在持续重绘的 canvas 上会导致
+       每帧重算模糊、输入卡顿。改用加深半透明背景达到遮罩效果。*/
     .modal-overlay {
       display:none;
       position:fixed;
       top:0; left:0; right:0; bottom:0;
-      background:rgba(0,0,0,0.6);
-      backdrop-filter: blur(4px);
+      background:rgba(0,0,0,0.75);
       z-index:1000;
       align-items:center;
       justify-content:center;
@@ -647,12 +647,15 @@
     warnings: [],
     dbStats: {},
     viewEndTs: null,            // 冻结模式右边界（epoch s）
+    cacheStartTs: null,         // 当前缓存数据的最早时间戳（epoch s）
+    cacheEndTs: null,           // 当前缓存数据的最晚时间戳（epoch s）
     pollingTimers: {},
     linkOk: true,
     linkFailCount: 0,
     hoveredIdx: -1,             // 图表悬停的 raw 索引
     hoveredPredIdx: -1,         // 图表悬停的 prediction 索引
     chartLayout: null,          // 缓存上次 drawChart 的坐标映射，供 tooltip 用
+    modalOpen: false,           // 模态框打开时暂停 canvas 重绘（避免输入卡顿）
   };
 
   function formatTime(ts) {
@@ -666,7 +669,8 @@
   // CSS 颜色（用于 DOM style，可以用 var()）
   function colorForScore(s) {
     if (s == null) return 'var(--text-secondary)';
-    return s > 0.7 ? 'var(--accent-red)' : 'var(--accent-yellow)';
+    // 阈值对齐 ANOMALY_THRESHOLD(0.5)：>0.5 红（异常），>0.25 黄（警戒），否则绿
+    return s > 0.5 ? 'var(--accent-red)' : (s > 0.25 ? 'var(--accent-yellow)' : 'var(--accent-green)');
   }
   function healthColor(v) {
     if (v < 60) return 'var(--accent-red)';
@@ -744,17 +748,47 @@
   // ====================== 数据获取 ======================
   async function fetchWindow() {
     if(!state.currentChannel) return;
-    const params = { channel: state.currentChannel, count: parseInt(document.getElementById('winCount').value) || 512 };
+    // 预取缓存：拉 CACHE_COUNT 行（4× 可视区），drawChart 截取可视子段画
+    const params = { channel: state.currentChannel, count: CACHE_COUNT };
     if(state.mode === 'frozen' && state.viewEndTs != null) params.end_ts = state.viewEndTs;
     const data = await api.window(params);
-    // 统一序列模型：data.data[] 每行含 raw_value + predicted_value 同行不同列，
-    // 不再需要预测缓存逻辑——预测和真实在同一行，要么都有要么都没有。
+
+    // 冻结模式预取合并：如果已有缓存且通道没变，合并新旧数据（按 timestamp
+    // 去重排序），避免向左/向右预取时整体替换导致另一侧边界塌缩（拖不回原位置）。
+    // 首次加载/切通道时不合并（旧数据属于别的通道）。
+    const old = state.windowData;
+    if (old && old.channel === data.channel && old.data && old.data.length > 0
+        && old.start_ts != null && data.start_ts != null) {
+      // 时间范围有重叠或相邻 → 合并
+      const overlap = data.start_ts <= old.end_ts && data.end_ts >= old.start_ts;
+      if (overlap) {
+        const byTs = new Map();
+        // 新数据优先（更新鲜），旧数据补充
+        for (const d of old.data) byTs.set(d.timestamp, d);
+        for (const d of data.data) byTs.set(d.timestamp, d);
+        const merged = Array.from(byTs.values()).sort((a, b) => a.timestamp - b.timestamp);
+        data.data = merged;
+        data.start_ts = Math.min(old.start_ts, data.start_ts);
+        data.end_ts = Math.max(old.end_ts, data.end_ts);
+        // gaps 合并去重
+        if (old.gaps && old.gaps.length) {
+          const gapSet = new Map();
+          for (const g of [...(old.gaps||[]), ...(data.gaps||[])]) gapSet.set(g.start + '_' + g.end, g);
+          data.gaps = Array.from(gapSet.values());
+        }
+      }
+    }
+
+    // 统一序列模型：data.data[] 每行含 raw_value + predicted_value 同行不同列
     state.windowData = data;
+    // 记录缓存时间范围（合并后可能比单次拉取更大），供拖拽边界预取判定用
+    state.cacheStartTs = data.start_ts;
+    state.cacheEndTs = data.end_ts;
     // 记住窗口边界，用于冻结模式平移
     if (data.end_ts != null && state.mode === 'frozen' && state.viewEndTs == null) {
       state.viewEndTs = data.end_ts;
     }
-    // drawChart 由 rAF 循环驱动，不在这里手动调
+    markChartDirty();  // 新数据到达 → 标记 chart 待重绘
   }
 
   async function fetchHealth() {
@@ -816,6 +850,7 @@
 
   // ====================== UI 渲染 ======================
   function renderDeviceTree() {
+    markDiagramDirty();  // 设备树任何变化（增删改/拖拽/健康度/选中态）都需同步示意图
     const container = document.getElementById('deviceTree');
     container.innerHTML = '';
     const walk = (nodes, depth=0) => {
@@ -841,7 +876,7 @@
         if(node.type === 'folder') {
           dot.style.background = folderHealth == null ? 'var(--text-secondary)' : healthColor(folderHealth);
         } else {
-          dot.style.background = score == null ? 'var(--text-secondary)' : (score>0.7?'var(--accent-red)':(score>0.4?'var(--accent-yellow)':'var(--accent-green)'));
+          dot.style.background = score == null ? 'var(--text-secondary)' : (score>0.5?'var(--accent-red)':(score>0.25?'var(--accent-yellow)':'var(--accent-green)'));
         }
         div.appendChild(dot);
 
@@ -893,7 +928,7 @@
                 selectChannel(node.channelName);
               } else if(node.type === 'folder') {
                 state.selectedFolderId = (state.selectedFolderId === node.id) ? null : node.id;
-                renderDeviceTree(); // 切换高亮
+                renderDeviceTree(); // 切换高亮（内部 markDiagramDirty）
               }
             }, 250);
           }
@@ -1030,11 +1065,13 @@
     state.currentChannel = ch;
     state.viewEndTs = null;
     state.hoveredIdx = -1;
-    renderDeviceTree();
+    markChartDirty();    // 切通道 → 清旧 hover，fetchWindow 回来再标一次
+    renderDeviceTree();  // 内部会 markDiagramDirty（脉冲点转移到新选中通道）
     renderGauges();
     if(state.mode === 'realtime') {
       pollManager.stop('chart');
       pollManager.start('chart', fetchWindow, 2000);
+      fetchWindow();  // 立即拉取，不等 2s 定时器（消除切换等 3s）
     } else {
       // 切换通道时冻结模式也抓一次最新
       state.viewEndTs = null;
@@ -1049,6 +1086,7 @@
     if(mode === 'realtime') {
       state.viewEndTs = null;
       pollManager.start('chart', fetchWindow, 2000);
+      fetchWindow();  // 立即拉最新，不等定时器
     } else {
       pollManager.stop('chart');
       // 冻结时抓一次当前最新作为起点
@@ -1077,6 +1115,23 @@
   let dpr = window.devicePixelRatio || 1;
   let mouseX = -1, mouseY = -1;
   let isDragging = false;
+  // dirty flag：只在数据/交互变化时重绘对应 canvas，避免每帧空转双 canvas
+  // chart 是纯数据驱动（无时间动画）→ 事件驱动；diagram 有选中态脉冲光晕（正弦）
+  // → 有选中通道时仍需每帧重绘，无选中时事件驱动。
+  let chartDirty = true, diagramDirty = true;
+  const markChartDirty = () => { chartDirty = true; };
+  const markDiagramDirty = () => { diagramDirty = true; };
+  // 预取缓存：fetchWindow 拉 CACHE_COUNT 行（4× 可视区），drawChart 按 viewEndTs
+  // 截取最后 VIEW_COUNT 行画。拖拽时本地截取重画（无 HTTP），仅 viewEndTs 距
+  // 缓存边界不足 PREFETCH_THRESHOLD 行时才重新 fetch。
+  const CACHE_COUNT = 2048;        // 单次拉取行数（后端上限 10000）
+  const VIEW_COUNT = 512;          // 可视区行数
+  const PREFETCH_THRESHOLD = 256;  // 距缓存边界多少行触发预取
+  // Y 轴范围输入框：drawChart 每次读取，改值后需标记重绘（之前靠 rAF 每帧兜底）
+  ['yMin', 'yMax'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', markChartDirty);
+  });
 
   function resizeCanvas() {
     const rect = canvas.parentElement.getBoundingClientRect();
@@ -1104,7 +1159,25 @@
     }
 
     // 统一序列：每行含 timestamp + raw_value/predicted_value 等四列
-    const data = state.windowData.data;
+    // 预取缓存：windowData 含 CACHE_COUNT 行，这里按 viewEndTs 截取可视 VIEW_COUNT 行。
+    // 后续所有循环（X 映射、Y 范围、画线、hover）都遍历这个子段。
+    const fullData = state.windowData.data;
+    let data;
+    if (state.mode === 'frozen' && state.viewEndTs != null && fullData.length > VIEW_COUNT) {
+      // 二分定位：找 timestamp <= viewEndTs 的最后一个点的下一位（上界）
+      const target = state.viewEndTs;
+      let lo = 0, hi = fullData.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (fullData[mid].timestamp <= target) lo = mid + 1; else hi = mid;
+      }
+      const endIdx = Math.min(lo, fullData.length);
+      const startIdx = Math.max(0, endIdx - VIEW_COUNT);
+      data = fullData.slice(startIdx, endIdx);
+    } else {
+      // 实时模式 或 数据不足：取最后 VIEW_COUNT 行
+      data = fullData.slice(-VIEW_COUNT);
+    }
     const topH = h * 0.7, bottomH = h * 0.3;
     const pad = { top: 20*dpr, right: 50*dpr, bottom: 30*dpr, left: 60*dpr };
 
@@ -1287,7 +1360,7 @@
 
     const topLayout = drawSubChart(0, topH, 'raw_value', 'predicted_value', C.blue, C.green, null, null);
     // 异常分数图：anomaly_score(黄实线) + predicted_anomaly_score(绿虚线)，Y 轴固定 0~1
-    const botLayout = drawSubChart(topH, bottomH, 'anomaly_score', 'predicted_anomaly_score', C.yellow, C.green, 0.7, [0, 1]);
+    const botLayout = drawSubChart(topH, bottomH, 'anomaly_score', 'predicted_anomaly_score', C.yellow, C.green, 0.5, [0, 1]);
 
     // ---- 缺口竖虚线 + "中断Xh" 标注 ----
     for (const gi of gapIndices) {
@@ -1419,14 +1492,33 @@
       ctx.textAlign = 'left';
       ctx.fillText('◀ 已无更早数据', pad.left + 4*dpr, pad.top + 12*dpr);
     }
+    // 右边界红色提示线：拖拽到最新数据时显示"已无更晚数据"
+    if (state._atRightBound) {
+      ctx.strokeStyle = C.red;
+      ctx.lineWidth = 2 * dpr;
+      ctx.beginPath();
+      ctx.moveTo(w - pad.right, pad.top);
+      ctx.lineTo(w - pad.right, topH + bottomH - pad.bottom);
+      ctx.stroke();
+      ctx.fillStyle = C.red;
+      ctx.font = `${10*dpr}px sans-serif`;
+      ctx.textAlign = 'right';
+      ctx.fillText('已无更晚数据 ▶', w - pad.right - 4*dpr, pad.top + 12*dpr);
+    }
 
     updateTimeline();
   }
 
-  // rAF 主循环
+  // rAF 主循环：dirty flag 驱动，避免每帧空转双 canvas
   function rafLoop() {
-    drawChart();
-    drawDeviceDiagram();
+    // 模态框打开时跳过所有 canvas 重绘（模态遮挡了 canvas，重绘无意义；
+    // 且 backdrop/重绘会与输入框竞争合成线程导致输入卡顿）
+    const anyModalOpen = document.querySelector('.modal-overlay.active');
+    if (chartDirty && !anyModalOpen) { drawChart(); chartDirty = false; }
+    // diagram 脉冲光晕是时间动画；模态打开时暂停，否则 dirty 时重绘
+    if (!anyModalOpen && (diagramDirty || state.currentChannel)) {
+      drawDeviceDiagram(); diagramDirty = false;
+    }
     requestAnimationFrame(rafLoop);
   }
 
@@ -1444,6 +1536,7 @@
     const rect = canvas.getBoundingClientRect();
     mouseX = (e.clientX - rect.left) * dpr;
     mouseY = (e.clientY - rect.top) * dpr;
+    markChartDirty();  // hover tooltip / 十字准线随光标变化
     if (isDragging && state.chartLayout) {
       const dx = mouseX - state._dragStartX;
       const { tSpan, plotW, gapBounds } = state.chartLayout;
@@ -1466,26 +1559,41 @@
           }
         }
       }
-      // 边界保护：viewEndTs 不能小于当前窗口最早数据时间戳，
-      // 否则 query_window 返回行数递减 → tSpan 趋近 0 → 图表缩放爆炸。
-      // 到达边界时截断累积位移（重置拖拽起点），避免"需反向移动才能恢复"。
+      // 边界保护：viewEndTs 不能超出缓存范围 [cacheStartTs, cacheEndTs]。
+      // 到达边界时截断累积位移（重置拖拽起点），避免越界后无效预取导致卡顿。
       state._atLeftBound = false;
-      if (state.chartLayout.tsMs && state.chartLayout.tsMs.length > 0) {
-        const minTs = state.chartLayout.tsMs[0] / 1000;
-        if (newEndTs <= minTs) {
-          newEndTs = minTs;
-          state._atLeftBound = true;
-          // 截断：重置拖拽基准为当前值，后续拖拽从边界重新计算
-          state._dragStartX = mouseX;
-          state._dragStartEndTs = minTs;
-        }
+      state._atRightBound = false;
+      if (state.cacheStartTs != null && newEndTs <= state.cacheStartTs) {
+        newEndTs = state.cacheStartTs;
+        state._atLeftBound = true;
+        state._dragStartX = mouseX;
+        state._dragStartEndTs = state.cacheStartTs;
+      }
+      // 上界保护（向右拖看更晚数据）：newEndTs 超过 cacheEndTs 时截断。
+      // 后端 query_window 只返回 end_ts 之前的数据，cacheEndTs 通常已是
+      // 数据库最新时间戳，越界后预取拉不回更晚数据——表现为卡顿。
+      if (state.cacheEndTs != null && newEndTs >= state.cacheEndTs) {
+        newEndTs = state.cacheEndTs;
+        state._atRightBound = true;
+        state._dragStartX = mouseX;
+        state._dragStartEndTs = state.cacheEndTs;
       }
       state.viewEndTs = newEndTs;
-      // throttle fetch（50ms）
-      if (!state._dragFetching) {
-        state._dragFetching = true;
-        fetchWindow();
-        setTimeout(() => { state._dragFetching = false; }, 50);
+      markChartDirty();  // 本地截取重画（无 HTTP），drawChart 按 viewEndTs 在缓存里取子段
+      // 边界预取：viewEndTs 距缓存边界不足 PREFETCH_THRESHOLD 行时才 fetch。
+      // 但到达边界（_atLeftBound/_atRightBound）时不再预取——左/右边界已是
+      // 数据库极限，再 fetch 也拉不回新数据，徒增无效请求。
+      if (!state._atLeftBound && !state._atRightBound
+          && state.cacheStartTs != null && state.cacheEndTs != null) {
+        const cacheSpan = state.cacheEndTs - state.cacheStartTs;
+        const marginSec = cacheSpan * (PREFETCH_THRESHOLD / CACHE_COUNT);
+        const nearLeft = (newEndTs - state.cacheStartTs) < marginSec;
+        const nearRight = (state.cacheEndTs - newEndTs) < marginSec;
+        if ((nearLeft || nearRight) && !state._dragFetching) {
+          state._dragFetching = true;
+          fetchWindow();
+          setTimeout(() => { state._dragFetching = false; }, 200);
+        }
       }
     }
   });
@@ -1500,6 +1608,7 @@
     // 注意：不在 mouseleave 里清 isDragging —— 拖拽时鼠标短暂移出 canvas
     // 再回来应继续拖拽。只清 mouseX/mouseY 让 tooltip 消失。
     mouseX = -1; mouseY = -1;
+    markChartDirty();  // 清掉 hover tooltip
   });
   // 冻结模式光标提示
   canvas.addEventListener('mouseenter', () => {
@@ -1536,12 +1645,32 @@
     const wd = state.windowData;
     if (wd && wd.start_ts != null && wd.end_ts != null) {
       const span = wd.end_ts - wd.start_ts;
-      state.viewEndTs = state._tlDragStartEndTs - pct * span;
-      // throttle（同 Canvas 拖拽逻辑）
-      if (!state._dragFetching) {
-        state._dragFetching = true;
-        fetchWindow();
-        setTimeout(() => { state._dragFetching = false; }, 50);
+      let newEndTs = state._tlDragStartEndTs - pct * span;
+      // 边界保护（同 canvas 拖拽）：上下界截断
+      state._atLeftBound = false;
+      state._atRightBound = false;
+      if (state.cacheStartTs != null && newEndTs <= state.cacheStartTs) {
+        newEndTs = state.cacheStartTs;
+        state._atLeftBound = true;
+      }
+      if (state.cacheEndTs != null && newEndTs >= state.cacheEndTs) {
+        newEndTs = state.cacheEndTs;
+        state._atRightBound = true;
+      }
+      state.viewEndTs = newEndTs;
+      markChartDirty();  // 本地截取重画
+      // 边界预取（同 canvas 拖拽）：到达边界时不预取
+      if (!state._atLeftBound && !state._atRightBound
+          && state.cacheStartTs != null && state.cacheEndTs != null) {
+        const cacheSpan = state.cacheEndTs - state.cacheStartTs;
+        const marginSec = cacheSpan * (PREFETCH_THRESHOLD / CACHE_COUNT);
+        const nearLeft = (newEndTs - state.cacheStartTs) < marginSec;
+        const nearRight = (state.cacheEndTs - newEndTs) < marginSec;
+        if ((nearLeft || nearRight) && !state._dragFetching) {
+          state._dragFetching = true;
+          fetchWindow();
+          setTimeout(() => { state._dragFetching = false; }, 200);
+        }
       }
     }
   });
@@ -1609,7 +1738,7 @@
       const rows = data.data || [];
       document.getElementById('histTable').innerHTML = rows.length ? `
         <table><tr><th>时间</th><th>通道</th><th>原始值</th><th>异常分数</th><th>操作</th></tr>
-        ${rows.map(r => `<tr class="${(r.score!=null && r.score>0.7)?'row-alert':''}">
+        ${rows.map(r => `<tr class="${(r.score!=null && r.score>0.5)?'row-alert':''}">
           <td>${formatTime(r.received_at)}</td><td>${r.channel}</td><td>${fmt(r.raw)}</td><td>${fmt(r.score)}</td>
           <td><button class="btn-sm" onclick="deleteHistory('${r.channel}',${r.received_at})">🗑</button></td>
         </tr>`).join('')}</table>` : '<div class="empty-state">无数据</div>';
@@ -1645,7 +1774,7 @@
       const rows = data.data || [];
       document.getElementById('detTable').innerHTML = rows.length ? `
         <table><tr><th>时间</th><th>通道</th><th>L1决策</th><th>L1分</th><th>L2分</th><th>L3规则</th><th>最终分数</th><th>操作</th></tr>
-        ${rows.map(r => `<tr class="${(r.final_score!=null && r.final_score>0.7)?'row-alert':''} ${r.l1_decision==='skip'?'row-skip':''}">
+        ${rows.map(r => `<tr class="${(r.final_score!=null && r.final_score>0.5)?'row-alert':''} ${r.l1_decision==='skip'?'row-skip':''}">
           <td>${formatTime(r.timestamp)}</td><td>${r.channel}</td><td>${r.l1_decision||'—'}</td><td>${fmt(r.l1_score)}</td><td>${fmt(r.l2_score)}</td>
           <td>${(r.l3_rules||[]).join(', ')||'—'}</td><td>${fmt(r.final_score)}</td>
           <td><button class="btn-sm" onclick="deleteDetection('${r.channel}',${r.timestamp})">🗑</button></td>
@@ -1889,6 +2018,16 @@
       if (mode.type === 'sensor') {
         const src = document.getElementById('devSource').value;
         const ch = sourceToChannel(src) || name;  // 通道名从数据源自动派生
+        // 唯一性校验：sourceId 决定 channel/表名，重名会导致数据互相覆盖
+        const existing = getFlatSensors();
+        if (existing.some(n => n.sourceId === src)) {
+          alert(`数据源 "${src}" 已被其他传感器使用，请选择不同的数据源。\n（同名数据源会导致通道数据互相覆盖）`);
+          return;
+        }
+        if (existing.some(n => n.name === name)) {
+          alert(`名称 "${name}" 已存在，请使用不同的名称。`);
+          return;
+        }
         const bs = parseInt(document.getElementById('devBlockSize').value) || 512;
         const node = { id:'node-'+Date.now(), name, type:'sensor', sourceId:src, channelName:ch, blockSize:bs };
         const pos = collectPosition();
@@ -1897,6 +2036,15 @@
         if(!insertIntoSelectedFolder(node)) state.deviceTree.push(node);
         changed = true;
       } else {
+        // 文件夹重名校验（同层 + 全局）
+        const allFolders = [];
+        (function collect(nodes) {
+          (nodes||[]).forEach(n => { if(n.type==='folder') allFolders.push(n.name); if(n.children) collect(n.children); });
+        })(state.deviceTree);
+        if (allFolders.includes(name)) {
+          alert(`文件夹名称 "${name}" 已存在，请使用不同的名称。`);
+          return;
+        }
         const folder = { id:'node-'+Date.now(), name, type:'folder', children:[] };
         if(!insertIntoSelectedFolder(folder)) state.deviceTree.push(folder);
         changed = true;
@@ -1904,10 +2052,20 @@
     } else {
       // edit（传感器改配置 / 文件夹重命名）
       const node = mode.node;
-      if (node.name !== name) { node.name = name; changed = true; }
+      // 编辑时也要校验重名（排除自身）
       if (node.type === 'sensor') {
         const src = document.getElementById('devSource').value;
-        const ch = sourceToChannel(src) || node.channelName || name;  // 通道名随数据源自动更新
+        const ch = sourceToChannel(src) || node.channelName || name;
+        const existing = getFlatSensors().filter(n => n.id !== node.id);
+        if (existing.some(n => n.sourceId === src)) {
+          alert(`数据源 "${src}" 已被其他传感器使用，请选择不同的数据源。`);
+          return;
+        }
+        if (node.name !== name && existing.some(n => n.name === name)) {
+          alert(`名称 "${name}" 已存在，请使用不同的名称。`);
+          return;
+        }
+        if (node.name !== name) { node.name = name; changed = true; }
         const bs = parseInt(document.getElementById('devBlockSize').value) || 512;
         if(node.channelName !== ch) { node.channelName = ch; changed = true; }
         if(node.sourceId !== src) { node.sourceId = src; changed = true; }
@@ -1915,6 +2073,19 @@
         const pos = collectPosition();
         if (pos) { node.position = pos; changed = true; }
         else if(node.position) { delete node.position; changed = true; }
+      } else {
+        // 文件夹重命名
+        if (node.name !== name) {
+          const allFolders = [];
+          (function collect(nodes) {
+            (nodes||[]).forEach(n => { if(n.type==='folder' && n.id!==node.id) allFolders.push(n.name); if(n.children) collect(n.children); });
+          })(state.deviceTree);
+          if (allFolders.includes(name)) {
+            alert(`文件夹名称 "${name}" 已存在，请使用不同的名称。`);
+            return;
+          }
+          node.name = name; changed = true;
+        }
       }
     }
     closeDeviceModal();
@@ -1943,7 +2114,7 @@
     remove(state.deviceTree);
     // 若删除的是当前选中文件夹，清空选中态
     if(state.selectedFolderId === id) state.selectedFolderId = null;
-    renderDeviceTree();
+    renderDeviceTree();  // 内部 markDiagramDirty
     autoSaveConfig();
   }
 
@@ -2072,10 +2243,10 @@
         const dx = mx + 6 * dpr + fx * (cellW - 12 * dpr);
         const dy = dotAreaY + fy * dotAreaH;
         const ch = node.channelName;
-        // 点位颜色按异常分数着色（与设备树圆点一致，比健康度更敏感）：
-        // score>0.7 红 / >0.4 黄 / 否则绿；无数据灰
+        // 点位颜色按异常分数着色（与设备树圆点一致，阈值对齐 ANOMALY_THRESHOLD 0.5）：
+        // score>0.5 红 / >0.25 黄 / 否则绿；无数据灰
         const sc = state.sensors[ch] ? state.sensors[ch].latest_score : null;
-        const color = sc == null ? C.textSec : (sc > 0.7 ? C.red : (sc > 0.4 ? C.yellow : C.green));
+        const color = sc == null ? C.textSec : (sc > 0.5 ? C.red : (sc > 0.25 ? C.yellow : C.green));
         const isSel = state.currentChannel === ch;
         const dotR = (isSel ? 7 : 5) * dpr;
         dots.push({ node, x: dx, y: dy, r: dotR, color, isSel });

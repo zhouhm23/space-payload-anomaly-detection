@@ -117,8 +117,14 @@ class CascadeDetector(BaseDetector):
         values: np.ndarray,
         train_values_for_scaler: np.ndarray | None = None,
         channel: str = "",
+        context: np.ndarray | None = None,
     ) -> CascadeOutput:
-        """Run the full three-layer cascade and return structured output."""
+        """Run the full three-layer cascade and return structured output.
+
+        Args:
+            context: optional preceding block prepended to the L2 detector's
+                input for pipeline overlap (see AnomalyDetector.detect).
+        """
         v = np.asarray(values, dtype=np.float32).ravel()
         n = len(v)
         layers: list[LayerResult] = []
@@ -170,7 +176,7 @@ class CascadeDetector(BaseDetector):
         else:
             # ── Layer 2: DL detector ─────────────────────────────────
             try:
-                raw_scores = self._detector.detect(v, train_values_for_scaler)
+                raw_scores = self._detector.detect(v, train_values_for_scaler, context=context)
                 raw_scores = np.asarray(raw_scores, dtype=np.float32).ravel()
                 # Sanitise NaN/Inf from model output before L3
                 nan_mask = ~np.isfinite(raw_scores)
@@ -202,8 +208,8 @@ class CascadeDetector(BaseDetector):
             cal_detail: dict = {}
             if cal is not None:
                 tsp_score = raw_scores
-                # Direction flip — expects MinMax-normalised input ([0,1]).
-                # AnomalyDetector.detect already normalises, so this holds.
+                # Direction flip — expects input in [0,1] (clip-normalised).
+                # AnomalyDetector.detect clips to [0,1], so this holds.
                 tsp_score = DirectionCalibrator.flip(tsp_score, cal.flip)
                 chosen = tsp_score
                 if cal.score_type in ("freq", "fusion"):

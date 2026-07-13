@@ -35,7 +35,7 @@ class TestChannelHealth:
         assert channel_health([0.8, 0.9, 1.0]) == 0.0
 
     def test_half_half(self):
-        # threshold 0.7 → 2 of 4 normal
+        # threshold 0.5 → 2 of 4 normal
         assert channel_health([0.1, 0.2, 0.8, 0.9]) == 50.0
 
     def test_empty_returns_100(self):
@@ -43,7 +43,7 @@ class TestChannelHealth:
 
     def test_boundary_exactly_threshold_is_normal(self):
         # score == threshold is considered normal (≤)
-        assert channel_health([0.7, 0.7]) == 100.0
+        assert channel_health([0.5, 0.5]) == 100.0
 
 
 # ---------------------------------------------------------------------------
