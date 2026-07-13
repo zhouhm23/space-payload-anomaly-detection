@@ -16,6 +16,7 @@ from .routes_sensors import router as sensors_router
 from .routes_history import router as history_router
 from .routes_window import router as window_router
 from .routes_export import router as export_router
+from .routes_diagnosis import router as diagnosis_router
 
 __all__ = [
     "deps",
@@ -30,4 +31,5 @@ __all__ = [
     "history_router",
     "window_router",
     "export_router",
+    "diagnosis_router",
 ]

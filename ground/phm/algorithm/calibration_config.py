@@ -55,8 +55,20 @@ __all__ = [
 # Constants — ported from experiments/tspulse_eval/run_with_direction_calibration.py:60-78
 # ---------------------------------------------------------------------------
 
-# Six candidate threshold formulas (limited set controls overfitting on
-# channels with only 1-3 events).
+# Candidate threshold formulas used in LOO selection.  These six are all
+# computed on the test segment's score distribution.
+#
+# NOTE: ``train_target_fa5`` / ``train_target_fa20`` (leak-free formulas
+# derived from the training segment) are implemented in
+# :func:`compute_threshold` and were evaluated as calibration candidates
+# but are **not** included in the default set — on NASA-MSL/SMAP the
+# training-segment score distribution systematically differs from the
+# test normal-segment distribution (TSPulse reconstruction error is not
+# stationary across train/test), so train-derived thresholds inflate the
+# calibration-vs-online gap and raise the online FA rate.  See
+# ``docs/项目现状.md`` Day15 P1 record for the experiment that established
+# this.  The implementation is kept so the candidate can be re-evaluated
+# on future datasets where the stationarity assumption holds.
 CANDIDATE_THRESHOLDS: list[str] = [
     "init512_mean+3σ",
     "global_p90",
@@ -97,11 +109,23 @@ def find_events(labels: np.ndarray) -> list[tuple[int, int]]:
 # Threshold computation — ported from run_with_direction_calibration.py:204-216
 # ---------------------------------------------------------------------------
 
-def compute_threshold(score: np.ndarray, labels: np.ndarray, name: str) -> float:
+def compute_threshold(
+    score: np.ndarray,
+    labels: np.ndarray,
+    name: str,
+    train_score: np.ndarray | None = None,
+    sr_hz: float = 1.0,
+) -> float:
     """Compute a threshold value by candidate name.
 
-    ``normal_p99`` / ``init512_mean+3σ`` use the first 512 points as a
-    normal-segment approximation (system-startup baseline assumption).
+    Legacy formulas (``init512_mean+3σ`` / ``normal_p99`` / ``global_p*``)
+    are computed on the test ``score`` array and are kept for backward
+    comparison.  The ``train_target_fa<N>`` formulas invert a target FA/h
+    rate from the *training* segment's score distribution: given a target
+    FA/h ``N``, the threshold is the ``(1 − N/(sr·3600))`` quantile of
+    ``train_score``.  This is leak-free (the training segment is known to
+    be all-normal) and the FA/h target carries the same business meaning
+    across datasets.
     """
     score = np.asarray(score, dtype=np.float64).ravel()
     if name == "init512_mean+3σ":
@@ -113,6 +137,14 @@ def compute_threshold(score: np.ndarray, labels: np.ndarray, name: str) -> float
     if name == "normal_p99":
         init = score[: min(512, len(score))]
         return float(np.percentile(init, 99))
+    if name.startswith("train_target_fa"):
+        target_fa = float(name.split("_fa")[1])
+        if train_score is None or len(train_score) == 0:
+            # No training scores available — fall back to a conservative
+            # test-side quantile so the candidate still participates in LOO.
+            return float(np.percentile(score, 99))
+        p = (1.0 - target_fa / (sr_hz * 3600.0)) * 100.0
+        return float(np.percentile(train_score, p))
     raise ValueError(f"unknown threshold: {name}")
 
 
@@ -155,28 +187,29 @@ def loo_select_from_18(
     labels: np.ndarray,
     threshold_names: list[str] | None = None,
     target_evt: float = 0.94,
+    train_scores_dict: dict[str, np.ndarray] | None = None,
+    sr_hz: float = 1.0,
 ) -> tuple[str, str, float, dict]:
-    """Pick the best (score_type, threshold) pair from 3×6=18 candidates.
+    """Pick the best (score_type, threshold) pair from the candidate set.
 
     Args:
         scores_dict: ``{"tsp": array, "freq": array, "fusion": array}`` —
-            each array already direction-calibrated and MinMax-normalised.
+            each array already direction-calibrated and normalised.
             ``fusion`` is conventionally ``np.maximum(tsp, freq)``.
-        labels: 1-D 0/1 ground-truth array.
+        labels: 1-D 0/1 ground-truth array (test segment).
         threshold_names: candidate threshold names (defaults to
             :data:`CANDIDATE_THRESHOLDS`).
         target_evt: minimum event-detection rate to qualify (default 0.94).
+        train_scores_dict: optional ``{"tsp": array, "freq": array,
+            "fusion": array}`` of training-segment scores (same
+            direction-calibration as ``scores_dict``).  Required for the
+            ``train_target_fa*`` formulas; when None those formulas fall
+            back to a test-side quantile inside :func:`compute_threshold`.
+        sr_hz: sampling rate in Hz — used by the ``train_target_fa*``
+            formulas to convert FA/h to a quantile.
 
     Returns:
         ``(best_score_key, best_thr_name, best_threshold, detail)``.
-
-    Note:
-        The experiment's LOO loop iterates ``leave_idx`` over events but the
-        loop body recomputes **full-test** FA each iteration (``leave_idx``
-        is unused), so ``loo_fa_mean`` equals the full-test FA.  This
-        behaviour is preserved verbatim for numerical consistency with the
-        published experiment results.  A true leave-one-out would need
-        re-evaluation across all 27 channels.
     """
     if threshold_names is None:
         threshold_names = CANDIDATE_THRESHOLDS
@@ -184,14 +217,24 @@ def loo_select_from_18(
 
     events = find_events(labels)
     if len(events) == 0:
-        thr = compute_threshold(scores_dict["tsp"], labels, "init512_mean+3σ")
+        thr = compute_threshold(
+            scores_dict["tsp"], labels, "init512_mean+3σ",
+            train_score=train_scores_dict.get("tsp") if train_scores_dict else None,
+            sr_hz=sr_hz,
+        )
         return "tsp", "init512_mean+3σ", thr, {"reason": "no_events"}
 
     # Step 1: full-test evt + FA for every (score, threshold) candidate.
+    # For train_target_fa* formulas the threshold is derived from the
+    # training-segment score distribution (leak-free); the test evt/FA is
+    # still evaluated on the test segment but only used for selection.
     cand_full: dict[tuple[str, str], dict] = {}
     for sk, score in scores_dict.items():
+        train_score = (
+            train_scores_dict.get(sk) if train_scores_dict is not None else None
+        )
         for tn in threshold_names:
-            thr = compute_threshold(score, labels, tn)
+            thr = compute_threshold(score, labels, tn, train_score=train_score, sr_hz=sr_hz)
             e = _eval_at_threshold(score, labels, thr)
             cand_full[(sk, tn)] = {
                 "threshold": thr,
@@ -206,8 +249,10 @@ def loo_select_from_18(
         max_evt = max(d["evt"] for d in cand_full.values())
         qualified = [(k, d) for k, d in cand_full.items() if d["evt"] >= max_evt - 1e-9]
 
-    # Step 3: tiebreak by (pseudo-)LOO FA mean.  NOTE: see docstring — this
-    # is effectively full-test FA, matching the experiment's behaviour.
+    # Step 3: tiebreak by (pseudo-)LOO FA mean.  The experiment's LOO loop
+    # iterates ``leave_idx`` over events but recomputes full-test FA each
+    # iteration (``leave_idx`` unused), so this equals full-test FA.  Kept
+    # verbatim for numerical consistency with the published experiment.
     loo_fa: dict[tuple[str, str], list[float]] = {k: [] for k, _ in qualified}
     for _leave_idx in range(len(events)):  # noqa: B007 — preserved per experiment
         for k, _ in qualified:
@@ -252,6 +297,11 @@ class ChannelCalibration:
         freq_band_mean: STFT band-power mean baseline (only present when
             ``score_type`` involves freq).
         freq_band_std: STFT band-power std baseline (same).
+        freq_z_min / freq_z_max: reference range of the band z-score over
+            the training segment, used by
+            :class:`FreqFeatureExtractor.transform` to map scores onto
+            ``[0, 1]``.  Required when ``score_type`` involves freq; absent
+            on older JSONs forces the legacy per-call MinMax fallback.
     """
 
     flip: bool = False
@@ -260,12 +310,16 @@ class ChannelCalibration:
     threshold_name: str = "global_p99"
     freq_band_mean: list[float] | None = None
     freq_band_std: list[float] | None = None
+    freq_z_min: float | None = None
+    freq_z_max: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ChannelCalibration":
+        z_min = d.get("freq_z_min")
+        z_max = d.get("freq_z_max")
         return cls(
             flip=bool(d.get("flip", False)),
             score_type=str(d.get("score_type", "tsp")),
@@ -273,6 +327,8 @@ class ChannelCalibration:
             threshold_name=str(d.get("threshold_name", "global_p99")),
             freq_band_mean=d.get("freq_band_mean"),
             freq_band_std=d.get("freq_band_std"),
+            freq_z_min=float(z_min) if z_min is not None else None,
+            freq_z_max=float(z_max) if z_max is not None else None,
         )
 
 
@@ -347,22 +403,38 @@ def build_calibration_for_channel(
     labels: np.ndarray,
     freq_band_mean: np.ndarray | None = None,
     freq_band_std: np.ndarray | None = None,
+    freq_z_min: float | None = None,
+    freq_z_max: float | None = None,
     target_evt: float = 0.94,
+    tsp_train_score: np.ndarray | None = None,
+    freq_train_score: np.ndarray | None = None,
+    sr_hz: float = 1.0,
 ) -> ChannelCalibration:
     """Run the full offline calibration pipeline for one channel.
 
-    Inputs must already be MinMax-normalised to ``[0,1]`` and **not yet
-    direction-flipped** — this function applies the flip itself.
+    Inputs must already be normalised to ``[0,1]`` (TSPulse clip-normalised;
+    freq score mapped via the training-segment z-score reference) and **not
+    yet direction-flipped** — this function applies the flip itself.
 
     Args:
-        tsp_score: MinMax-normalised TSPulse score (1-D).
-        freq_score: MinMax-normalised STFT frequency score (1-D), same length.
+        tsp_score: clip-normalised TSPulse score (1-D), in ``[0,1]``.
+        freq_score: STFT frequency score (1-D), already mapped onto
+            ``[0,1]`` via the training-segment z_min/z_max reference so it
+            matches the online :meth:`FreqFeatureExtractor.transform` scale.
         labels: 1-D 0/1 ground-truth array.
         freq_band_mean / freq_band_std: the STFT baseline arrays (to embed
             in the output config so the online path can rebuild the
             freq scorer without re-fitting).  Required when the LOO picks
             a freq/fusion score type; ignored otherwise.
+        freq_z_min / freq_z_max: the z-score reference range (to embed
+            alongside the band baseline).  Required for freq/fusion types.
         target_evt: LOO event-detection target (default 0.94).
+        tsp_train_score / freq_train_score: optional training-segment
+            scores (raw, not yet direction-flipped — the flip is applied
+            here consistently).  When provided, the ``train_target_fa*``
+            threshold candidates become available and are preferred over
+            the legacy test-side formulas (leak-free threshold selection).
+        sr_hz: sampling rate in Hz (used by train_target_fa* formulas).
 
     Returns:
         A :class:`ChannelCalibration` ready to serialise.
@@ -379,9 +451,27 @@ def build_calibration_for_channel(
 
     scores_dict = {"tsp": tsp_cal, "freq": freq_cal, "fusion": fusion_cal}
 
-    # Step 2: 18-candidate LOO selection.
+    # Build the training-side score dict (same flip + fusion as test) so the
+    # train_target_fa* candidates can be computed leak-free.
+    train_scores_dict: dict[str, np.ndarray] | None = None
+    if tsp_train_score is not None:
+        tsp_tr_cal = DirectionCalibrator.flip(
+            np.asarray(tsp_train_score, dtype=np.float32).ravel(), flip
+        )
+        freq_tr_cal = (
+            DirectionCalibrator.flip(
+                np.asarray(freq_train_score, dtype=np.float32).ravel(), flip
+            )
+            if freq_train_score is not None
+            else tsp_tr_cal  # fall back to tsp if freq not provided
+        )
+        fusion_tr_cal = np.maximum(tsp_tr_cal, freq_tr_cal).astype(np.float32)
+        train_scores_dict = {"tsp": tsp_tr_cal, "freq": freq_tr_cal, "fusion": fusion_tr_cal}
+
+    # Step 2: candidate selection (8 formulas now, including train_target_fa*).
     best_sk, best_tn, best_thr, _detail = loo_select_from_18(
-        scores_dict, labels, target_evt=target_evt
+        scores_dict, labels, target_evt=target_evt,
+        train_scores_dict=train_scores_dict, sr_hz=sr_hz,
     )
 
     # Step 3: only carry the freq baseline when it's actually used.
@@ -397,4 +487,6 @@ def build_calibration_for_channel(
         freq_band_std=(
             [float(x) for x in np.asarray(freq_band_std).ravel()] if need_freq else None
         ),
+        freq_z_min=float(freq_z_min) if need_freq and freq_z_min is not None else None,
+        freq_z_max=float(freq_z_max) if need_freq and freq_z_max is not None else None,
     )

@@ -75,6 +75,20 @@ CREATE TABLE IF NOT EXISTS alert_records (
     ingested_at REAL    NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_alert_channel_time ON alert_records(channel, created_at);
+
+-- LLM diagnosis results (cached per alert — one diagnosis per unique alert)
+CREATE TABLE IF NOT EXISTS diagnosis_records (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel         TEXT    NOT NULL,
+    alert_type      TEXT    NOT NULL,   -- 'measured' or 'predicted'
+    alert_ts        REAL    NOT NULL,   -- the alert/warning timestamp (cache key part)
+    diagnosis       TEXT,               -- Markdown report
+    context_summary TEXT,               -- JSON
+    elapsed_sec     REAL,
+    error           TEXT,
+    created_at      REAL    NOT NULL DEFAULT (unixepoch())
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_diag_key ON diagnosis_records(channel, alert_type, alert_ts);
 """
 
 
@@ -769,6 +783,73 @@ class SQLiteStore:
             }
             for r in reversed(rows)
         ]
+
+    # ------------------------------------------------------------------
+    # Diagnosis cache (synchronous, for POST /api/diagnosis)
+    # ------------------------------------------------------------------
+
+    def get_diagnosis(self, channel: str, alert_type: str, alert_ts: float) -> dict | None:
+        """Return cached diagnosis for (channel, alert_type, alert_ts) or None."""
+        if not self.enabled or self._conn is None:
+            return None
+        try:
+            row = self._conn.execute(
+                "SELECT diagnosis, context_summary, elapsed_sec, error, created_at "
+                "FROM diagnosis_records WHERE channel=? AND alert_type=? AND alert_ts=?",
+                [channel, alert_type, alert_ts],
+            ).fetchone()
+            if row is None:
+                return None
+            import json as _json
+            return {
+                "diagnosis": row[0],
+                "context_summary": _json.loads(row[1]) if row[1] else {},
+                "elapsed_sec": row[2],
+                "error": row[3],
+                "created_at": row[4],
+            }
+        except Exception:
+            logger.warning("get_diagnosis failed", exc_info=True)
+            return None
+
+    def save_diagnosis(self, channel: str, alert_type: str, alert_ts: float,
+                       diagnosis: str, context_summary: dict,
+                       elapsed_sec: float, error: str | None) -> None:
+        """Insert or replace a diagnosis record (keyed by channel+type+alert_ts)."""
+        if not self.enabled or self._conn is None:
+            return
+        import json as _json
+        try:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO diagnosis_records "
+                "(channel, alert_type, alert_ts, diagnosis, context_summary, "
+                " elapsed_sec, error, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, unixepoch())",
+                [channel, alert_type, alert_ts, diagnosis,
+                 _json.dumps(context_summary, ensure_ascii=False),
+                 elapsed_sec, error],
+            )
+            self._conn.commit()
+        except Exception:
+            logger.warning("save_diagnosis failed", exc_info=True)
+
+    def list_diagnosis_keys(self, limit: int = 200) -> list[dict]:
+        """Return cached diagnosis keys (channel, alert_type, alert_ts)."""
+        if not self.enabled or self._conn is None:
+            return []
+        try:
+            cur = self._conn.execute(
+                "SELECT channel, alert_type, alert_ts FROM diagnosis_records "
+                "ORDER BY created_at DESC LIMIT ?",
+                [limit],
+            )
+            return [
+                {"channel": r[0], "alert_type": r[1], "alert_ts": r[2]}
+                for r in cur.fetchall()
+            ]
+        except Exception:
+            logger.warning("list_diagnosis_keys failed", exc_info=True)
+            return []
 
     # ------------------------------------------------------------------
     # Mutation API (synchronous, for DELETE / PATCH endpoints)

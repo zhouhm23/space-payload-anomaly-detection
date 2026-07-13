@@ -42,11 +42,12 @@ class DirectionCalibrator:
     * :meth:`flip` (online, no labels) — apply the stored decision to a
       score array.
 
-    The input to :meth:`flip` **must already be MinMax-normalised to
-    ``[0,1]``**; flipping a raw-score array whose range is unknown produces
-    a meaningless result.  :class:`AnomalyDetector` applies MinMax before
-    returning, and :class:`CascadeDetector` applies the flip right after,
-    so this contract holds in the default pipeline.
+    The input to :meth:`flip` **must already be normalised to ``[0,1]``**
+    (TSPulse clip-normalises; the frequency score is mapped via its training-
+    segment z-score reference); flipping a raw-score array whose range is
+    unknown produces a meaningless result.  :class:`AnomalyDetector` clips
+    before returning, and :class:`CascadeDetector` applies the flip right
+    after, so this contract holds in the default pipeline.
     """
 
     # ------------------------------------------------------------------
@@ -55,7 +56,7 @@ class DirectionCalibrator:
 
     @staticmethod
     def flip(score: np.ndarray, do_flip: bool) -> np.ndarray:
-        """Apply a stored flip decision to a MinMax-normalised score array.
+        """Apply a stored flip decision to a normalised ``[0,1]`` score array.
 
         Args:
             score: 1-D float array in ``[0, 1]``.

@@ -43,3 +43,13 @@ L3_RATE_BOOST: float = 0.85         # boost score when rate-of-change exceeds li
 SQLITE_ENABLED: bool = True
 SQLITE_BATCH_SIZE: int = 200        # flush after this many queued items
 SQLITE_FLUSH_INTERVAL: float = 2.0  # or after this many seconds
+
+# ── LLM diagnosis (Slice 2) ─────────────────────────────────────────────────
+# OpenAI-compatible chat-completions endpoint.  Works with DeepSeek, Moonshot,
+# DashScope (qwen) in OpenAI-compat mode, Azure OpenAI, or self-hosted
+# vLLM/ollama with the OpenAI adapter.  Empty values ⇒ diagnosis disabled.
+import os as _os
+LLM_BASE_URL: str = _os.environ.get("OPENAI_BASE_URL", "")
+LLM_API_KEY: str = _os.environ.get("OPENAI_API_KEY", "")
+LLM_MODEL: str = _os.environ.get("LLM_MODEL", "deepseek-chat")
+LLM_TIMEOUT_SEC: float = 30.0

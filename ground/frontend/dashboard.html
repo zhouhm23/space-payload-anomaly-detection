@@ -283,6 +283,30 @@
       justify-content:center;
       padding:20px;
     }
+    .diag-btn {
+      background:transparent; border:1px solid var(--accent-blue, #4a9eff);
+      color:var(--accent-blue, #4a9eff); border-radius:3px;
+      padding:1px 6px; font-size:0.65rem; cursor:pointer; margin-left:auto;
+      transition:background 0.15s, color 0.15s;
+    }
+    .diag-btn:hover { background:var(--accent-blue, #4a9eff); color:#fff; }
+    .diag-btn:disabled { opacity:0.5; cursor:wait; }
+    .diag-btn.diag-done {
+      background:var(--accent-green, #19be6b); color:#fff;
+      border-color:var(--accent-green, #19be6b);
+    }
+    .diag-btn.diag-done:hover { opacity:0.85; }
+    .modal-body { user-select:text; }
+    .diag-modal-body { font-size:0.85rem; line-height:1.6; white-space:pre-wrap; user-select:text; }
+    .diag-modal-body h2 { font-size:1rem; margin:0.8em 0 0.3em; color:var(--accent-blue, #4a9eff); }
+    .diag-modal-body p { margin:0.3em 0; }
+    .diag-loading { display:flex; align-items:center; gap:8px; color:var(--text-secondary); padding:20px; }
+    .diag-loading .spinner {
+      width:16px; height:16px; border:2px solid var(--border-color);
+      border-top-color:var(--accent-blue, #4a9eff); border-radius:50%;
+      animation:spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform:rotate(360deg); } }
 
     /* 底部图表区 */
     #bottomPanel {
@@ -512,8 +536,6 @@
 
     <!-- 右栏 告警/预警 -->
     <div id="rightPanel">
-      <div class="right-card placeholder-card">🚧 健康评估 — 开发中</div>
-      <div class="right-card placeholder-card">🚧 故障诊断 — 开发中</div>
       <div class="right-card">
         <h3>⚠️ 预测预警</h3>
         <div id="warningsList"></div>
@@ -623,6 +645,16 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="diagnosisModalOverlay" onclick="if(event.target===this) closeDiagnosisModal()">
+    <div class="modal" style="width:560px;max-width:90vw;max-height:80vh;position:relative;display:flex;flex-direction:column;">
+      <button class="modal-close" onclick="closeDiagnosisModal()">✕</button>
+      <div class="modal-body" style="overflow-y:auto;flex:1;">
+        <h3 id="diagnosisTitle">🔍 LLM 异常诊断</h3>
+        <div id="diagnosisBody" class="diag-modal-body"></div>
+      </div>
+    </div>
+  </div>
+
   <script>
   // ====================== 颜色常量（Canvas 不支持 var()，必须用 hex） ======================
   // 与 :root 中的 CSS 变量保持同步
@@ -656,6 +688,7 @@
     hoveredPredIdx: -1,         // 图表悬停的 prediction 索引
     chartLayout: null,          // 缓存上次 drawChart 的坐标映射，供 tooltip 用
     modalOpen: false,           // 模态框打开时暂停 canvas 重绘（避免输入卡顿）
+    diagnosedKeys: new Set(),   // 已诊断告警的 key 集合 "channel|type|ts"
   };
 
   function formatTime(ts) {
@@ -841,6 +874,20 @@
     const data = await api.warnings();
     state.warnings = data.warnings || [];
     renderWarningsList();
+  }
+
+  async function fetchDiagnosedKeys() {
+    try {
+      const resp = await fetch('/api/diagnosis/done');
+      const data = await resp.json();
+      state.diagnosedKeys = new Set(
+        (data.done || []).map(d => `${d.channel}|${d.alert_type}|${d.alert_ts}`)
+      );
+    } catch(e) {}
+  }
+
+  function isDiagnosed(channel, alertType, ts) {
+    return ts != null && state.diagnosedKeys.has(`${channel}|${alertType}|${ts}`);
   }
 
   async function fetchDbStats() {
@@ -1042,23 +1089,31 @@
   function renderAlertsList() {
     const container = document.getElementById('alertsList');
     if(!state.alerts.length) { container.innerHTML = '<div class="empty-state">✅ 当前无告警</div>'; return; }
-    container.innerHTML = state.alerts.map(a => `
+    container.innerHTML = state.alerts.map(a => {
+      const done = isDiagnosed(a.channel, 'measured', a.time);
+      return `
       <div class="alert-item">
         <span>${a.channel} · ${fmt(a.score)}</span>
         <span class="badge">实报</span>
         <span style="font-size:0.7rem;">${formatTime(a.time)}</span>
-      </div>`).join('');
+        <button class="diag-btn ${done ? 'diag-done' : ''}" onclick="requestDiagnosis('${a.channel}','measured',${a.time},this)">${done ? '✓' : '诊断'}</button>
+      </div>`;
+    }).join('');
   }
 
   function renderWarningsList() {
     const container = document.getElementById('warningsList');
     if(!state.warnings.length) { container.innerHTML = '<div class="empty-state">暂无预测预警</div>'; return; }
-    container.innerHTML = state.warnings.map(w => `
+    container.innerHTML = state.warnings.map(w => {
+      const done = isDiagnosed(w.channel, 'predicted', w.created_at);
+      return `
       <div class="warning-item">
         <span>${w.channel} · ${fmt(w.max_predict_score)}</span>
         <span class="badge ${w.status}">${w.status}</span>
         <span style="font-size:0.7rem;">${formatTime(w.created_at)}</span>
-      </div>`).join('');
+        <button class="diag-btn ${done ? 'diag-done' : ''}" onclick="requestDiagnosis('${w.channel}','predicted',${w.created_at},this)">${done ? '✓' : '诊断'}</button>
+      </div>`;
+    }).join('');
   }
 
   function selectChannel(ch) {
@@ -2103,6 +2158,10 @@
       const t = e.target.type;
       if (tag === 'INPUT' && t !== 'range' && t !== 'checkbox') submitDeviceModal();
     }
+    if (e.key === 'Escape') {
+      const dg = document.getElementById('diagnosisModalOverlay');
+      if (dg.classList.contains('active')) closeDiagnosisModal();
+    }
   });
 
   function deleteNode(id) {
@@ -2404,6 +2463,7 @@
 
     pollManager.start('health', fetchHealth, 3000);
     pollManager.start('sensors', fetchSensors, 3000);
+    await fetchDiagnosedKeys();  // 页面加载即标记已诊断告警（持久化，刷新不丢）
     pollManager.start('alerts', fetchAlerts, 3000);
     pollManager.start('warnings', fetchWarnings, 3000);
 
@@ -2418,6 +2478,83 @@
     resizeCanvas();
     resizeDeviceDiagram();
     requestAnimationFrame(rafLoop);  // 启动持续重绘
+  }
+
+  // ====================== LLM 诊断（Slice 2） ======================
+  async function requestDiagnosis(channel, alertType, alertTs, btn) {
+    const overlay = document.getElementById('diagnosisModalOverlay');
+    const title = document.getElementById('diagnosisTitle');
+    const body = document.getElementById('diagnosisBody');
+    const origText = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '...'; }
+    title.textContent = `🔍 ${channel} — 异常诊断`;
+    body.innerHTML = '<div class="diag-loading"><div class="spinner"></div>正在分析检测数据，请稍候...</div>';
+    overlay.classList.add('active');
+    try {
+      const resp = await fetch('/api/diagnosis', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel, alert_type: alertType, alert_ts: alertTs }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        body.innerHTML = `<div style="color:var(--accent-red,#ed3f14);">⚠ ${data.error || '诊断失败'}<br><span style="font-size:0.75rem;color:var(--text-secondary);">${data.detail || data.error || ''}</span></div>`;
+      } else if (data.error) {
+        body.innerHTML = `<div style="color:var(--accent-red,#ed3f14);">⚠ ${data.error}</div>`;
+      } else {
+        const s = data.context_summary || {};
+        const meta = [
+          `**通道**：${channel}${s.display_name ? '（' + s.display_name + '）' : ''}`,
+          s.device_path ? `**设备位置**：${s.device_path}` : null,
+          `**告警类型**：${alertType === 'measured' ? '实测告警' : '预测预警'}`,
+          data.cached ? `📁 缓存命中` : `**耗时**：${data.elapsed_sec}s`,
+        ].filter(Boolean).join('  ·  ');
+        body.innerHTML = `<div style="font-size:0.7rem;color:var(--text-secondary);margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border-color);">${meta}</div>` + renderMarkdown(data.diagnosis || '(空)');
+        // Mark this alert as diagnosed — green ✓ on the button (persistent).
+        if (alertTs != null && data.diagnosis) {
+          state.diagnosedKeys.add(`${channel}|${alertType}|${alertTs}`);
+          if (btn) { btn.classList.add('diag-done'); btn.textContent = '✓'; }
+        }
+      }
+    } catch (e) {
+      body.innerHTML = `<div style="color:var(--accent-red,#ed3f14);">⚠ 请求失败：${e.message}</div>`;
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = btn.classList.contains('diag-done') ? '✓' : origText; }
+    }
+  }
+
+  function closeDiagnosisModal() {
+    document.getElementById('diagnosisModalOverlay').classList.remove('active');
+  }
+
+  // 极简 Markdown 渲染（h2/h3、段落、列表、行内加粗/代码）
+  function renderMarkdown(md) {
+    const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    // 行内格式：**bold** → <strong>，`code` → <code>（转义后处理）
+    const inline = s => esc(s)
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/`(.+?)`/g, '<code style="background:var(--bg-card,#1a1f2f);padding:1px 4px;border-radius:3px;font-size:0.85em;">$1</code>');
+    const lines = md.split('\n');
+    let html = '', inList = false;
+    for (let line of lines) {
+      if (line.startsWith('### ')) {
+        if (inList) { html += '</ul>'; inList = false; }
+        html += `<h3 style="font-size:0.9rem;margin:0.6em 0 0.2em;color:var(--text-primary,#e0e6f0);">${inline(line.slice(4))}</h3>`;
+      } else if (line.startsWith('## ')) {
+        if (inList) { html += '</ul>'; inList = false; }
+        html += `<h2>${inline(line.slice(3))}</h2>`;
+      } else if (/^\s*[-*]\s/.test(line)) {
+        if (!inList) { html += '<ul>'; inList = true; }
+        html += `<li>${inline(line.replace(/^\s*[-*]\s/, ''))}</li>`;
+      } else if (line.trim() === '') {
+        if (inList) { html += '</ul>'; inList = false; }
+      } else {
+        if (inList) { html += '</ul>'; inList = false; }
+        html += `<p>${inline(line)}</p>`;
+      }
+    }
+    if (inList) html += '</ul>';
+    return html;
   }
 
   init();

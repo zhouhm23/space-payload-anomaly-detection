@@ -17,12 +17,14 @@ from ..config import (
     SQLITE_ENABLED, SQLITE_BATCH_SIZE, SQLITE_FLUSH_INTERVAL,
     L1_CONSTANT_STD, L1_SIGMA_K, L1_IQR_FACTOR,
     L3_CONSTANT_STD, L3_RANGE_BOOST, L3_RATE_BOOST,
+    LLM_BASE_URL, LLM_API_KEY, LLM_MODEL,
 )
 from ..database import RingBuffer, SQLiteStore
 from ..database.alert_store import AlertStore
 from ..database.warning_store import WarningStore
 from ..services.alert_service import AlertService
 from ..services.config_service import ConfigService
+from ..services.diagnosis_service import DiagnosisService
 from ..services.forecast_service import ForecastService
 from ..services.health_service import HealthService
 from ..services.telemetry_service import TelemetryService
@@ -43,6 +45,7 @@ class Container:
     alert_service: AlertService
     warning_service: WarningService
     config: ConfigService
+    diagnosis: DiagnosisService
 
 
 _container: Container | None = None
@@ -84,6 +87,21 @@ def init(
     health = HealthService(ring, config)
     alert_service = AlertService(alerts, sqlite)
     warning_service = WarningService(ring, warnings, forecast, sqlite)
+    diagnosis = DiagnosisService(
+        base_url=LLM_BASE_URL,
+        api_key=LLM_API_KEY,
+        model=LLM_MODEL,
+        warning_service=warning_service,
+        sqlite_store=sqlite,
+        config_service=config,
+    )
+    if diagnosis.enabled:
+        logger.info(
+            "LLM diagnosis enabled (model=%s, base=%s)",
+            LLM_MODEL, LLM_BASE_URL,
+        )
+    else:
+        logger.info("LLM diagnosis disabled — set OPENAI_API_KEY/OPENAI_BASE_URL/LLM_MODEL to enable")
 
     _container = Container(
         ring=ring,
@@ -96,6 +114,7 @@ def init(
         alert_service=alert_service,
         warning_service=warning_service,
         config=config,
+        diagnosis=diagnosis,
     )
     return _container
 

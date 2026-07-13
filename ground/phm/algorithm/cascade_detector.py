@@ -224,6 +224,8 @@ class CascadeDetector(BaseDetector):
                             fe = FreqFeatureExtractor(
                                 band_mean=cal.freq_band_mean,
                                 band_std=cal.freq_band_std,
+                                z_min=cal.freq_z_min,
+                                z_max=cal.freq_z_max,
                             )
                             freq_score = fe.transform(v)
                             # Align length defensively

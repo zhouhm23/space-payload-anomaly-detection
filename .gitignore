@@ -1,6 +1,7 @@
 .conda-env
 .pytest_cache
 .hf_cache
+.env
 __pycache__
 ground/device_config.json
 ground/data

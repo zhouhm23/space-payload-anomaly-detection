@@ -73,10 +73,11 @@ class AnomalyDetector(BaseDetector):
                 slowly-varying channels.
 
         Returns:
-            scores: np.ndarray [T] float32 — anomaly scores **MinMax-normalised
-            to [0, 1]** (higher = more anomalous).  The normalisation aligns
-            the score with the global ``ANOMALY_THRESHOLD = 0.7`` and makes
-            the downstream direction-flip (``1 - score``) well-defined.  On
+            scores: np.ndarray [T] float32 — anomaly scores **clipped to
+            ``[0, 1]``** (higher = more anomalous).  The clip preserves the
+            absolute reconstruction-error magnitude and aligns the score with
+            the global ``ANOMALY_THRESHOLD = 0.5``; it also keeps the
+            downstream direction-flip (``1 - score``) well-defined.  On
             constant-score inputs (e.g. all-zero) the raw values are returned
             unchanged.
         """

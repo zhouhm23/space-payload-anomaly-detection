@@ -26,6 +26,32 @@ logger = logging.getLogger(__name__)
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
+
+def _load_dotenv() -> None:
+    """Load ``src/.env`` into ``os.environ`` (does not override existing vars).
+
+    Minimal KEY=VALUE parser — no external dependency.  Skips blank lines and
+    ``#`` comments.  ``src/.env`` is gitignored so secrets stay local.
+    """
+    env_path = _HERE.parent / ".env"
+    if not env_path.exists():
+        return
+    try:
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                os.environ.setdefault(key, value)
+    except Exception:
+        logger.warning("failed to load %s", env_path, exc_info=True)
+
+
+_load_dotenv()
+
 # HuggingFace mirror cache (preserved from legacy server.py)
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HOME", str(_HERE.parent / ".hf_cache"))
@@ -61,6 +87,7 @@ async def _startup() -> None:
         history_router,
         window_router,
         export_router,
+        diagnosis_router,
     )
     for r in (
         poll_router,
@@ -74,6 +101,7 @@ async def _startup() -> None:
         history_router,
         window_router,
         export_router,
+        diagnosis_router,
     ):
         app.include_router(r)
 
