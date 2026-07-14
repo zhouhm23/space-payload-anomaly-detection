@@ -59,3 +59,31 @@ async def api_diagnosis_done(limit: int = Query(200, ge=1, le=1000)):
         return JSONResponse(content={"done": []})
     items = c.sqlite.list_diagnosis_keys(limit=limit)
     return JSONResponse(content={"done": items})
+
+
+@router.post("/api/diagnosis/auto")
+async def api_diagnosis_auto():
+    """Trigger batch auto-diagnosis for all warnings + alerts without llm_verdict.
+
+    Runs in a background daemon thread.  Poll ``GET /api/diagnosis/auto/status``
+    for progress.
+    """
+    c = deps.get()
+    if not c.diagnosis:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "diagnosis service not available"},
+        )
+    result = c.diagnosis.auto_diagnose_all()
+    if result.get("error"):
+        return JSONResponse(status_code=409, content=result)
+    return JSONResponse(content=result)
+
+
+@router.get("/api/diagnosis/auto/status")
+async def api_diagnosis_auto_status():
+    """Return current auto-diagnosis progress: {running, done, total, errors}."""
+    c = deps.get()
+    if not c.diagnosis:
+        return JSONResponse(content={"running": False, "done": 0, "total": 0, "errors": 0})
+    return JSONResponse(content=c.diagnosis.auto_status)

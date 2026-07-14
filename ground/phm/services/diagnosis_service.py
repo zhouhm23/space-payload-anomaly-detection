@@ -7,8 +7,12 @@ chat-completions API, and returns a Markdown diagnosis report covering
 root-cause analysis and trend assessment.
 
 The service is **on-demand** — it only runs when a user requests a
-diagnosis for a specific alert/warning, never automatically.  Diagnosis
-results are not persisted (each call is fresh).
+diagnosis for a specific alert/warning.  Diagnosis results are cached
+in SQLite (``diagnosis_records`` table) keyed by ``(channel, alert_type,
+alert_ts)`` so repeated clicks return the stored report without
+re-calling the LLM.  A structured ``llm_verdict`` (real / false_alarm /
+uncertain) is parsed from the report and written back to the
+WarningEntry (predicted) or alert_records row (measured).
 
 Configuration is via standard environment variables so any
 OpenAI-compatible provider works::
@@ -22,6 +26,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import threading
 import time
 from typing import Any
 
@@ -51,6 +57,11 @@ _SYSTEM_PROMPT = """你是航天器有效载荷健康管理（PHM）专家。根
 
 ## 置信度
 高/中/低 + 一句话理由。
+
+最后另起一行输出结构化判断，三选一：
+VERDICT: real          （确认是真实异常）
+VERDICT: false_alarm   （判断为误报）
+VERDICT: uncertain     （无法确定）
 
 用中文，简洁，只基于数据，不编造。总长不超过 300 字。"""
 
@@ -85,11 +96,36 @@ class DiagnosisService:
         self.warning_service = warning_service
         self.sqlite = sqlite_store
         self.config_service = config_service
+        self._auto_lock = threading.Lock()
+        self._auto_status: dict = {"running": False, "done": 0, "total": 0, "errors": 0}
 
     @property
     def enabled(self) -> bool:
         """Whether the service has the credentials to call the LLM API."""
         return bool(self.base_url and self.api_key and self.model)
+
+    @property
+    def auto_status(self) -> dict:
+        """Current auto-diagnosis progress (thread-safe copy)."""
+        with self._auto_lock:
+            return dict(self._auto_status)
+
+    _VERDICT_RE = re.compile(r"VERDICT:\s*(real|false_alarm|uncertain)", re.IGNORECASE)
+
+    @staticmethod
+    def _parse_verdict(text: str) -> str | None:
+        """Extract the structured verdict from an LLM diagnosis report.
+
+        Looks for a line matching ``VERDICT: real|false_alarm|uncertain``
+        (case-insensitive).  Returns the lowercase verdict or None if not
+        found / invalid.
+        """
+        if not text:
+            return None
+        m = DiagnosisService._VERDICT_RE.search(text)
+        if m is None:
+            return None
+        return m.group(1).lower()
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -123,6 +159,7 @@ class DiagnosisService:
                     "context_summary": cached.get("context_summary", {}),
                     "elapsed_sec": cached.get("elapsed_sec", 0.0),
                     "error": cached.get("error"),
+                    "llm_verdict": cached.get("llm_verdict"),
                     "cached": True,
                 }
 
@@ -135,6 +172,7 @@ class DiagnosisService:
                 "context_summary": {},
                 "elapsed_sec": 0.0,
                 "error": "LLM diagnosis not configured — set OPENAI_API_KEY / OPENAI_BASE_URL / LLM_MODEL",
+                "llm_verdict": None,
                 "cached": False,
             }
 
@@ -147,12 +185,14 @@ class DiagnosisService:
                 "context_summary": {},
                 "elapsed_sec": time.time() - t0,
                 "error": f"no detection data available for channel {channel}",
+                "llm_verdict": None,
                 "cached": False,
             }
 
         user_prompt = self._build_prompt(channel, context)
         text, err = self._call_llm(user_prompt)
         elapsed = round(time.time() - t0, 2)
+        verdict = self._parse_verdict(text) if text else None
         result = {
             "channel": channel,
             "alert_type": alert_type,
@@ -160,6 +200,7 @@ class DiagnosisService:
             "context_summary": context["summary"],
             "elapsed_sec": elapsed,
             "error": err,
+            "llm_verdict": verdict,
             "cached": False,
         }
         # Persist to DB for cache reuse (even on partial failure — the error
@@ -171,8 +212,92 @@ class DiagnosisService:
                 context_summary=context["summary"],
                 elapsed_sec=elapsed,
                 error=err,
+                verdict=verdict,
             )
+        # Write verdict back to the alert/warning entry.
+        if verdict is not None and alert_ts is not None:
+            self._write_verdict_back(channel, alert_type, alert_ts, verdict)
         return result
+
+    def _write_verdict_back(self, channel: str, alert_type: str,
+                            alert_ts: float, verdict: str) -> None:
+        """Write the LLM verdict back to the WarningEntry (predicted) or
+        alert_records row (measured) so it appears in list endpoints."""
+        try:
+            if alert_type == "predicted":
+                # Find the in-memory WarningEntry by (channel, created_at).
+                ws = self.warning_service
+                if ws and hasattr(ws, "warnings"):
+                    store = ws.warnings
+                    if hasattr(store, "all"):
+                        for w in store.all():
+                            if w.get("channel") == channel and w.get("created_at") == alert_ts:
+                                wid = w.get("id", 0)
+                                if wid and hasattr(store, "set_verdict"):
+                                    store.set_verdict(wid, "llm", verdict)
+                                break
+            elif alert_type == "measured" and self.sqlite is not None:
+                self.sqlite.update_alert_verdict(channel, alert_ts, verdict, is_llm=True)
+        except Exception:
+            logger.debug("write_verdict_back failed for %s/%s", channel, alert_type, exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Auto-diagnosis mode (batch)
+    # ------------------------------------------------------------------
+
+    def auto_diagnose_all(self) -> dict:
+        """Trigger batch diagnosis for all warnings + alerts without llm_verdict.
+
+        Runs in a background daemon thread.  Progress is tracked in
+        ``self._auto_status`` (exposed via the ``auto_status`` property).
+
+        Returns ``{"started": True, "total": N}`` on success, or
+        ``{"started": False, "error": "..."}`` if disabled or already running.
+        """
+        if not self.enabled:
+            return {"started": False, "error": "LLM diagnosis not configured"}
+        with self._auto_lock:
+            if self._auto_status["running"]:
+                return {"started": False, "error": "already running"}
+            # Collect all targets that don't yet have an llm_verdict.
+            targets: list[tuple[str, str, float]] = []
+            # Predicted warnings (in-memory WarningStore).
+            ws = self.warning_service
+            if ws and hasattr(ws, "warnings"):
+                store = ws.warnings
+                if hasattr(store, "all"):
+                    for w in store.all():
+                        if w.get("llm_verdict") is None:
+                            targets.append((w["channel"], "predicted", w["created_at"]))
+            # Measured alerts (SQLite).
+            if self.sqlite is not None:
+                for a in self.sqlite.query_alerts(limit=500):
+                    if a.get("llm_verdict") is None:
+                        targets.append((a["channel"], "measured", a["created_at"]))
+            self._auto_status = {
+                "running": True, "done": 0,
+                "total": len(targets), "errors": 0,
+            }
+        if not targets:
+            with self._auto_lock:
+                self._auto_status["running"] = False
+            return {"started": True, "total": 0}
+        threading.Thread(target=self._auto_run, args=(targets,), daemon=True).start()
+        return {"started": True, "total": len(targets)}
+
+    def _auto_run(self, targets: list[tuple[str, str, float]]) -> None:
+        """Background worker: diagnose each target sequentially."""
+        for channel, alert_type, alert_ts in targets:
+            try:
+                self.diagnose(channel, alert_type, alert_ts)
+            except Exception:
+                logger.debug("auto-diagnose failed for %s/%s", channel, alert_type, exc_info=True)
+                with self._auto_lock:
+                    self._auto_status["errors"] += 1
+            with self._auto_lock:
+                self._auto_status["done"] += 1
+        with self._auto_lock:
+            self._auto_status["running"] = False
 
     # ------------------------------------------------------------------
     # Context aggregation

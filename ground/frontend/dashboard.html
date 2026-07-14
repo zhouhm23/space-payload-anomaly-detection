@@ -275,6 +275,20 @@
     .badge.pending { background:var(--accent-yellow); }
     .badge.confirmed { background:var(--accent-red); }
     .badge.false { background:var(--border-color); color:var(--text-secondary); }
+    .badge.real, .badge.active { background:var(--accent-red); color:#fff; }
+    .badge.false_alarm, .badge.unverifiable { background:var(--border-color); color:var(--text-secondary); }
+    .badge.uncertain { background:var(--accent-yellow); color:#fff; }
+    .verdict-btns { display:flex; gap:2px; }
+    .vbtn {
+      background:transparent; border:1px solid var(--border-color);
+      color:var(--text-secondary); border-radius:3px;
+      padding:0 4px; font-size:0.6rem; cursor:pointer; line-height:1.4;
+      transition:background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .vbtn:hover { background:var(--accent-blue, #4a9eff); color:#fff; border-color:var(--accent-blue, #4a9eff); }
+    .vbtn.active-real { background:var(--accent-red); color:#fff; border-color:var(--accent-red); }
+    .vbtn.active-false_alarm { background:var(--border-color); color:var(--text-secondary); border-color:var(--text-secondary); }
+    .vbtn.active-uncertain { background:var(--accent-yellow); color:#fff; border-color:var(--accent-yellow); }
     .placeholder-card {
       border:1px dashed var(--border-color);
       color:var(--text-secondary);
@@ -544,6 +558,10 @@
         <h3>🚨 实测告警</h3>
         <div id="alertsList"></div>
       </div>
+      <div class="right-card" style="display:flex;align-items:center;gap:8px;padding:8px 12px;">
+        <button id="autoDiagBtn" class="diag-btn" data-running="false" onclick="toggleAutoDiag()">🤖 全自动诊断</button>
+        <span id="autoDiagStatus" style="font-size:0.7rem;color:var(--text-secondary);"></span>
+      </div>
       <div class="right-card placeholder-card">🚧 RUL 剩余寿命 — 开发中</div>
     </div>
   </div>
@@ -746,6 +764,10 @@
     window(params) { return this.request('GET','/api/window?'+new URLSearchParams(params)); },
     alertsHistory(limit) { return this.request('GET',`/api/alerts/history?limit=${limit||50}`); },
     patchAlert(id, status) { return this.request('PATCH',`/api/alerts/${id}`,{status}); },
+    warningVerdict(id, verdict) { return this.request('POST',`/api/warnings/${id}/verdict`,{human_verdict:verdict}); },
+    alertVerdict(channel, ts, verdict) { return this.request('POST','/api/alerts/verdict',{channel,alert_ts:ts,human_verdict:verdict}); },
+    diagnosisAuto() { return this.request('POST','/api/diagnosis/auto',{}); },
+    diagnosisAutoStatus() { return this.request('GET','/api/diagnosis/auto/status'); },
     async exportData(params) {
       const blob = await this.request('GET','/api/export?'+new URLSearchParams(params));
       const url = URL.createObjectURL(blob);
@@ -1086,16 +1108,33 @@
     }).join('');
   }
 
+  function statusLabel(s) {
+    const m = {real:'实警', false_alarm:'虚警', uncertain:'待定', pending:'待核验',
+               confirmed:'已证实', false:'已证伪', unverifiable:'无法核验', active:'实报'};
+    return m[s] || s;
+  }
+  function verdictButtons(type, id, humanVerdict) {
+    // type='measured' → id={channel,ts}; type='predicted' → id=number
+    const fn = type==='measured'
+      ? (v)=>`submitAlertVerdict('${id.channel}',${id.ts},'${v}')`
+      : (v)=>`submitWarningVerdict(${id},'${v}')`;
+    const hv = humanVerdict || null;
+    const make = (v,label) => `<button class="vbtn ${hv===v?'active-'+v:''}" onclick="${fn(v)}">${label}</button>`;
+    return `<span class="verdict-btns">${make('real','实警')}${make('false_alarm','虚警')}${make('uncertain','待定')}</span>`;
+  }
+
   function renderAlertsList() {
     const container = document.getElementById('alertsList');
     if(!state.alerts.length) { container.innerHTML = '<div class="empty-state">✅ 当前无告警</div>'; return; }
     container.innerHTML = state.alerts.map(a => {
       const done = isDiagnosed(a.channel, 'measured', a.time);
+      const fs = a.final_status || 'active';
       return `
       <div class="alert-item">
         <span>${a.channel} · ${fmt(a.score)}</span>
-        <span class="badge">实报</span>
+        <span class="badge ${fs}">${statusLabel(fs)}</span>
         <span style="font-size:0.7rem;">${formatTime(a.time)}</span>
+        ${verdictButtons('measured', {channel:a.channel, ts:a.time}, a.human_verdict)}
         <button class="diag-btn ${done ? 'diag-done' : ''}" onclick="requestDiagnosis('${a.channel}','measured',${a.time},this)">${done ? '✓' : '诊断'}</button>
       </div>`;
     }).join('');
@@ -1106,11 +1145,13 @@
     if(!state.warnings.length) { container.innerHTML = '<div class="empty-state">暂无预测预警</div>'; return; }
     container.innerHTML = state.warnings.map(w => {
       const done = isDiagnosed(w.channel, 'predicted', w.created_at);
+      const fs = w.final_status || w.verify_status || w.status || 'pending';
       return `
       <div class="warning-item">
         <span>${w.channel} · ${fmt(w.max_predict_score)}</span>
-        <span class="badge ${w.status}">${w.status}</span>
+        <span class="badge ${fs}">${statusLabel(fs)}</span>
         <span style="font-size:0.7rem;">${formatTime(w.created_at)}</span>
+        ${verdictButtons('predicted', w.id, w.human_verdict)}
         <button class="diag-btn ${done ? 'diag-done' : ''}" onclick="requestDiagnosis('${w.channel}','predicted',${w.created_at},this)">${done ? '✓' : '诊断'}</button>
       </div>`;
     }).join('');
@@ -1850,13 +1891,14 @@
       const data = await api.alertsHistory(100);
       const alerts = data.alerts || [];
       document.getElementById('dbModalBody').innerHTML = alerts.length ? `
-        <table><tr><th>ID</th><th>通道</th><th>类型</th><th>分数</th><th>消息</th><th>时间</th><th>状态</th><th>操作</th></tr>
+        <table><tr><th>ID</th><th>通道</th><th>类型</th><th>分数</th><th>消息</th><th>时间</th><th>综合状态</th><th>核验</th><th>LLM</th><th>人工标注</th></tr>
         ${alerts.map(a => `<tr>
           <td>${a.id}</td><td>${a.channel}</td><td>${a.alert_type}</td><td>${fmt(a.score)}</td>
           <td>${a.message||'—'}</td><td>${formatTime(a.created_at)}</td>
-          <td><span class="badge ${a.status}">${a.status}</span></td>
-          <td>${a.status==='pending' ? `<button class="btn-sm" onclick="patchAlert(${a.id},'confirmed')">✓确认</button>
-            <button class="btn-sm" onclick="patchAlert(${a.id},'false')">✕虚报</button>` : ''}</td>
+          <td><span class="badge ${a.final_status||a.status}">${statusLabel(a.final_status||a.status)}</span></td>
+          <td><span class="badge ${a.status}" style="font-size:0.6rem;">${statusLabel(a.status)}</span></td>
+          <td>${a.llm_verdict ? `<span class="badge ${a.llm_verdict}" style="font-size:0.6rem;">${statusLabel(a.llm_verdict)}</span>` : '—'}</td>
+          <td>${verdictButtons('measured', {channel:a.channel, ts:a.created_at}, a.human_verdict)}</td>
         </tr>`).join('')}</table>` : '<div class="empty-state">无告警历史</div>';
     } catch(e) { document.getElementById('dbModalBody').innerHTML = `<div class="empty-state">查询失败: ${e.message}</div>`; }
   }
@@ -2525,6 +2567,55 @@
 
   function closeDiagnosisModal() {
     document.getElementById('diagnosisModalOverlay').classList.remove('active');
+  }
+
+  // ====================== 人工标注（verdict） ======================
+  async function submitWarningVerdict(id, verdict) {
+    try {
+      await api.warningVerdict(id, verdict);
+      await fetchWarnings();
+    } catch(e) { alert('标注失败: ' + e.message); }
+  }
+  async function submitAlertVerdict(channel, ts, verdict) {
+    try {
+      await api.alertVerdict(channel, ts, verdict);
+      await fetchAlerts();
+    } catch(e) { alert('标注失败: ' + e.message); }
+  }
+
+  // ====================== 全自动诊断模式 ======================
+  async function toggleAutoDiag() {
+    const btn = document.getElementById('autoDiagBtn');
+    const statusEl = document.getElementById('autoDiagStatus');
+    if (btn.dataset.running === 'true') return;
+    btn.disabled = true;
+    try {
+      const r = await api.diagnosisAuto();
+      if (r.error) { alert(r.error); btn.disabled = false; return; }
+      btn.dataset.running = 'true';
+      btn.textContent = '⏳ 诊断中...';
+      if (r.total === 0) {
+        statusEl.textContent = '无待诊断项';
+        btn.disabled = false; btn.textContent = '🤖 全自动诊断'; btn.dataset.running = 'false';
+        return;
+      }
+      pollAutoDiagStatus();
+    } catch(e) { alert('启动失败: ' + e.message); btn.disabled = false; }
+  }
+  function pollAutoDiagStatus() {
+    const btn = document.getElementById('autoDiagBtn');
+    const statusEl = document.getElementById('autoDiagStatus');
+    const interval = setInterval(async () => {
+      try {
+        const s = await api.diagnosisAutoStatus();
+        statusEl.textContent = `${s.done}/${s.total}` + (s.errors ? ` (${s.errors}错误)` : '');
+        if (!s.running) {
+          clearInterval(interval);
+          btn.disabled = false; btn.textContent = '🤖 全自动诊断'; btn.dataset.running = 'false';
+          fetchAlerts(); fetchWarnings();  // 刷新 verdict 显示
+        }
+      } catch(e) { /* keep polling */ }
+    }, 2000);
   }
 
   // 极简 Markdown 渲染（h2/h3、段落、列表、行内加粗/代码）

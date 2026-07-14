@@ -1,15 +1,17 @@
 """GET /api/alerts — confirmed measured anomaly alerts (in-memory, real-time).
 GET /api/alerts/history — persisted alert records from SQLite (with id/status).
 PATCH /api/alerts/{alert_id} — update an alert's lifecycle status.
+POST /api/alerts/verdict — human verdict annotation (by channel + timestamp).
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import deps
+from ..database.warning_store import _VALID_VERDICTS
 
 router = APIRouter()
 
@@ -57,3 +59,27 @@ async def api_patch_alert(alert_id: int, body: AlertStatusPatch):
             status_code=404,
         )
     return JSONResponse({"ok": True, "id": alert_id, "status": body.status})
+
+
+class AlertVerdictRequest(BaseModel):
+    """Body for ``POST /api/alerts/verdict``."""
+    channel: str = Field(..., description="Telemetry channel name")
+    alert_ts: float = Field(..., description="Alert created_at timestamp (cache key)")
+    human_verdict: str = Field(..., description="real | false_alarm | uncertain")
+
+    @field_validator("human_verdict")
+    @classmethod
+    def _validate_verdict(cls, v: str) -> str:
+        if v not in _VALID_VERDICTS:
+            raise ValueError(f"human_verdict must be one of {sorted(_VALID_VERDICTS)}")
+        return v
+
+
+@router.post("/api/alerts/verdict")
+async def api_alert_verdict(body: AlertVerdictRequest):
+    """Set a human verdict on a measured alert (located by channel + timestamp)."""
+    c = deps.get()
+    ok = c.sqlite.update_alert_verdict(body.channel, body.alert_ts, body.human_verdict)
+    if not ok:
+        return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+    return JSONResponse({"ok": True, "human_verdict": body.human_verdict})

@@ -39,6 +39,8 @@ from typing import Any, Iterable
 
 import numpy as np
 
+from .warning_store import compute_final_status
+
 logger = logging.getLogger(__name__)
 
 __all__ = ["SQLiteStore"]
@@ -72,6 +74,8 @@ CREATE TABLE IF NOT EXISTS alert_records (
     created_at  REAL    NOT NULL,
     status      TEXT    DEFAULT 'active',   -- active / pending / confirmed / false
     verified_at REAL,
+    llm_verdict  TEXT,               -- real / false_alarm / uncertain (NULL = not diagnosed)
+    human_verdict TEXT,              -- real / false_alarm / uncertain (NULL = not annotated)
     ingested_at REAL    NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_alert_channel_time ON alert_records(channel, created_at);
@@ -86,6 +90,7 @@ CREATE TABLE IF NOT EXISTS diagnosis_records (
     context_summary TEXT,               -- JSON
     elapsed_sec     REAL,
     error           TEXT,
+    llm_verdict     TEXT,               -- real / false_alarm / uncertain (parsed from report)
     created_at      REAL    NOT NULL DEFAULT (unixepoch())
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_diag_key ON diagnosis_records(channel, alert_type, alert_ts);
@@ -172,7 +177,27 @@ class SQLiteStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(_SCHEMA)
+        self._migrate_verdict_columns()
         logger.info("SQLiteStore initialised: %s", self.db_path)
+
+    def _migrate_verdict_columns(self) -> None:
+        """Add llm_verdict/human_verdict to alert_records and llm_verdict
+        to diagnosis_records if they don't exist (backward compat with
+        pre-existing DBs created before the verdict feature)."""
+        if self._conn is None:
+            return
+        for table, col in [
+            ("alert_records", "llm_verdict"),
+            ("alert_records", "human_verdict"),
+            ("diagnosis_records", "llm_verdict"),
+        ]:
+            cols = [r[1] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            if col not in cols:
+                try:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+                    logger.info("Migrated %s: added column %s", table, col)
+                except Exception:
+                    logger.warning("Failed to add column %s to %s", col, table, exc_info=True)
 
     # Per-channel telemetry tables: each channel gets its own table
     # (e.g. ``telemetry_C_1``, ``telemetry_VS_multi_sine``) so channels
@@ -761,7 +786,8 @@ class SQLiteStore:
         if not self.enabled or self._conn is None:
             return []
         sql = (
-            "SELECT id, channel, alert_type, score, message, created_at, status, verified_at "
+            "SELECT id, channel, alert_type, score, message, created_at, status, verified_at, "
+            "llm_verdict, human_verdict "
             "FROM alert_records ORDER BY created_at DESC LIMIT ?"
         )
         try:
@@ -770,8 +796,11 @@ class SQLiteStore:
         except Exception:
             logger.warning("query_alerts failed", exc_info=True)
             return []
-        return [
-            {
+        results = []
+        for r in reversed(rows):
+            llm_v = r[8]
+            human_v = r[9]
+            results.append({
                 "id": r[0],
                 "channel": r[1],
                 "alert_type": r[2],
@@ -780,9 +809,11 @@ class SQLiteStore:
                 "created_at": r[5],
                 "status": r[6],
                 "verified_at": r[7],
-            }
-            for r in reversed(rows)
-        ]
+                "llm_verdict": llm_v,
+                "human_verdict": human_v,
+                "final_status": compute_final_status(r[6], llm_v, human_v),
+            })
+        return results
 
     # ------------------------------------------------------------------
     # Diagnosis cache (synchronous, for POST /api/diagnosis)
@@ -794,7 +825,7 @@ class SQLiteStore:
             return None
         try:
             row = self._conn.execute(
-                "SELECT diagnosis, context_summary, elapsed_sec, error, created_at "
+                "SELECT diagnosis, context_summary, elapsed_sec, error, created_at, llm_verdict "
                 "FROM diagnosis_records WHERE channel=? AND alert_type=? AND alert_ts=?",
                 [channel, alert_type, alert_ts],
             ).fetchone()
@@ -807,6 +838,7 @@ class SQLiteStore:
                 "elapsed_sec": row[2],
                 "error": row[3],
                 "created_at": row[4],
+                "llm_verdict": row[5],
             }
         except Exception:
             logger.warning("get_diagnosis failed", exc_info=True)
@@ -814,7 +846,8 @@ class SQLiteStore:
 
     def save_diagnosis(self, channel: str, alert_type: str, alert_ts: float,
                        diagnosis: str, context_summary: dict,
-                       elapsed_sec: float, error: str | None) -> None:
+                       elapsed_sec: float, error: str | None,
+                       verdict: str | None = None) -> None:
         """Insert or replace a diagnosis record (keyed by channel+type+alert_ts)."""
         if not self.enabled or self._conn is None:
             return
@@ -823,28 +856,28 @@ class SQLiteStore:
             self._conn.execute(
                 "INSERT OR REPLACE INTO diagnosis_records "
                 "(channel, alert_type, alert_ts, diagnosis, context_summary, "
-                " elapsed_sec, error, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, unixepoch())",
+                " elapsed_sec, error, llm_verdict, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, unixepoch())",
                 [channel, alert_type, alert_ts, diagnosis,
                  _json.dumps(context_summary, ensure_ascii=False),
-                 elapsed_sec, error],
+                 elapsed_sec, error, verdict],
             )
             self._conn.commit()
         except Exception:
             logger.warning("save_diagnosis failed", exc_info=True)
 
     def list_diagnosis_keys(self, limit: int = 200) -> list[dict]:
-        """Return cached diagnosis keys (channel, alert_type, alert_ts)."""
+        """Return cached diagnosis keys (channel, alert_type, alert_ts, llm_verdict)."""
         if not self.enabled or self._conn is None:
             return []
         try:
             cur = self._conn.execute(
-                "SELECT channel, alert_type, alert_ts FROM diagnosis_records "
+                "SELECT channel, alert_type, alert_ts, llm_verdict FROM diagnosis_records "
                 "ORDER BY created_at DESC LIMIT ?",
                 [limit],
             )
             return [
-                {"channel": r[0], "alert_type": r[1], "alert_ts": r[2]}
+                {"channel": r[0], "alert_type": r[1], "alert_ts": r[2], "llm_verdict": r[3]}
                 for r in cur.fetchall()
             ]
         except Exception:
@@ -975,6 +1008,36 @@ class SQLiteStore:
                 return cur.rowcount > 0
         except Exception:
             logger.warning("update_alert_status failed", exc_info=True)
+            return False
+
+    # Valid verdict values for llm_verdict / human_verdict columns.
+    _VALID_VERDICTS = frozenset({"real", "false_alarm", "uncertain"})
+
+    def update_alert_verdict(self, channel: str, alert_ts: float,
+                             verdict: str, *, is_llm: bool = False) -> bool:
+        """Set a verdict (llm or human) on an alert record.
+
+        Locates the row by (channel, created_at).  ``is_llm=False`` writes
+        ``human_verdict``, ``is_llm=True`` writes ``llm_verdict``.
+
+        Returns True if a row was updated, False if not found or verdict
+        is invalid.
+        """
+        if not self.enabled or self._conn is None:
+            return False
+        if verdict not in self._VALID_VERDICTS:
+            return False
+        col = "llm_verdict" if is_llm else "human_verdict"
+        try:
+            with self._write_lock:
+                cur = self._conn.execute(
+                    f"UPDATE alert_records SET {col} = ? "
+                    f"WHERE channel = ? AND created_at = ?",
+                    [verdict, channel, alert_ts],
+                )
+                return cur.rowcount > 0
+        except Exception:
+            logger.warning("update_alert_verdict failed", exc_info=True)
             return False
 
     def stats(self) -> dict:

@@ -125,3 +125,39 @@ class TestPatchAlert:
         resp = client.patch(f"/api/alerts/{aid}", json={"status": "bogus"})
         assert resp.status_code == 404
         assert store.query_alerts()[0]["status"] == "pending"
+
+
+class TestAlertVerdict:
+    """Tests for POST /api/alerts/verdict (human annotation on measured alerts)."""
+
+    def test_set_alert_verdict(self, client):
+        store = deps.get().sqlite
+        _seed_alert(store, channel="C-1")
+        # Use a known timestamp — _seed_alert uses time.time(), so we
+        # query to get the actual created_at.
+        alert = store.query_alerts()[0]
+        resp = client.post("/api/alerts/verdict", json={
+            "channel": "C-1", "alert_ts": alert["created_at"],
+            "human_verdict": "real",
+        })
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        # Verify persisted
+        assert store.query_alerts()[0]["human_verdict"] == "real"
+
+    def test_alert_verdict_404_not_found(self, client):
+        resp = client.post("/api/alerts/verdict", json={
+            "channel": "ZZZ", "alert_ts": 99999.0,
+            "human_verdict": "real",
+        })
+        assert resp.status_code == 404
+
+    def test_alert_verdict_invalid_value(self, client):
+        store = deps.get().sqlite
+        _seed_alert(store, channel="C-1")
+        alert = store.query_alerts()[0]
+        resp = client.post("/api/alerts/verdict", json={
+            "channel": "C-1", "alert_ts": alert["created_at"],
+            "human_verdict": "bogus",
+        })
+        assert resp.status_code == 422

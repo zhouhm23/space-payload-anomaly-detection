@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(_SRC, "ground"))
 
 from phm.services.health_service import channel_health
 from phm.database import RingBuffer
-from phm.database.warning_store import WarningStore
+from phm.database.warning_store import WarningStore, WarningEntry
 from phm.database.alert_store import AlertStore
 
 
@@ -126,6 +126,71 @@ class TestWarningStore:
         ws.add_pending("C-1", predict_start=far_future - 100.0, predict_end=far_future, max_predict_score=0.9)
         changed = ws.verify("C-1", [(far_future - 50.0, 0.99)])
         assert changed == 0
+
+
+# ---------------------------------------------------------------------------
+# WarningEntry four-dimension verdict system
+# ---------------------------------------------------------------------------
+class TestWarningEntryVerdict:
+    def test_final_status_human_overrides_all(self):
+        e = WarningEntry(channel="C-1", predict_start=0, predict_end=1, max_predict_score=0.9)
+        e.verify_status = "confirmed"
+        e.llm_verdict = "false_alarm"
+        e.human_verdict = "real"
+        assert e.to_dict()["final_status"] == "real"
+
+    def test_final_status_llm_when_no_human(self):
+        e = WarningEntry(channel="C-1", predict_start=0, predict_end=1, max_predict_score=0.9)
+        e.verify_status = "pending"
+        e.llm_verdict = "false_alarm"
+        assert e.to_dict()["final_status"] == "false_alarm"
+
+    def test_final_status_verify_when_no_verdicts(self):
+        e = WarningEntry(channel="C-1", predict_start=0, predict_end=1, max_predict_score=0.9)
+        e.verify_status = "confirmed"
+        assert e.to_dict()["final_status"] == "confirmed"
+
+    def test_set_human_verdict_by_id(self):
+        ws = WarningStore()
+        entry = ws.add_pending("C-1", 0, 1, 0.9)
+        ok = ws.set_verdict(entry.id, "human", "real")
+        assert ok and ws.recent(10)[0]["human_verdict"] == "real"
+
+    def test_set_llm_verdict_by_id(self):
+        ws = WarningStore()
+        entry = ws.add_pending("C-1", 0, 1, 0.9)
+        ws.set_verdict(entry.id, "llm", "uncertain")
+        assert ws.recent(10)[0]["llm_verdict"] == "uncertain"
+
+    def test_warning_entry_has_unique_id(self):
+        ws = WarningStore()
+        e1 = ws.add_pending("C-1", 0, 1, 0.9)
+        e2 = ws.add_pending("C-2", 0, 1, 0.8)
+        assert e1.id != e2.id and e1.id >= 1
+
+    def test_verify_status_backward_compat(self):
+        e = WarningEntry(channel="C-1", predict_start=0, predict_end=1, max_predict_score=0.9)
+        e.verify_status = "confirmed"
+        assert e.status == "confirmed"
+
+    def test_to_dict_includes_new_fields(self):
+        e = WarningEntry(channel="C-1", predict_start=0, predict_end=1, max_predict_score=0.9)
+        d = e.to_dict()
+        for k in ("verify_status", "llm_verdict", "human_verdict", "final_status", "id", "status"):
+            assert k in d
+
+    def test_set_verdict_unknown_id_returns_false(self):
+        ws = WarningStore()
+        ws.add_pending("C-1", 0, 1, 0.9)
+        assert ws.set_verdict(999, "human", "real") is False
+
+    def test_verify_marks_unverifiable_when_window_passed_no_data(self):
+        ws = WarningStore()
+        ws.add_pending("C-1", predict_start=0.0, predict_end=0.01, max_predict_score=0.9)
+        # Window has elapsed (predict_end is in the past) but no measured data
+        changed = ws.verify("C-1", [])
+        assert changed == 1
+        assert ws.all()[0]["verify_status"] == "unverifiable"
 
 
 # ---------------------------------------------------------------------------

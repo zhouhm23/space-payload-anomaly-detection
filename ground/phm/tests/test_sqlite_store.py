@@ -465,3 +465,116 @@ class TestStoreMutations:
         s = SQLiteStore(tmp_path / "noop.db", enabled=False)
         assert s.update_alert_status(1, "confirmed") is False
         s.close()
+
+
+class TestAlertVerdictColumns:
+    """Tests for llm_verdict / human_verdict / final_status on alert_records."""
+
+    def test_query_alerts_includes_verdict_fields(self, store):
+        store.enqueue_alert({"channel": "C-1", "type": "measured", "score": 0.9, "time": 1000.0})
+        time.sleep(1.0)
+        alerts = store.query_alerts()
+        assert "llm_verdict" in alerts[0]
+        assert "human_verdict" in alerts[0]
+        assert "final_status" in alerts[0]
+
+    def test_update_alert_verdict_human(self, store):
+        store.enqueue_alert({"channel": "C-1", "type": "measured", "score": 0.9, "time": 1000.0})
+        time.sleep(1.0)
+        ok = store.update_alert_verdict("C-1", 1000.0, "real")
+        assert ok is True
+        alerts = store.query_alerts()
+        assert alerts[0]["human_verdict"] == "real"
+        assert alerts[0]["final_status"] == "real"
+
+    def test_update_alert_verdict_llm(self, store):
+        store.enqueue_alert({"channel": "C-1", "type": "measured", "score": 0.9, "time": 1000.0})
+        time.sleep(1.0)
+        ok = store.update_alert_verdict("C-1", 1000.0, "false_alarm", is_llm=True)
+        assert ok is True
+        alerts = store.query_alerts()
+        assert alerts[0]["llm_verdict"] == "false_alarm"
+        assert alerts[0]["final_status"] == "false_alarm"
+
+    def test_final_status_llm_when_no_human(self, store):
+        store.enqueue_alert({"channel": "C-1", "type": "measured", "score": 0.9, "time": 1000.0})
+        time.sleep(1.0)
+        store._conn.execute(
+            "UPDATE alert_records SET llm_verdict='false_alarm' WHERE channel='C-1' AND created_at=1000.0"
+        )
+        store._conn.commit()
+        alerts = store.query_alerts()
+        assert alerts[0]["final_status"] == "false_alarm"
+
+    def test_final_status_falls_back_to_status(self, store):
+        store.enqueue_alert({"channel": "C-1", "type": "measured", "score": 0.9, "time": 1000.0})
+        time.sleep(1.0)
+        alerts = store.query_alerts()
+        # No verdicts set → final_status == status ('active' for measured)
+        assert alerts[0]["final_status"] == alerts[0]["status"]
+
+    def test_update_alert_verdict_missing_row(self, store):
+        ok = store.update_alert_verdict("C-1", 99999.0, "real")
+        assert ok is False
+
+    def test_update_alert_verdict_invalid_value(self, store):
+        store.enqueue_alert({"channel": "C-1", "type": "measured", "score": 0.9, "time": 1000.0})
+        time.sleep(1.0)
+        ok = store.update_alert_verdict("C-1", 1000.0, "bogus")
+        assert ok is False
+
+    def test_human_overrides_llm_in_final_status(self, store):
+        store.enqueue_alert({"channel": "C-1", "type": "measured", "score": 0.9, "time": 1000.0})
+        time.sleep(1.0)
+        store.update_alert_verdict("C-1", 1000.0, "false_alarm", is_llm=True)
+        store.update_alert_verdict("C-1", 1000.0, "real")
+        alerts = store.query_alerts()
+        assert alerts[0]["llm_verdict"] == "false_alarm"
+        assert alerts[0]["human_verdict"] == "real"
+        assert alerts[0]["final_status"] == "real"
+
+
+class TestDiagnosisVerdictColumn:
+    """Tests for llm_verdict on diagnosis_records."""
+
+    def test_save_diagnosis_with_verdict(self, store):
+        store.save_diagnosis("C-1", "measured", 1000.0, "report", {}, 1.0, None, verdict="real")
+        d = store.get_diagnosis("C-1", "measured", 1000.0)
+        assert d["llm_verdict"] == "real"
+
+    def test_save_diagnosis_without_verdict(self, store):
+        store.save_diagnosis("C-1", "measured", 1000.0, "report", {}, 1.0, None)
+        d = store.get_diagnosis("C-1", "measured", 1000.0)
+        assert d["llm_verdict"] is None
+
+    def test_list_diagnosis_keys_includes_verdict(self, store):
+        store.save_diagnosis("C-1", "measured", 1000.0, "report", {}, 1.0, None, verdict="uncertain")
+        keys = store.list_diagnosis_keys()
+        assert keys[0]["llm_verdict"] == "uncertain"
+
+    def test_migration_adds_verdict_columns(self, tmp_path):
+        """Existing DB without verdict columns gets them added on open."""
+        import sqlite3 as _sqlite3
+        db = tmp_path / "old.db"
+        conn = _sqlite3.connect(str(db))
+        conn.execute(
+            "CREATE TABLE alert_records (id INTEGER PRIMARY KEY, channel TEXT, "
+            "alert_type TEXT, score REAL, message TEXT, created_at REAL, "
+            "status TEXT DEFAULT 'active', verified_at REAL, ingested_at REAL)"
+        )
+        conn.execute(
+            "CREATE TABLE diagnosis_records (id INTEGER PRIMARY KEY, channel TEXT, "
+            "alert_type TEXT, alert_ts REAL, diagnosis TEXT, context_summary TEXT, "
+            "elapsed_sec REAL, error TEXT, created_at REAL)"
+        )
+        conn.commit()
+        conn.close()
+        s = SQLiteStore(db, batch_size=5, flush_interval=0.5, enabled=True)
+        s.start()
+        cols = s._conn.execute("PRAGMA table_info(alert_records)").fetchall()
+        col_names = [c[1] for c in cols]
+        assert "llm_verdict" in col_names
+        assert "human_verdict" in col_names
+        diag_cols = [c[1] for c in s._conn.execute("PRAGMA table_info(diagnosis_records)").fetchall()]
+        assert "llm_verdict" in diag_cols
+        s.close()
