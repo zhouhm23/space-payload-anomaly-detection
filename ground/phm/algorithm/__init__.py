@@ -10,11 +10,12 @@ without knowing the concrete module name.  This also keeps the future
 model registry swap-point localised.
 """
 
-from .base import BaseDetector, BaseForecaster
+from .base import BaseDetector, BaseForecaster, BaseRULPredictor
 from .tspulse import AnomalyDetector, DEFAULT_MODEL as TSPULSE_DEFAULT_MODEL
 from .ttm import TrendForecaster
 from .ttm import DEFAULT_MODEL as TTM_DEFAULT_MODEL
 from .ttm import CONTEXT_LENGTH, PREDICTION_LENGTH
+from .rul_model import RULPredictor
 
 # Cascade components
 from .base_filter import BaseFilter
@@ -31,10 +32,12 @@ __all__ = [
     # Base plugin contracts
     "BaseDetector",
     "BaseForecaster",
+    "BaseRULPredictor",
     "BaseFilter",
     # Concrete implementations
     "AnomalyDetector",
     "TrendForecaster",
+    "RULPredictor",
     "CascadeDetector",
     "ClassicFilter",
     "PhysicalConstraint",

@@ -105,7 +105,7 @@ class TestTrendForecaster:
         forecaster = TrendForecaster(device="cpu")
         ts = sample_channel["test_ts"][:1024].astype(np.float32)
         train = sample_channel["train_ts"]
-        context, prediction = forecaster.forecast(ts, train)
+        context, prediction, scaler = forecaster.forecast(ts, train)
 
         assert len(context) == CONTEXT_LENGTH, f"Context should be {CONTEXT_LENGTH} steps"
         assert len(prediction) == PREDICTION_LENGTH, f"Prediction should be {PREDICTION_LENGTH} steps"
@@ -120,6 +120,6 @@ class TestTrendForecaster:
         forecaster = TrendForecaster(device="cpu")
         ts = sample_channel["test_ts"][:100].astype(np.float32)  # << 512
         train = sample_channel["train_ts"]
-        context, prediction = forecaster.forecast(ts, train)
+        context, prediction, scaler = forecaster.forecast(ts, train)
         assert len(context) == CONTEXT_LENGTH
         assert len(prediction) > 0

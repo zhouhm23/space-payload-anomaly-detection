@@ -52,4 +52,28 @@ class BaseForecaster(ABC):
         raise NotImplementedError
 
 
-__all__ = ["BaseDetector", "BaseForecaster"]
+class BaseRULPredictor(ABC):
+    """Remaining-Useful-Life regression plugin contract.
+
+    Implementations take a multivariate sensor window and predict a scalar
+    RUL value (remaining cycles).  Examples: LSTM+Attention trained on
+    C-MAPSS.
+    """
+
+    n_params: int = 0
+    model_source: str = ""
+
+    @abstractmethod
+    def predict_rul(self, window: np.ndarray) -> float:
+        """Predict RUL (remaining cycles) from a sensor window.
+
+        Args:
+            window: ``(window_size, n_sensors)`` normalised sensor readings.
+
+        Returns:
+            Predicted remaining useful life in cycles (float, ≥ 0).
+        """
+        raise NotImplementedError
+
+
+__all__ = ["BaseDetector", "BaseForecaster", "BaseRULPredictor"]
