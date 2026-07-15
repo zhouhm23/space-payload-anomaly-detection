@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 
+import numpy as np
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -327,3 +328,92 @@ class TestHealthServiceFolderAggregation:
         result = HealthService(rb, cfg).system_health()
         assert result["folders"]["folder_A"]["strategy"] == "min"
         assert result["folders"]["folder_A"]["health"] == 0.0  # C-2 is all-anomalous
+
+
+# ---------------------------------------------------------------------------
+# RingBuffer multi-channel aligned read (Phase 3)
+# ---------------------------------------------------------------------------
+class TestRingBufferAligned:
+    def _entry(self, ch, raw, ts):
+        return {"raw": raw, "score": 0.0, "received_at": ts, "channel": ch}
+
+    def test_aligned_truncates_to_shortest(self):
+        rb = RingBuffer(max_size=100)
+        rb.ingest({"C-1": [self._entry("C-1", float(i), i) for i in range(10)]})
+        rb.ingest({"C-2": [self._entry("C-2", float(i), i) for i in range(5)]})
+        aligned = rb.raw_block_entries_aligned(["C-1", "C-2"], 512)
+        assert len(aligned["C-1"]) == 5  # truncated to C-2's 5
+        assert len(aligned["C-2"]) == 5
+        # C-1 keeps the most-recent 5 (indices 5..9)
+        assert aligned["C-1"][0]["raw"] == 5.0
+        assert aligned["C-1"][-1]["raw"] == 9.0
+
+    def test_aligned_missing_channel_returns_empty(self):
+        rb = RingBuffer(max_size=100)
+        rb.ingest({"C-1": [self._entry("C-1", 1.0, 0.0)]})
+        aligned = rb.raw_block_entries_aligned(["C-1", "C-2"], 512)
+        assert aligned == {}  # missing C-2 → empty
+
+    def test_aligned_block_size_cap(self):
+        rb = RingBuffer(max_size=100)
+        rb.ingest({"C-1": [self._entry("C-1", float(i), i) for i in range(20)]})
+        rb.ingest({"C-2": [self._entry("C-2", float(i), i) for i in range(20)]})
+        aligned = rb.raw_block_entries_aligned(["C-1", "C-2"], 5)
+        assert len(aligned["C-1"]) == 5
+        assert len(aligned["C-2"]) == 5
+
+
+# ---------------------------------------------------------------------------
+# Joint detector — co_anomaly_consensus (Phase 4)
+# ---------------------------------------------------------------------------
+class TestCoAnomalyConsensus:
+    def test_all_normal_returns_zeros(self):
+        from phm.algorithm.joint_detector import co_anomaly_consensus
+        scores = {"C-1": np.zeros(10, dtype=np.float32),
+                  "C-2": np.zeros(10, dtype=np.float32)}
+        thresholds = {"C-1": 0.5, "C-2": 0.5}
+        joint = co_anomaly_consensus(scores, thresholds)
+        assert len(joint) == 10
+        assert np.all(joint == 0.0)
+
+    def test_all_anomalous_returns_ones(self):
+        from phm.algorithm.joint_detector import co_anomaly_consensus
+        scores = {"C-1": np.full(10, 0.9, dtype=np.float32),
+                  "C-2": np.full(10, 0.8, dtype=np.float32)}
+        thresholds = {"C-1": 0.5, "C-2": 0.5}
+        joint = co_anomaly_consensus(scores, thresholds)
+        assert np.allclose(joint, 1.0)
+
+    def test_partial_anomaly_returns_half(self):
+        from phm.algorithm.joint_detector import co_anomaly_consensus
+        # C-1 anomalous at every point, C-2 normal everywhere
+        scores = {"C-1": np.full(10, 0.9, dtype=np.float32),
+                  "C-2": np.full(10, 0.1, dtype=np.float32)}
+        thresholds = {"C-1": 0.5, "C-2": 0.5}
+        joint = co_anomaly_consensus(scores, thresholds)
+        assert np.allclose(joint, 0.5)  # 1 of 2 channels exceeds
+
+    def test_single_channel_returns_empty(self):
+        from phm.algorithm.joint_detector import co_anomaly_consensus
+        scores = {"C-1": np.full(10, 0.9, dtype=np.float32)}
+        thresholds = {"C-1": 0.5}
+        joint = co_anomaly_consensus(scores, thresholds)
+        assert len(joint) == 0  # need ≥2 channels
+
+    def test_different_lengths_truncate_to_shortest(self):
+        from phm.algorithm.joint_detector import co_anomaly_consensus
+        scores = {"C-1": np.full(10, 0.9, dtype=np.float32),
+                  "C-2": np.full(5, 0.9, dtype=np.float32)}
+        thresholds = {"C-1": 0.5, "C-2": 0.5}
+        joint = co_anomaly_consensus(scores, thresholds)
+        assert len(joint) == 5  # truncated to shortest
+
+    def test_per_channel_thresholds(self):
+        from phm.algorithm.joint_detector import co_anomaly_consensus
+        # C-1 threshold 0.3, C-2 threshold 0.8
+        scores = {"C-1": np.full(5, 0.5, dtype=np.float32),
+                  "C-2": np.full(5, 0.5, dtype=np.float32)}
+        thresholds = {"C-1": 0.3, "C-2": 0.8}
+        joint = co_anomaly_consensus(scores, thresholds)
+        # C-1 (0.5 > 0.3) exceeds, C-2 (0.5 < 0.8) doesn't → 0.5
+        assert np.allclose(joint, 0.5)

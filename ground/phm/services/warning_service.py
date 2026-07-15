@@ -27,6 +27,7 @@ import numpy as np
 from ..algorithm import BaseDetector, CascadeDetector
 from ..algorithm.calibration_config import CalibrationConfig
 from ..algorithm.classic_filter import ClassicFilter
+from ..algorithm.joint_detector import co_anomaly_consensus
 from ..algorithm.physical_constraint import ConstraintConfig, PhysicalConstraint
 from ..config import (
     ANOMALY_THRESHOLD, FORECAST_PREDICTION_LENGTH,
@@ -36,8 +37,16 @@ from ..config import (
 from ..database import RingBuffer, SQLiteStore
 from ..database.warning_store import WarningStore
 from .forecast_service import ForecastService
+from .tree_utils import get_sensor_to_folder, _find_node_by_id
 
 logger = logging.getLogger(__name__)
+
+# Joint (co-anomaly) alert threshold: triggers when the fraction of sibling
+# channels exceeding their per-channel threshold is above this value.
+# 0.5 = majority consensus.  Stored here (not in config.py) because joint
+# detection is an additive layer that can be ignored if no folder has ≥2
+# sensors.
+_JOINT_ALERT_THRESHOLD = 0.5
 
 
 class WarningService:
@@ -253,6 +262,123 @@ class WarningService:
     def get_latest_cascade(self, channel: str):
         """Return the latest CascadeOutput for a channel, or None."""
         return self._latest_cascade.get(channel)
+
+    # -- joint (cross-channel) detection -----------------------------------
+
+    def _get_channel_threshold(self, channel: str) -> float:
+        """Return the calibrated threshold for a channel (fallback 0.5)."""
+        detector = self._get_detector()
+        if detector is None:
+            return self.threshold
+        cal_cfg = getattr(detector, "calibration_config", None)
+        if cal_cfg is not None:
+            cal = cal_cfg.get(channel)
+            if cal is not None and cal.threshold is not None:
+                return float(cal.threshold)
+        return self.threshold
+
+    def evaluate_all_folders(self, device_tree: list) -> list[dict]:
+        """Run co-anomaly consensus for every folder with ≥2 channels.
+
+        Called after the parallel per-channel eval cycle.  Reads the cached
+        per-channel predict scores (``_latest_predict_scores``), groups
+        channels by their device-tree folder, and computes the co-anomaly
+        consensus for each group.  Returns a list of joint-alert dicts for
+        folders whose consensus exceeds ``_JOINT_ALERT_THRESHOLD``.
+
+        Each alert dict has the shape consumed by ``_emit_joint_alert``::
+
+            {"folder_id", "folder_name", "joint_score", "channels": [...],
+             "score_snapshot": {...}, "alert_ts": float}
+        """
+        if not device_tree:
+            return []
+
+        folder_map = get_sensor_to_folder(device_tree)  # {channel: folder_id}
+        if not folder_map:
+            return []
+
+        # Group evaluated channels by folder.
+        folder_channels: dict[str, list[str]] = {}
+        for ch, cached in self._latest_predict_scores.items():
+            fid = folder_map.get(ch)
+            if fid and cached and cached.get("scores"):
+                folder_channels.setdefault(fid, []).append(ch)
+
+        alerts: list[dict] = []
+        for fid, channels in folder_channels.items():
+            if len(channels) < 2:
+                continue  # consensus needs ≥2 siblings
+
+            scores = {
+                ch: np.asarray(self._latest_predict_scores[ch]["scores"], dtype=np.float32)
+                for ch in channels
+            }
+            thresholds = {ch: self._get_channel_threshold(ch) for ch in channels}
+            joint = co_anomaly_consensus(scores, thresholds)
+            if len(joint) == 0:
+                continue
+
+            joint_max = float(np.nanmax(joint))
+            if joint_max <= _JOINT_ALERT_THRESHOLD:
+                continue
+
+            # Resolve folder name for display ("SUB:<name>").
+            folder_node = _find_node_by_id(device_tree, fid)
+            folder_name = folder_node.get("name", fid) if folder_node else fid
+
+            # Per-channel contribution at the peak point.
+            peak_idx = int(np.nanargmax(joint))
+            contributions = {}
+            for ch in channels:
+                s = scores[ch]
+                thr = thresholds[ch]
+                peak_score = float(s[peak_idx]) if peak_idx < len(s) else 0.0
+                contributions[ch] = {
+                    "score": peak_score,
+                    "threshold": thr,
+                    "exceeds": peak_score > thr,
+                }
+
+            import time as _time
+            alerts.append({
+                "folder_id": fid,
+                "folder_name": folder_name,
+                "joint_score": joint_max,
+                "channels": channels,
+                "contributions": contributions,
+                "joint_curve": joint.tolist(),
+                "alert_ts": _time.time(),
+            })
+
+        return alerts
+
+    def _emit_joint_alert(self, alert: dict) -> None:
+        """Persist a joint alert to SQLite alert_records.
+
+        Uses ``channel="SUB:<folder_name>"`` and ``alert_type="joint"`` so
+        the frontend (which renders any channel name) displays it without
+        UI changes.  The per-channel contributions are stored in
+        ``score_snapshot`` for LLM diagnosis context.
+        """
+        if self.sqlite is None:
+            return
+        channel = f"SUB:{alert['folder_name']}"
+        self.sqlite.enqueue_alert({
+            "channel": channel,
+            "alert_type": "joint",
+            "score": alert["joint_score"],
+            "message": f"子系统联合告警: {alert['folder_name']} "
+                       f"({len(alert['channels'])}通道共识 "
+                       f"{alert['joint_score']:.0%})",
+            "created_at": alert["alert_ts"],
+            "status": "active",
+            "score_snapshot": {
+                "joint_curve": alert["joint_curve"],
+                "contributions": alert["contributions"],
+                "channels": alert["channels"],
+            },
+        })
 
     def clear(self) -> None:
         self.warnings.clear()

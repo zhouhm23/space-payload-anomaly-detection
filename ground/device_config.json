@@ -1,20 +1,20 @@
 {
   "device_tree": [
     {
-      "id": "node-dataset",
+      "id": "node-1784093694918",
       "name": "数据集",
       "type": "folder",
       "children": [
         {
-          "id": "node-c1",
-          "name": "C-1 温度",
+          "id": "node-1784093688430",
+          "name": "C-1",
           "type": "sensor",
           "sourceId": "file:NASA-MSL/C-1",
           "channelName": "C-1",
           "blockSize": 512
         },
         {
-          "id": "node-d14",
+          "id": "node-1784093658477",
           "name": "D-14",
           "type": "sensor",
           "sourceId": "file:NASA-MSL/D-14",
@@ -24,24 +24,16 @@
       ]
     },
     {
-      "id": "node-virtual",
+      "id": "node-1784093705462",
       "name": "模拟信号",
       "type": "folder",
       "children": [
         {
-          "id": "node-vs-sine",
-          "name": "正弦波",
+          "id": "t1",
+          "name": "S1",
           "type": "sensor",
           "sourceId": "virtual:sine",
           "channelName": "VS-sine",
-          "blockSize": 512
-        },
-        {
-          "id": "node-vs-multi-sine",
-          "name": "多谐波",
-          "type": "sensor",
-          "sourceId": "virtual:multi_sine",
-          "channelName": "VS-multi_sine",
           "blockSize": 512
         }
       ]

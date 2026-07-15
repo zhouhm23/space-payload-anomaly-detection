@@ -170,6 +170,9 @@ def main():
     # Keyed by channel name; value is the previous raw block (np.ndarray).
     # Passed to detector.detect(context=...) so the pipeline has enough
     # context for aggregation/smoothing on short blocks.
+    #
+    # Thread-safety: under parallel acquisition each worker only touches its
+    # own channel key, so the dict is safe without a lock (CPython GIL).
     _prev_blocks: dict[str, np.ndarray] = {}
     running = True
 
@@ -179,101 +182,118 @@ def main():
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    try:
-        while running:
-            any_data = False
-            for i, (src, pp) in enumerate(zip(sources, preprocessors)):
-                raw = src.read(window)
-                if len(raw) == 0:
-                    continue  # loop source will never hit this
-                any_data = True
-                # Record the acquisition moment so ground can stamp each
-                # sample with t_acq + i/sr (strict equidistant) instead of
-                # back-calculating from its own wall-clock (which produces
-                # fake gaps when data buffers in TCP).
-                t_acq = time.time()
+    # ── Per-channel worker (runs in parallel via ThreadPoolExecutor) ──────
+    # Each worker is self-contained: src/pp/ch_dict are per-channel (not
+    # shared), while l1_filter (stateless) and detector (thread-safe per
+    # Phase 0 verification) are shared across workers.  server and
+    # device_tree access are lock-protected inside their respective owners.
+    def _process_channel(src, pp, ch_dict, ch_id, cur_step):
+        """Read → L1 → L2 → enqueue for one channel. Returns True if data was read."""
+        raw = src.read(window)
+        if len(raw) == 0:
+            return False  # loop source will never hit this
 
-                cleaned = pp.transform(raw) if pp._scaler is not None else pp.fit_transform(raw)
-                scores = None
-                l1_decision = "pass"
-                l1_detail: dict = {}
+        # Record the acquisition moment so ground can stamp each sample with
+        # t_acq + i/sr (strict equidistant) instead of back-calculating from
+        # its own wall-clock (which produces fake gaps when data buffers in TCP).
+        t_acq = time.time()
 
-                # --- Layer 1: classic pre-filter ---------------------------
-                try:
-                    imputed = pp._impute(raw.astype(np.float64)).astype(np.float32)
-                    l1_decision, l1_detail = l1_filter.check(imputed)
-                except Exception:
-                    logger.warning("L1 filter failed ch[%d]", ch_ids[i], exc_info=True)
-                    l1_detail = {"error": "l1_failed"}
+        scores = None
+        l1_decision = "pass"
+        l1_detail: dict = {}
 
-                # --- Layer 2: TSPulse (skipped for constant channels) -------
-                if l1_decision == "skip":
-                    # Constant / broken channel — TSPulse is skipped to save
-                    # CPU, but the anomaly score MUST still be set (to zeros),
-                    # not None.  A None score leaves a gap in the chart's
-                    # anomaly-score curve and makes the channel look broken.
-                    scores = np.zeros(len(raw), dtype=np.float32)
-                    if step == 0:
-                        logger.info("ch[%d] %s: L1 skip (%s), TSPulse skipped, scores=zeros",
-                                    ch_ids[i], src.channel_name,
-                                    l1_detail.get("reason", "?"))
-                elif detector is not None:
-                    try:
-                        # Pass previous block as context for pipeline overlap.
-                        # Without it, the pipeline's aggregation produces
-                        # near-zero scores on short blocks of slowly-varying
-                        # channels (e.g. MSL C-1).  See experiments notes.
-                        ctx = _prev_blocks.get(src.channel_name)
-                        scores = detector.detect(imputed, context=ctx)
-                        _prev_blocks[src.channel_name] = imputed.copy()
-                    except Exception:
-                        logger.warning("Detection failed ch[%d]", ch_ids[i], exc_info=True)
+        # --- Layer 1: classic pre-filter -------------------------------
+        try:
+            imputed = pp._impute(raw.astype(np.float64)).astype(np.float32)
+            l1_decision, l1_detail = l1_filter.check(imputed)
+        except Exception:
+            logger.warning("L1 filter failed ch[%d]", ch_id, exc_info=True)
+            l1_detail = {"error": "l1_failed"}
 
-                # Look up device tree metadata for this channel
-                with tree_lock:
-                    _tree_meta = {}
-                    _src_id = ch.get("source_id", "")
-                    for _root in device_tree:
-                        for _child in _root.get("children", []):
-                            if _child.get("sourceId") == _src_id or \
-                               _child.get("source_id") == _src_id:
-                                _tree_meta = {
-                                    "display_name": _child.get("name", src.channel_name),
-                                    "rack": _root.get("name", ""),
-                                    "description": _child.get("description", ""),
-                                }
-                                break
-                        if _tree_meta:
-                            break
+        # --- Layer 2: TSPulse (skipped for constant channels) -----------
+        if l1_decision == "skip":
+            # Constant / broken channel — TSPulse is skipped to save CPU,
+            # but the anomaly score MUST still be set (to zeros), not None.
+            # A None score leaves a gap in the chart's anomaly-score curve
+            # and makes the channel look broken.
+            scores = np.zeros(len(raw), dtype=np.float32)
+            if cur_step == 0:
+                logger.info("ch[%d] %s: L1 skip (%s), TSPulse skipped, scores=zeros",
+                            ch_id, src.channel_name,
+                            l1_detail.get("reason", "?"))
+        elif detector is not None:
+            try:
+                # Pass previous block as context for pipeline overlap.
+                ctx = _prev_blocks.get(src.channel_name)
+                scores = detector.detect(imputed, context=ctx)
+                _prev_blocks[src.channel_name] = imputed.copy()
+            except Exception:
+                logger.warning("Detection failed ch[%d]", ch_id, exc_info=True)
 
-                server.enqueue_telemetry(
+        # Look up device tree metadata for this channel.
+        # NOTE: uses ch_dict (this channel's own config) — not the leaked
+        # outer-loop variable which was always the last channel's config.
+        _src_id = ch_dict.get("source_id", "")
+        with tree_lock:
+            _tree_meta = {}
+            for _root in device_tree:
+                for _child in _root.get("children", []):
+                    if _child.get("sourceId") == _src_id or \
+                       _child.get("source_id") == _src_id:
+                        _tree_meta = {
+                            "display_name": _child.get("name", src.channel_name),
+                            "rack": _root.get("name", ""),
+                            "description": _child.get("description", ""),
+                        }
+                        break
+                if _tree_meta:
+                    break
+
+        server.enqueue_telemetry(
+            channel=src.channel_name,
+            raw_values=raw,
+            scores=scores,
+            sample_rate=sr,
+            step=cur_step,
+            exhausted=src.exhausted,
+            tree_meta=_tree_meta,
+            l1_decision=l1_decision,
+            l1_detail=l1_detail,
+            t_acq_start=t_acq,
+        )
+
+        if scores is not None and len(scores) > 0:
+            mx = float(np.nanmax(scores))
+            if mx > ALERT_THRESHOLD:
+                server.enqueue_alert(
                     channel=src.channel_name,
-                    raw_values=raw,
-                    scores=scores,
-                    sample_rate=sr,
-                    step=step,
-                    exhausted=src.exhausted,
-                    tree_meta=_tree_meta,
-                    l1_decision=l1_decision,
-                    l1_detail=l1_detail,
-                    t_acq_start=t_acq,
+                    score=mx,
+                    step=cur_step,
+                    raw_window=raw.tolist() if hasattr(raw, 'tolist') else list(raw),
+                    score_window=scores.tolist() if hasattr(scores, 'tolist') else list(scores),
                 )
 
-                if scores is not None and len(scores) > 0:
-                    # Alert when the block's max score exceeds the threshold.
-                    # Same logic as the ground segment's WarningService
-                    # (max_pred > ANOMALY_THRESHOLD).  Both segments now use
-                    # the same pipeline + MinMax scores so the threshold has
-                    # the same meaning on both sides.
-                    mx = float(np.nanmax(scores))
-                    if mx > ALERT_THRESHOLD:
-                        server.enqueue_alert(
-                            channel=src.channel_name,
-                            score=mx,
-                            step=step,
-                            raw_window=raw.tolist() if hasattr(raw, 'tolist') else list(raw),
-                            score_window=scores.tolist() if scores is not None and hasattr(scores, 'tolist') else (list(scores) if scores is not None else None),
-                        )
+        return True
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    try:
+        while running:
+            # Run all channels in parallel.  Phase 0 verified the shared
+            # TSPulse detector is thread-safe under ThreadPoolExecutor (4
+            # channels: serial 1.69s → parallel 0.36s, identical results).
+            # Each worker reads its own src, so file/virtual acquisition is
+            # independent.  L1 short-circuit (constant channels) bypasses
+            # the detector entirely — those workers finish near-instantly.
+            n_workers = len(sources)
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                futures = [
+                    pool.submit(_process_channel, src, pp, ch_dict, ch_id, step)
+                    for src, pp, ch_dict, ch_id in zip(sources, preprocessors, channels, ch_ids)
+                ]
+                results = [f.result() for f in futures]
+
+            any_data = any(results)
 
             if not any_data:
                 logger.info("All sources exhausted")

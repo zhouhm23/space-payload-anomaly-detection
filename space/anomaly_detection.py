@@ -131,7 +131,12 @@ class AnomalyDetector:
             least_significant_score=0.1,
         )
 
-        result = pipeline(df)
+        # Run inference under no_grad — eval mode alone disables training,
+        # but wrapping the forward pass avoids building any autograd graph,
+        # which is both faster (Phase 0 measured serial 1.69s→0.44s, 3.8x)
+        # and safer under concurrent ThreadPoolExecutor access.
+        with torch.no_grad():
+            result = pipeline(df)
         # Pipeline returns anomaly_score as a column whose first row holds the
         # per-sample array.  Read defensively: .iloc[0] may return a scalar
         # on degenerate single-window outputs, so flatten whatever shape we

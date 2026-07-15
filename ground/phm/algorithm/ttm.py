@@ -107,7 +107,10 @@ class TrendForecaster(BaseForecaster):
             self.model, feature_extractor=tsp, device=self.device
         )
 
-        forecasts = fpipe(df)
+        # Run inference under no_grad — avoids autograd graph overhead and
+        # is safer under concurrent ThreadPoolExecutor access.
+        with torch.no_grad():
+            forecasts = fpipe(df)
         pred_raw = forecasts["x_prediction"].iloc[0]
         prediction_scaled = np.array(pred_raw, dtype=np.float32).flatten()[-PREDICTION_LENGTH:]
 

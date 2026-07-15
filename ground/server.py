@@ -139,6 +139,10 @@ _auto_poll_thread: threading.Thread | None = None
 _eval_stop = threading.Event()
 _eval_thread: threading.Thread | None = None
 
+# Maximum parallel workers for model-eval.  Phase 0 verified shared
+# TSPulse + TTM-R3 are thread-safe under concurrent ThreadPoolExecutor.
+_MAX_EVAL_WORKERS = 8
+
 
 def _auto_poll_loop() -> None:
     from concurrent.futures import ThreadPoolExecutor
@@ -186,27 +190,48 @@ def _poll_one(c, src: str) -> None:
 
 
 def _eval_loop() -> None:
-    """Run model evaluation (forecast + detection) for all channels.
+    """Run model evaluation (forecast + detection) for all channels in parallel.
 
     Runs in its own thread so slow model inference does not delay the
-    poll thread.  Iterates channels serially — PyTorch models are not
-    thread-safe for concurrent forward passes on the same model object.
+    poll thread.  Previously iterated channels serially — 4 channels
+    took ~2.87s, exceeding the 2 s auto-poll interval and causing
+    backlog.  Phase 0 verified the shared TSPulse + TTM-R3 PyTorch
+    models are thread-safe under ThreadPoolExecutor, so channels are
+    now evaluated concurrently.
+
+    After the per-channel eval, a fast co-anomaly consensus pass runs over
+    device-tree folders (Phase 4 joint detection) — pure numpy, microseconds.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from phm.api import deps
     while not _eval_stop.is_set():
         try:
             c = deps.get()
-            for ch in c.ring.channels():
-                if _eval_stop.is_set():
-                    break
+            channels = c.ring.channels()
+            if channels:
+                # Phase A: parallel per-channel eval
+                n_workers = min(len(channels), _MAX_EVAL_WORKERS)
+                with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                    futures = {
+                        pool.submit(c.warning_service.evaluate_channel, ch, _AUTO_POLL_BLOCK): ch
+                        for ch in channels
+                    }
+                    for fut in as_completed(futures):
+                        try:
+                            fut.result()
+                        except Exception:
+                            logger.debug("Eval failed for %s", futures[fut], exc_info=True)
+
+                # Phase B: per-folder co-anomaly consensus (joint detection)
                 try:
-                    c.warning_service.evaluate_channel(ch, _AUTO_POLL_BLOCK)
+                    tree = c.config.load().get("device_tree", [])
+                    joint_alerts = c.warning_service.evaluate_all_folders(tree)
+                    for ja in joint_alerts:
+                        c.warning_service._emit_joint_alert(ja)
                 except Exception:
-                    pass
+                    logger.debug("Joint detection failed", exc_info=True)
         except Exception:
             logger.debug("Eval cycle failed", exc_info=True)
-        # Poll eval frequently; if models are slow the loop naturally
-        # throttles to one eval-cycle per (sum of per-channel inference).
         _eval_stop.wait(1.0)
 
 

@@ -134,6 +134,36 @@ class RingBuffer:
                 return []
             return list(store.slice_block(block_size))
 
+    def raw_block_entries_aligned(
+        self, channels: list[str], block_size: int
+    ) -> dict[str, list[dict]]:
+        """Return multi-channel aligned block_size entries.
+
+        Takes the latest ``block_size`` entries per channel and truncates
+        all to the shortest channel's length so array indices are aligned
+        across channels.  Used by the joint detector to stack sibling
+        channels' scores into a (T, n_channels) matrix for co-anomaly
+        consensus.
+
+        Returns an empty dict if any requested channel is missing — the
+        caller should skip joint detection in that case.
+        """
+        with self._lock:
+            per_channel: dict[str, list[dict]] = {}
+            min_len = block_size
+            for ch in channels:
+                store = self._channels.get(ch)
+                if store is None:
+                    return {}  # missing channel → caller skips
+                entries = store.slice_block(block_size)
+                per_channel[ch] = entries
+                if len(entries) < min_len:
+                    min_len = len(entries)
+            if min_len == 0:
+                return {}
+            # Truncate all to the shortest (keeps the most-recent tail).
+            return {ch: entries[-min_len:] for ch, entries in per_channel.items()}
+
     def all_channel_scores(self, block_size: int) -> dict[str, list[float]]:
         """Per-channel score arrays (length ≤ block_size).  Used by the
         health service to compute the channel/system health values."""
