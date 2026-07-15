@@ -1,5 +1,6 @@
 """Tests for Django API views (22 endpoints, URL paths identical to FastAPI)."""
 import json
+from unittest.mock import patch
 
 import pytest
 from django.test import Client, TestCase
@@ -26,13 +27,21 @@ class TestPollForecastConfigResetHealthSensors(TestCase):
     def test_post_config(self):
         # Non-empty tree — empty trees are refused by ConfigService.save
         # safety guard (prevents accidental wipe of device config).
+        #
+        # IMPORTANT: mock ConfigService.save so the test does NOT overwrite
+        # the real device_config.json on disk.  The view's behaviour (status
+        # code + response shape) is still fully exercised; only the file
+        # write is intercepted.
         body = {"device_tree": [
             {"id": "t1", "name": "S1", "type": "sensor",
              "sourceId": "virtual:sine", "channelName": "VS-sine", "blockSize": 512},
         ], "aggregation_strategy": "min"}
-        resp = self.client.post('/api/config', data=json.dumps(body), content_type='application/json')
-        assert resp.status_code == 200
-        assert resp.json()['status'] == 'ok'
+        with patch.object(services_bridge.get_container().config, 'save',
+                          return_value={"status": "ok"}) as mock_save:
+            resp = self.client.post('/api/config', data=json.dumps(body), content_type='application/json')
+            assert resp.status_code == 200
+            assert resp.json()['status'] == 'ok'
+            mock_save.assert_called_once()
 
     def test_post_empty_config_refused(self):
         """Empty device_tree must be refused — safety guard against config wipe."""

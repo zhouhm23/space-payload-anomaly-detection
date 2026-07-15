@@ -312,6 +312,15 @@ class SyntheticConfig:
     noise_floor: float = 0.0          # baseline noise added to clean signal
     anomaly_every: int = 0            # inject a spike every N samples (0=off)
     anomaly_magnitude: float = 3.0
+    # Random anomaly injection: each read() call has ``anomaly_prob`` chance
+    # of injecting a realistic degradation pattern (drift or spike burst)
+    # into the block.  This makes the synthetic source produce a MIX of
+    # normal and anomalous data — essential for testing false-alarm
+    # filtering, because a source that is always normal only generates
+    # false positives (TSPulse misfires) but never true positives.
+    anomaly_prob: float = 0.0         # 0=off, 0.15≈every 6-7 blocks
+    anomaly_type: str = "drift"       # "drift" (gradual offset) or "spike" (burst)
+    random_seed: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -320,9 +329,17 @@ class SyntheticConfig:
 
 # Preset virtual sensors registered in the global list
 _VIRTUAL_PRESETS: dict[str, SyntheticConfig] = {
-    "sine": SyntheticConfig(signal_type="sine", frequency=0.02, amplitude=1.0),
+    "sine": SyntheticConfig(
+        signal_type="sine", frequency=0.02, amplitude=1.0,
+        anomaly_prob=0.12, anomaly_type="drift", anomaly_magnitude=1.5,
+        random_seed=42,
+    ),
     "square": SyntheticConfig(signal_type="square", frequency=0.02, amplitude=1.0),
-    "multi_sine": SyntheticConfig(signal_type="multi_sine", frequency=0.02, amplitude=1.0),
+    "multi_sine": SyntheticConfig(
+        signal_type="multi_sine", frequency=0.02, amplitude=1.0,
+        anomaly_prob=0.15, anomaly_type="spike", anomaly_magnitude=2.5,
+        random_seed=99,
+    ),
     "chirp": SyntheticConfig(signal_type="chirp", frequency=0.01, amplitude=1.0),
 }
 
@@ -393,6 +410,30 @@ class VirtualSensorSource(SensorSource):
         if cfg.anomaly_every > 0:
             spike_mask = (t.astype(int) % cfg.anomaly_every) < 3
             signal[spike_mask] += cfg.anomaly_magnitude
+
+        # Random anomaly injection — makes the synthetic source produce a
+        # realistic mix of normal and anomalous blocks.  Without this, the
+        # source is always normal and only tests TSPulse false positives,
+        # never true positives.
+        if cfg.anomaly_prob > 0:
+            rng = np.random.default_rng(cfg.random_seed)
+            cfg.random_seed = (cfg.random_seed or 0) + 1
+            if rng.random() < cfg.anomaly_prob:
+                if cfg.anomaly_type == "drift":
+                    # Gradual baseline drift: signal offset ramps up over
+                    # the block, simulating slow degradation (e.g. thermal
+                    # drift, sensor aging).  Harder to detect than a spike.
+                    ramp = np.linspace(0, cfg.anomaly_magnitude, n)
+                    signal += ramp
+                else:
+                    # Spike burst: a short segment of high-amplitude noise,
+                    # simulating a sudden transient (e.g. switching event,
+                    # particle hit).  ~15% of the block affected.
+                    burst_start = int(rng.integers(0, max(1, n // 2)))
+                    burst_len = max(1, n // 8)
+                    burst = rng.normal(0, cfg.anomaly_magnitude, burst_len)
+                    end = min(burst_start + burst_len, n)
+                    signal[burst_start:end] += burst[:end - burst_start]
 
         self._t += n
 

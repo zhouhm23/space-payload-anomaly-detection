@@ -2,9 +2,9 @@
 
 Aggregates the per-channel detection context (three-layer cascade output,
 recent telemetry statistics, historical alerts, device-tree position,
-offline calibration) into a structured prompt, calls an OpenAI-compatible
-chat-completions API, and returns a Markdown diagnosis report covering
-root-cause analysis and trend assessment.
+offline calibration) into a structured prompt **plus a PNG waveform chart**,
+calls an OpenAI-compatible vision-capable chat API, and returns a Markdown
+diagnosis report covering root-cause analysis and trend assessment.
 
 The service is **on-demand** — it only runs when a user requests a
 diagnosis for a specific alert/warning.  Diagnosis results are cached
@@ -14,16 +14,26 @@ re-calling the LLM.  A structured ``llm_verdict`` (real / false_alarm /
 uncertain) is parsed from the report and written back to the
 WarningEntry (predicted) or alert_records row (measured).
 
+Vision-model approach (Day17-续4): the alert-time waveform is rendered as
+a 2-panel PNG chart (raw values + anomaly scores with threshold line) and
+sent as a base64 image to a vision LLM (GLM-4V-Flash).  Comparative
+experiments showed GLM-4V-Flash + PNG achieves 75% accuracy on a mixed
+alert set (5 real / 7 false-alarm), versus 0-58% for text-only models.
+The vision model can "see" waveform shape (periodicity, amplitude
+changes, step jumps) that text statistics cannot convey.
+
 Configuration is via standard environment variables so any
 OpenAI-compatible provider works::
 
     OPENAI_API_KEY=sk-...
-    OPENAI_BASE_URL=https://api.deepseek.com/v1   # or any compatible endpoint
-    LLM_MODEL=deepseek-chat                        # default chat model
+    OPENAI_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+    LLM_MODEL=GLM-4V-Flash                           # vision-capable model
 """
 
 from __future__ import annotations
 
+import base64
+import io
 import logging
 import os
 import re
@@ -33,6 +43,12 @@ from typing import Any
 
 import httpx
 import numpy as np
+
+# Matplotlib for rendering waveform PNG charts for vision LLM input.
+# Use the non-interactive Agg backend — this runs in a server thread.
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from ..config import (
     ANOMALY_THRESHOLD,
@@ -49,23 +65,59 @@ _SYSTEM_PROMPT = """你是航天器有效载荷健康管理（PHM）分析师。
 
 重要：告警已触发不代表一定是真实异常。检测模型（TSPulse 重建误差）会产生误报，尤其在周期性波形、数据漂移、短窗口等情况下。你需要基于数据独立判断，不要预设告警为真。
 
-报告格式（Markdown），不要复述输入数据：
+数据中有用 █▇▆▅▄▃▂▁ 字符表示的波形迷你图（█=高值，▁=低值，从左到右是时间顺序）。请像看图表一样从波形形态判断：原始值波形是否有突变/漂移/异常振幅？异常分数波形是否有明显的尖峰？
+
+判定依据优先级（从高到低）：
+1. 异常分数相对正常基线的偏离：若告警时刻分数超出正常段 p95 的 3σ 以上，这是强证据，即使原始值偏离不大也应认真考虑（检测模型能捕获人眼难以察觉的模式变化）。
+2. 原始值波形的形态变化：突变、振幅异常、基线漂移比单纯偏离均值更有意义。请直接看波形迷你图判断。
+3. 周期性波形本身不是误报的理由——周期信号里的振幅/相位/基线变化同样可能是真实异常。
+
+请按以下格式输出你的诊断报告。注意：必须给出你自己的判断和分析，不要照抄下面的格式说明。
 
 ## 判断结论
-先给出你的判断，四选一：真实物理异常 / 传感器或采集异常 / 模型误报 / 数据不足无法判定。一句话结论 + 关键依据。
+（从以下四个选项中选择一个，并说明依据：真实物理异常、传感器或采集异常、模型误报、数据不足无法判定）
 
 ## 依据分析
-对比当前数值与正常基线（如有）：偏离幅度是否足够大、是否超出正常波动范围、级联各层分数是否一致支持异常。两三句话。
+（对比异常分数与正常基线、观察波形形态变化、综合各层证据，写你自己的观察，两三句话）
 
 ## 置信度
-高/中/低 + 一句话理由。
+（从高、中、低中选择一个，并说明理由）
 
-最后另起一行输出结构化判断，三选一：
-VERDICT: real          （判定为真实异常）
-VERDICT: false_alarm   （判定为误报）
-VERDICT: uncertain     （无法确定）
+最后另起一行，从以下三个选项中选择一个输出你的最终判断：
+VERDICT: real
+VERDICT: false_alarm
+VERDICT: uncertain
 
-判定原则：只有当偏离幅度显著超出正常波动、且多层检测一致支持时才判 real；若偏离在正常范围内或仅单层触发，倾向于 false_alarm 或 uncertain。用中文，简洁，只基于数据，不编造。总长不超过 300 字。"""
+用中文，简洁，只基于数据，不编造。总长不超过 300 字。"""
+
+
+_VISION_SYSTEM_PROMPT = """你是航天器有效载荷健康管理（PHM）分析师。你将收到一张告警时刻的波形图和配套的统计数据。图中上方是遥测原始值波形（512点），下方是异常分数波形，红色虚线是异常阈值。
+
+请像人类专家看监控图一样判断这条告警是真实异常还是误报。
+
+判定依据：
+1. 异常分数是否显著超过阈值（不只是擦线）？
+2. 原始值波形是否有突变、漂移、振幅异常等真实异常特征？
+3. 周期性波形里的振幅/基线变化也可能是真异常，不要仅因"看起来周期性"就判误报。
+4. 结合文本中的正常基线对比（异常分数相对正常段 p95 的偏离倍数）。
+
+请按以下格式输出你的诊断报告。注意：必须给出你自己的判断和分析，不要照抄下面的格式说明。
+
+## 判断结论
+（从以下四个选项中选择一个，并说明依据：真实物理异常、传感器或采集异常、模型误报、数据不足）
+
+## 依据分析
+（从波形形态和统计数据两方面分析，写你自己的观察，两三句话）
+
+## 置信度
+（从高、中、低中选择一个，并说明理由）
+
+最后另起一行，从以下三个选项中选择一个输出你的最终判断：
+VERDICT: real
+VERDICT: false_alarm
+VERDICT: uncertain
+
+用中文，简洁，只基于数据，不编造。总长不超过 300 字。"""
 
 
 class DiagnosisService:
@@ -196,7 +248,21 @@ class DiagnosisService:
             }
 
         user_prompt = self._build_prompt(channel, context)
-        text, err = self._call_llm(user_prompt)
+        # Render a PNG waveform chart from the alert-time snapshot for the
+        # vision LLM.  The chart + text prompt together give the LLM both
+        # visual waveform shape and quantitative statistics.
+        raw_snap = context.get("snapshot_raw")
+        score_snap = context.get("snapshot_scores")
+        image_b64 = None
+        if raw_snap:
+            try:
+                threshold = context.get("summary", {}).get("threshold", 0.5)
+                image_b64 = self._render_chart_b64(
+                    raw_snap, score_snap or [], channel, threshold,
+                )
+            except Exception:
+                logger.debug("chart render failed for %s", channel, exc_info=True)
+        text, err = self._call_llm(user_prompt, image_b64=image_b64)
         elapsed = round(time.time() - t0, 2)
         verdict = self._parse_verdict(text) if text else None
         result = {
@@ -384,7 +450,7 @@ class DiagnosisService:
         predict_scores = self.warning_service._latest_predict_scores.get(channel)
 
         # Device-tree position + display name.
-        display_name, device_path = self._resolve_device(channel)
+        display_name, device_path, description = self._resolve_device(channel)
 
         if cascade_dict is None and not recent_rows and snapshot_raw is None:
             return None
@@ -411,9 +477,44 @@ class DiagnosisService:
         # Cascade layer summary (decisions + scores + rules).
         layer_summary = self._summarise_cascade(cascade_dict)
 
+        # For measured alerts, the ground-side cascade reflects the
+        # ground's PREDICTION-segment evaluation — a different data slice
+        # than what the space segment actually flagged.  This mismatch
+        # causes the LLM to see a final_score=0 (ground eval found nothing)
+        # while the alert was triggered by the space-segment TSPulse.
+        # When we have the alert-time snapshot scores (the authoritative
+        # detection result), prefer them over the mismatched ground cascade.
+        if alert_type == "measured" and snapshot_scores:
+            scores_arr = np.array(snapshot_scores, dtype=np.float64)
+            snapshot_l2 = float(scores_arr.max())
+            layer_summary = {
+                "final_score": snapshot_l2,
+                "l1_decision": layer_summary.get("l1_decision") if layer_summary else None,
+                "l1_score": layer_summary.get("l1_score", 0.0) if layer_summary else 0.0,
+                "l2_score": snapshot_l2,
+                "l3_score": layer_summary.get("l3_score", 0.0) if layer_summary else 0.0,
+                "l3_rules": layer_summary.get("l3_rules", []) if layer_summary else [],
+                "flip": layer_summary.get("flip") if layer_summary else None,
+                "_source": "snapshot",
+            }
+        elif layer_summary is None and snapshot_scores:
+            # Fallback for any alert type when cascade is entirely missing.
+            scores_arr = np.array(snapshot_scores, dtype=np.float64)
+            layer_summary = {
+                "final_score": float(scores_arr.max()),
+                "l1_decision": None,
+                "l1_score": 0.0,
+                "l2_score": float(scores_arr.max()),
+                "l3_score": 0.0,
+                "l3_rules": [],
+                "flip": None,
+                "_source": "snapshot",
+            }
+
         summary = {
             "channel": channel,
             "display_name": display_name,
+            "description": description,
             "device_path": device_path,
             "alert_type": alert_type,
             "threshold": ANOMALY_THRESHOLD,
@@ -437,6 +538,8 @@ class DiagnosisService:
             "layer_summary": layer_summary,
             "display_name": display_name,
             "device_path": device_path,
+            "snapshot_raw": snapshot_raw,
+            "snapshot_scores": snapshot_scores,
         }
 
     # ------------------------------------------------------------------
@@ -448,12 +551,22 @@ class DiagnosisService:
         ws = s["window_stats"]
         ls = s["cascade"]
         lines = [
-            f"通道：{channel}" + (f"（{s['display_name']}）" if s["display_name"] else ""),
-            f"设备位置：{s['device_path'] or '未知'}",
+            f"传感器：{s['display_name'] or channel}",
+        ]
+        # Sensor description — the most important context for a human analyst.
+        # Without knowing what physical quantity this sensor measures, the LLM
+        # cannot judge whether a deviation is meaningful (e.g. a 0.1°C drift on
+        # a temperature sensor vs a 0.1A spike on a current sensor).
+        desc = s.get("description")
+        if desc:
+            lines.append(f"传感器描述：{desc}")
+        if s["device_path"]:
+            lines.append(f"设备位置：{s['device_path']}")
+        lines += [
             f"数据来源：{'实测段（space端TSPulse检测）' if s['alert_type']=='measured' else '预测段（ground端级联检测）'}",
             f"异常阈值：{s['threshold']}",
             "",
-            f"【最近 {s['n_recent_points']} 点遥测统计】",
+            f"【告警时刻波形】（附图：上方=原始值，下方=异常分数，红色虚线=阈值）",
         ]
         if ws:
             lines += [
@@ -474,14 +587,16 @@ class DiagnosisService:
         if wf:
             lines += [
                 "",
-                "【波形形态分析】（降采样到 32 点，保留时间结构）",
+                "【波形形态分析】（512 点降采样到 32 点，█=高 ▁=低，从左=早到右=晚）",
                 f"- 异常分数峰值位置：{wf['score_peak_pos']}",
                 f"- 异常宽度：{wf['score_width']}（超阈值占比 {wf['score_over_frac']:.1%}）",
                 f"- 异常分数最大值：{wf['score_max']:.4f}",
                 f"- 原始值趋势：{wf['raw_trend']}",
                 f"- 周期性：{wf['raw_periodicity']}",
-                f"- 原始值降采样（32点，从左到右）：{wf['raw_downsample']}",
-                f"- 异常分数降采样（32点，从左到右）：{wf['score_downsample']}",
+                f"- 原始值波形：{wf.get('raw_sparkline', '')}",
+                f"- 异常分数波形：{wf.get('score_sparkline', '')}",
+                f"- 原始值数值（32点）：{wf['raw_downsample']}",
+                f"- 异常分数数值（32点）：{wf['score_downsample']}",
             ]
 
         # Normal-baseline contrast — let the LLM judge whether the current
@@ -497,12 +612,29 @@ class DiagnosisService:
                 f"- 当前值相对正常基线偏离：{dev_sigma:.1f}σ"
                 + ("（超出正常波动范围）" if dev_sigma > 3 else "（在正常波动范围内）"),
             ]
+            # Score-based baseline comparison — the most informative signal
+            # for distinguishing real anomalies from false alarms.  Compares
+            # the alert-time peak score against what the detection model
+            # normally outputs on this channel's normal data.
+            if "score_mean" in bl and wf:
+                alert_score = wf.get("score_max", 0)
+                score_std = bl["score_std"] if bl["score_std"] > 1e-9 else 1e-9
+                alert_sigma = (alert_score - bl["score_mean"]) / score_std
+                lines += [
+                    f"- 正常段异常分数：mean={bl['score_mean']:.4f}, "
+                    f"std={bl['score_std']:.4f}, p95={bl['score_p95']:.4f}",
+                    f"- 告警时刻异常分数峰值：{alert_score:.4f}"
+                    f"（是正常段均值的 {alert_sigma:.1f}σ，"
+                    f"{'超出' if alert_score > bl['score_p95'] else '未超'} 正常段 p95）",
+                ]
 
         lines += ["", "【三层级联检测结果】"]
         if ls:
+            src_tag = "（来源：告警时刻快照）" if ls.get("_source") == "snapshot" else ""
             lines += [
                 f"- 最终异常分数：{ls['final_score']:.4f}"
-                + (f"（L1={ls['l1_decision']}/{ls['l1_score']:.3f}）" if ls.get("l1_decision") else ""),
+                + (f"（L1={ls['l1_decision']}/{ls['l1_score']:.3f}）" if ls.get("l1_decision") else "")
+                + src_tag,
                 f"- L2 深度检测（TSPulse）：score={ls['l2_score']:.4f}"
                 + (f"，方向翻转={'是' if ls.get('flip') else '否'}" if ls.get("flip") is not None else ""),
                 f"- L3 物理约束：score={ls['l3_score']:.4f}"
@@ -518,6 +650,8 @@ class DiagnosisService:
                 f"【未来 {s['predict_horizon']} 点预测】",
                 f"- 预测段最大异常分数：{s['predict_max_score']:.4f}"
                 + f"（阈值 {s['threshold']:.2f}，为阈值的 {ratio:.1f} 倍）",
+                "- 注意：预测模型（TTM-R3）存在已知的振幅低估缺陷，"
+                "低预测分数不代表异常会消失，仅作参考。",
             ]
 
         lines += [
@@ -529,39 +663,108 @@ class DiagnosisService:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
+    # Waveform chart rendering for vision LLM input
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _render_chart_b64(
+        raw: list[float], score: list[float], channel: str,
+        threshold: float = 0.5,
+    ) -> str | None:
+        """Render a 2-panel waveform chart (raw + score) as base64 PNG.
+
+        The chart gives a vision LLM the same visual information a human
+        analyst sees on the monitoring dashboard: the raw telemetry
+        waveform and the anomaly-score waveform with the detection
+        threshold line, side by side over the same 512-sample window.
+
+        Returns ``None`` if the input data is insufficient to render.
+        """
+        if not raw or len(raw) == 0:
+            return None
+        raw_arr = np.array(raw, dtype=np.float64)
+        x = np.arange(len(raw_arr))
+        score_arr = (
+            np.array(score, dtype=np.float64) if score and len(score) > 0 else None
+        )
+
+        fig, axes = plt.subplots(
+            2 if score_arr is not None else 1, 1,
+            figsize=(8, 4), dpi=80, sharex=True,
+        )
+        if score_arr is None:
+            axes = [axes]
+
+        # Top panel: raw telemetry values.
+        axes[0].plot(x, raw_arr, color="#2d8cf0", linewidth=0.8)
+        axes[0].set_ylabel("Raw Value", fontsize=9)
+        axes[0].set_title(f"Channel {channel} — Alert-time Waveform", fontsize=10)
+        axes[0].grid(True, alpha=0.3)
+        axes[0].tick_params(labelsize=8)
+
+        # Bottom panel: anomaly scores with threshold line.
+        if score_arr is not None and len(axes) > 1:
+            axes[1].plot(x, score_arr, color="#ff9900", linewidth=0.8)
+            axes[1].axhline(
+                y=threshold, color="red", linestyle="--", linewidth=1,
+                label=f"threshold={threshold}",
+            )
+            axes[1].set_ylabel("Anomaly Score", fontsize=9)
+            axes[1].set_xlabel("Sample (512 points)", fontsize=9)
+            axes[1].set_ylim(-0.05, 1.05)
+            axes[1].legend(fontsize=8)
+            axes[1].grid(True, alpha=0.3)
+            axes[1].tick_params(labelsize=8)
+
+        plt.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=80)
+        plt.close(fig)
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode("utf-8")
+
+    # ------------------------------------------------------------------
     # LLM API call
     # ------------------------------------------------------------------
 
-    def _call_llm(self, user_prompt: str) -> tuple[str, str | None]:
-        """Call the chat-completions endpoint. Returns (text, error)."""
+    def _call_llm(
+        self, user_prompt: str, image_b64: str | None = None,
+    ) -> tuple[str, str | None]:
+        """Call the chat-completions endpoint. Returns (text, error).
+
+        When ``image_b64`` is provided (a base64-encoded PNG), the request
+        uses the vision-capable multimodal message format (``image_url`` +
+        ``text`` content blocks).  This requires a vision model (e.g.
+        GLM-4V-Flash).  When ``image_b64`` is ``None``, falls back to the
+        plain text format for backward compatibility with text-only models.
+        """
         url = f"{self.base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        # Build the user message: vision format (image + text) when a chart
+        # is available, plain text otherwise.
+        if image_b64:
+            user_content = [
+                {"type": "image_url", "image_url": {
+                    "url": f"data:image/png;base64,{image_b64}",
+                }},
+                {"type": "text", "text": user_prompt},
+            ]
+        else:
+            user_content = user_prompt
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
+                {"role": "system", "content": _VISION_SYSTEM_PROMPT if image_b64 else _SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
             ],
-            # temperature=0.3 (raised from 0.1) — the diagnosis prompt must
-            # counter a strong prior toward "real" (selective sampling feeds
-            # only alert evidence, no normal baseline).  A slightly higher
-            # temperature lets the model question the premise rather than
-            # defaulting to the alert-is-real bias baked into low-temp
-            # decoding.  Empirically 0.1 produced 84% "real" verdicts vs
-            # 30% false-alarm rate in human annotation.
             "temperature": 0.3,
             "max_tokens": 768,
-            # DeepSeek models default to thinking-enabled (chain-of-thought
-            # before the final answer), which doubles latency and makes
-            # temperature/top_p ineffective.  Disable it — the diagnosis
-            # task is straightforward and does not need reasoning traces.
-            "thinking": {"type": "disabled"},
         }
         try:
-            with httpx.Client(timeout=30.0) as client:
+            with httpx.Client(timeout=45.0) as client:
                 resp = client.post(url, json=payload, headers=headers)
             if resp.status_code != 200:
                 return "", f"LLM API returned {resp.status_code}: {resp.text[:200]}"
@@ -569,7 +772,7 @@ class DiagnosisService:
             text = data["choices"][0]["message"]["content"]
             return text.strip(), None
         except httpx.TimeoutException:
-            return "", "LLM API timeout (30s)"
+            return "", "LLM API timeout (45s)"
         except Exception as e:
             return "", f"LLM API error: {e}"
 
@@ -577,45 +780,62 @@ class DiagnosisService:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _resolve_device(self, channel: str) -> tuple[str | None, str | None]:
-        """Look up display name + device-tree path for a channel."""
+    def _resolve_device(self, channel: str) -> tuple[str | None, str | None, str | None]:
+        """Look up display name, device-tree path, and description for a channel.
+
+        Returns ``(display_name, device_path, description)``.  The description
+        is the human-readable sensor info (what physical quantity, unit,
+        normal range) that a human analyst needs to judge an alert — without
+        it the LLM is diagnosing a meaningless channel code like "C-1".
+        """
         try:
-            tree = self.config_service.config if self.config_service else None
+            if self.config_service is None:
+                return None, None, None
+            tree = self.config_service.load()
             if not tree:
-                return None, None
-            # Walk the tree to find the sensor whose sourceId maps to channel.
+                return None, None, None
             from ..services.tree_utils import get_flat_sensors
 
             sensors = get_flat_sensors(tree)
             path_parts = []
             display = None
+            description = None
             # Build a channel → folder-path map by walking the tree.
             def _walk(node, prefix):
-                nonlocal display
+                nonlocal display, description
                 if node.get("type") == "sensor":
                     sid = node.get("sourceId", "")
-                    if sid == channel or node.get("channel") == channel:
+                    # Match by sourceId (e.g. "file:NASA-MSL/C-1") or
+                    # channelName (e.g. "C-1").
+                    if sid == channel or node.get("channelName") == channel:
                         display = node.get("name")
+                        description = node.get("description")
                         path_parts.extend(prefix + [node.get("name", channel)])
                 else:
                     children = node.get("children", [])
                     for c in children:
                         _walk(c, prefix + [node.get("name", "")])
 
-            root = tree.get("device_tree", tree)
-            children = root.get("children", []) if isinstance(root, dict) else []
-            for c in children:
+            # tree is the full config dict: {"device_tree": [...], ...}
+            # device_tree is a LIST of top-level nodes (folders/sensors).
+            device_tree = tree.get("device_tree", []) if isinstance(tree, dict) else (tree if isinstance(tree, list) else [])
+            for c in device_tree:
                 _walk(c, [])
             if display is None:
                 # Fallback: linear search in flat sensors.
                 for sn in sensors:
-                    if sn.get("sourceId") == channel:
+                    if sn.get("sourceId") == channel or sn.get("channelName") == channel:
                         display = sn.get("name")
+                        description = sn.get("description")
                         break
-            return display, " / ".join(p for p in path_parts if p) or None
+            return (
+                display,
+                " / ".join(p for p in path_parts if p) or None,
+                description,
+            )
         except Exception:
             logger.debug("device resolve failed for %s", channel, exc_info=True)
-            return None, None
+            return None, None, None
 
     @staticmethod
     def _summarise_window(rows: list) -> dict | None:
@@ -797,7 +1017,34 @@ class DiagnosisService:
             "raw_periodicity": periodicity,
             "raw_downsample": [round(v, 4) for v in raw_downsample],
             "score_downsample": [round(v, 4) for v in score_downsample],
+            "raw_sparkline": DiagnosisService._to_sparkline(raw_downsample),
+            "score_sparkline": DiagnosisService._to_sparkline(score_downsample),
         }
+
+    # ── ASCII sparkline rendering ──────────────────────────────────────
+
+    _SPARK_CHARS = "▁▂▃▄▅▆▇█"
+
+    @staticmethod
+    def _to_sparkline(values: list[float]) -> str:
+        """Render a numeric array as a compact Unicode sparkline string.
+
+        Uses 8 block characters (▁..█) to map the value range, producing a
+        ~32-character single-line "mini chart" that a text LLM can visually
+        parse to recognise waveform shape (peaks, troughs, trends, periodicity)
+        — far more effectively than a flat list of numbers.
+        """
+        if not values:
+            return ""
+        arr = np.array(values, dtype=np.float64)
+        vmin, vmax = float(arr.min()), float(arr.max())
+        if vmax - vmin < 1e-9:
+            # Near-constant: render as mid-level line.
+            return DiagnosisService._SPARK_CHARS[3] * len(values)
+        # Normalise to [0, 7] and map to spark chars.
+        norm = (arr - vmin) / (vmax - vmin) * (len(DiagnosisService._SPARK_CHARS) - 1)
+        indices = np.clip(np.round(norm).astype(int), 0, len(DiagnosisService._SPARK_CHARS) - 1)
+        return "".join(DiagnosisService._SPARK_CHARS[i] for i in indices)
 
     def _compute_baseline(self, channel: str) -> dict | None:
         """Normal-segment baseline for a channel.
@@ -827,13 +1074,26 @@ class DiagnosisService:
         raws = np.array([r["raw_value"] for r in normal], dtype=np.float64)
         mu, sigma = float(raws.mean()), float(raws.std())
         sigma = sigma if sigma > 1e-9 else 1e-9
-        return {
+        # Also compute normal-segment anomaly-score stats — this lets the
+        # LLM compare the alert-time score against what the model normally
+        # outputs on this channel, which is far more informative than
+        # comparing against a fixed threshold alone.
+        normal_scores = np.array(
+            [r["anomaly_score"] for r in normal if r.get("anomaly_score") is not None],
+            dtype=np.float64,
+        )
+        result = {
             "mean": mu,
             "std": sigma,
             "min": float(raws.min()),
             "max": float(raws.max()),
             "n": len(normal),
         }
+        if len(normal_scores) > 0:
+            result["score_mean"] = float(normal_scores.mean())
+            result["score_std"] = float(normal_scores.std())
+            result["score_p95"] = float(np.percentile(normal_scores, 95))
+        return result
 
     @staticmethod
     def _summarise_cascade(cascade_dict: dict | None) -> dict | None:

@@ -11,7 +11,8 @@
           "type": "sensor",
           "sourceId": "file:NASA-MSL/C-1",
           "channelName": "C-1",
-          "blockSize": 512
+          "blockSize": 512,
+          "description": "载荷电子箱主控电流监测通道。实时采集主控模块供电电流，经归一化处理。正常工作时呈周期性波动（受温控循环影响），异常表现为持续偏高或波形畸变。"
         },
         {
           "id": "node-1784093658477",
@@ -19,7 +20,8 @@
           "type": "sensor",
           "sourceId": "file:NASA-MSL/D-14",
           "channelName": "D-14",
-          "blockSize": 512
+          "blockSize": 512,
+          "description": "载荷驱动机构位移反馈通道。监测驱动电机位置传感器输出，归一化值。正常时随机构动作产生阶梯式变化，异常表现为卡滞（信号不动）或抖动（高频噪声）。"
         }
       ]
     },
@@ -34,7 +36,8 @@
           "type": "sensor",
           "sourceId": "virtual:sine",
           "channelName": "VS-sine",
-          "blockSize": 512
+          "blockSize": 512,
+          "description": "电源总线电压监测传感器。采集二次电源输出电压，归一化值。正常时随负载变化呈周期性波动，异常表现为缓变漂移（热效应）或尖峰干扰（切换瞬态）。"
         }
       ]
     }
