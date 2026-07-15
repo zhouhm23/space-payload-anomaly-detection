@@ -60,7 +60,9 @@ CREATE TABLE IF NOT EXISTS detection_results (
     l3_score        REAL,
     l3_rules        TEXT,          -- JSON array of rule names
     final_score     REAL,
-    ingested_at     REAL    NOT NULL DEFAULT (unixepoch())
+    ingested_at     REAL    NOT NULL DEFAULT (unixepoch()),
+    is_deleted      INTEGER NOT NULL DEFAULT 0,   -- 0=normal, 1=soft-deleted
+    deleted_at      REAL                               -- soft-delete timestamp
 );
 CREATE INDEX IF NOT EXISTS idx_det_channel_time ON detection_results(channel, timestamp);
 
@@ -76,7 +78,11 @@ CREATE TABLE IF NOT EXISTS alert_records (
     verified_at REAL,
     llm_verdict  TEXT,               -- real / false_alarm / uncertain (NULL = not diagnosed)
     human_verdict TEXT,              -- real / false_alarm / uncertain (NULL = not annotated)
-    ingested_at REAL    NOT NULL DEFAULT (unixepoch())
+    raw_snapshot  TEXT,              -- JSON: raw waveform at alert time (measured alerts only)
+    score_snapshot TEXT,             -- JSON: per-sample anomaly scores at alert time
+    ingested_at REAL    NOT NULL DEFAULT (unixepoch()),
+    is_deleted  INTEGER NOT NULL DEFAULT 0,   -- 0=normal, 1=soft-deleted
+    deleted_at  REAL                               -- soft-delete timestamp
 );
 CREATE INDEX IF NOT EXISTS idx_alert_channel_time ON alert_records(channel, created_at);
 
@@ -91,7 +97,9 @@ CREATE TABLE IF NOT EXISTS diagnosis_records (
     elapsed_sec     REAL,
     error           TEXT,
     llm_verdict     TEXT,               -- real / false_alarm / uncertain (parsed from report)
-    created_at      REAL    NOT NULL DEFAULT (unixepoch())
+    created_at      REAL    NOT NULL DEFAULT (unixepoch()),
+    is_deleted      INTEGER NOT NULL DEFAULT 0,   -- 0=normal, 1=soft-deleted
+    deleted_at      REAL                               -- soft-delete timestamp
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_diag_key ON diagnosis_records(channel, alert_type, alert_ts);
 """
@@ -178,6 +186,8 @@ class SQLiteStore:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(_SCHEMA)
         self._migrate_verdict_columns()
+        self._migrate_soft_delete_columns()
+        self._migrate_snapshot_columns()
         logger.info("SQLiteStore initialised: %s", self.db_path)
 
     def _migrate_verdict_columns(self) -> None:
@@ -198,6 +208,44 @@ class SQLiteStore:
                     logger.info("Migrated %s: added column %s", table, col)
                 except Exception:
                     logger.warning("Failed to add column %s to %s", col, table, exc_info=True)
+
+    def _migrate_soft_delete_columns(self) -> None:
+        """Add is_deleted/deleted_at to the three business tables if they
+        don't exist (backward compat with pre-existing DBs created before
+        the soft-delete feature)."""
+        if self._conn is None:
+            return
+        for table in ("detection_results", "alert_records", "diagnosis_records"):
+            cols = [r[1] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            if "is_deleted" not in cols:
+                try:
+                    self._conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0"
+                    )
+                    logger.info("Migrated %s: added column is_deleted", table)
+                except Exception:
+                    logger.warning("Failed to add is_deleted to %s", table, exc_info=True)
+            if "deleted_at" not in cols:
+                try:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN deleted_at REAL")
+                    logger.info("Migrated %s: added column deleted_at", table)
+                except Exception:
+                    logger.warning("Failed to add deleted_at to %s", table, exc_info=True)
+
+    def _migrate_snapshot_columns(self) -> None:
+        """Add raw_snapshot/score_snapshot to alert_records if they don't
+        exist (backward compat with pre-existing DBs created before the
+        alert-snapshot feature)."""
+        if self._conn is None:
+            return
+        for col in ("raw_snapshot", "score_snapshot"):
+            cols = [r[1] for r in self._conn.execute("PRAGMA table_info(alert_records)").fetchall()]
+            if col not in cols:
+                try:
+                    self._conn.execute(f"ALTER TABLE alert_records ADD COLUMN {col} TEXT")
+                    logger.info("Migrated alert_records: added column %s", col)
+                except Exception:
+                    logger.warning("Failed to add %s to alert_records", col, exc_info=True)
 
     # Per-channel telemetry tables: each channel gets its own table
     # (e.g. ``telemetry_C_1``, ``telemetry_VS_multi_sine``) so channels
@@ -370,12 +418,19 @@ class SQLiteStore:
         """Enqueue an alert/warning record.
 
         Expected keys: ``channel``, ``type`` (or ``alert_type``), ``score``,
-        ``message``, ``time`` (or ``created_at``), ``status``.
+        ``message``, ``time`` (or ``created_at``), ``status``,
+        ``raw_snapshot`` (list, measured alerts), ``score_snapshot`` (list).
         """
         if not self.enabled:
             return
         alert_type = alert.get("alert_type") or alert.get("type", "measured")
         created = alert.get("created_at") or alert.get("time", time.time())
+        # Serialize snapshots to JSON strings now (before they hit the
+        # background flush thread, which doesn't know about list→TEXT).
+        raw_snap = alert.get("raw_snapshot")
+        score_snap = alert.get("score_snapshot")
+        raw_json = json.dumps(raw_snap) if raw_snap is not None else None
+        score_json = json.dumps(score_snap) if score_snap is not None else None
         self._queue.put([
             "alert",
             alert.get("channel", ""),
@@ -385,6 +440,8 @@ class SQLiteStore:
             float(created),
             alert.get("status", "active"),
             alert.get("verified_at"),
+            raw_json,
+            score_json,
         ])
 
     # ------------------------------------------------------------------
@@ -460,7 +517,7 @@ class SQLiteStore:
             for r in flat if r[0] == "det"
         ]
         alert_rows = [
-            (r[1], r[2], r[3], r[4], r[5], r[6], r[7])
+            (r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9])
             for r in flat if r[0] == "alert"
         ]
         # Predictions are now individual UPSERTs into the unified telemetry
@@ -499,8 +556,9 @@ class SQLiteStore:
                 if alert_rows:
                     self._conn.executemany(
                         """INSERT INTO alert_records
-                           (channel, alert_type, score, message, created_at, status, verified_at)
-                           VALUES (?,?,?,?,?,?,?)""",
+                           (channel, alert_type, score, message, created_at, status, verified_at,
+                            raw_snapshot, score_snapshot)
+                           VALUES (?,?,?,?,?,?,?,?,?)""",
                         alert_rows,
                     )
                 # Pred rows: group by channel, same per-channel table.
@@ -744,7 +802,7 @@ class SQLiteStore:
         sql = (
             "SELECT channel, timestamp, l1_decision, l1_score, l1_detail, "
             "l2_score, l3_score, l3_rules, final_score "
-            "FROM detection_results WHERE 1=1"
+            "FROM detection_results WHERE is_deleted = 0"
         )
         params: list = []
         if channel:
@@ -787,8 +845,8 @@ class SQLiteStore:
             return []
         sql = (
             "SELECT id, channel, alert_type, score, message, created_at, status, verified_at, "
-            "llm_verdict, human_verdict "
-            "FROM alert_records ORDER BY created_at DESC LIMIT ?"
+            "llm_verdict, human_verdict, raw_snapshot, score_snapshot "
+            "FROM alert_records WHERE is_deleted = 0 ORDER BY created_at DESC LIMIT ?"
         )
         try:
             cur = self._conn.execute(sql, [limit])
@@ -800,6 +858,14 @@ class SQLiteStore:
         for r in reversed(rows):
             llm_v = r[8]
             human_v = r[9]
+            try:
+                raw_snap = json.loads(r[10]) if r[10] else None
+            except (json.JSONDecodeError, TypeError):
+                raw_snap = None
+            try:
+                score_snap = json.loads(r[11]) if r[11] else None
+            except (json.JSONDecodeError, TypeError):
+                score_snap = None
             results.append({
                 "id": r[0],
                 "channel": r[1],
@@ -811,6 +877,8 @@ class SQLiteStore:
                 "verified_at": r[7],
                 "llm_verdict": llm_v,
                 "human_verdict": human_v,
+                "raw_snapshot": raw_snap,
+                "score_snapshot": score_snap,
                 "final_status": compute_final_status(r[6], llm_v, human_v),
             })
         return results
@@ -826,7 +894,8 @@ class SQLiteStore:
         try:
             row = self._conn.execute(
                 "SELECT diagnosis, context_summary, elapsed_sec, error, created_at, llm_verdict "
-                "FROM diagnosis_records WHERE channel=? AND alert_type=? AND alert_ts=?",
+                "FROM diagnosis_records WHERE is_deleted = 0 "
+                "AND channel=? AND alert_type=? AND alert_ts=?",
                 [channel, alert_type, alert_ts],
             ).fetchone()
             if row is None:
@@ -873,7 +942,7 @@ class SQLiteStore:
         try:
             cur = self._conn.execute(
                 "SELECT channel, alert_type, alert_ts, llm_verdict FROM diagnosis_records "
-                "ORDER BY created_at DESC LIMIT ?",
+                "WHERE is_deleted = 0 ORDER BY created_at DESC LIMIT ?",
                 [limit],
             )
             return [
@@ -898,6 +967,10 @@ class SQLiteStore:
 
         If *channel* is given, deletes from that channel's per-channel
         table.  If None, deletes from ALL telemetry_* tables.
+
+        Note: telemetry uses HARD delete (unlike alert/detection/diagnosis
+        which are soft-deleted).  Telemetry is high-volume rolling data
+        with no audit value — soft-deleting would make tables grow forever.
         """
         if not self.enabled or self._conn is None:
             return 0
@@ -943,16 +1016,47 @@ class SQLiteStore:
         start_time: float | None = None,
         end_time: float | None = None,
     ) -> int:
-        """Delete detection-result rows matching the filter.
+        """Soft-delete detection-result rows matching the filter.
 
+        Marks rows as ``is_deleted=1`` (does not physically remove them).
         Note the time column is ``timestamp`` here, not ``received_at``.
         """
-        return self._delete_rows(
+        return self._soft_delete(
             "detection_results", "timestamp",
             channel=channel, start_time=start_time, end_time=end_time,
         )
 
-    def _delete_rows(
+    def delete_alert(
+        self,
+        channel: str | None = None,
+        start_time: float | None = None,
+        end_time: float | None = None,
+    ) -> int:
+        """Soft-delete alert records matching the filter.
+
+        Marks rows as ``is_deleted=1``.  Time column is ``created_at``.
+        """
+        return self._soft_delete(
+            "alert_records", "created_at",
+            channel=channel, start_time=start_time, end_time=end_time,
+        )
+
+    def delete_diagnosis(
+        self,
+        channel: str | None = None,
+        start_time: float | None = None,
+        end_time: float | None = None,
+    ) -> int:
+        """Soft-delete diagnosis records matching the filter.
+
+        Marks rows as ``is_deleted=1``.  Time column is ``alert_ts``.
+        """
+        return self._soft_delete(
+            "diagnosis_records", "alert_ts",
+            channel=channel, start_time=start_time, end_time=end_time,
+        )
+
+    def _soft_delete(
         self,
         table: str,
         time_col: str,
@@ -961,10 +1065,10 @@ class SQLiteStore:
         start_time: float | None,
         end_time: float | None,
     ) -> int:
-        """Shared DELETE builder for a table with ``channel`` + time column."""
+        """Shared soft-delete builder: marks matching rows ``is_deleted=1``."""
         if not self.enabled or self._conn is None:
             return 0
-        sql = f"DELETE FROM {table} WHERE 1=1"
+        sql = f"UPDATE {table} SET is_deleted = 1, deleted_at = unixepoch() WHERE is_deleted = 0"
         params: list = []
         if channel:
             sql += " AND channel = ?"
@@ -980,7 +1084,33 @@ class SQLiteStore:
                 cur = self._conn.execute(sql, params)
                 return cur.rowcount if cur.rowcount is not None else 0
         except Exception:
-            logger.warning("delete from %s failed", table, exc_info=True)
+            logger.warning("soft-delete from %s failed", table, exc_info=True)
+            return 0
+
+    def purge_deleted(self, table: str, older_than: float | None = None) -> int:
+        """Physically remove soft-deleted rows (admin maintenance).
+
+        Args:
+            table: one of ``detection_results`` / ``alert_records`` /
+                ``diagnosis_records``.
+            older_than: if given, only purge rows whose ``deleted_at`` is
+                older than this epoch timestamp.  If None, purge all.
+        """
+        if not self.enabled or self._conn is None:
+            return 0
+        if table not in ("detection_results", "alert_records", "diagnosis_records"):
+            return 0
+        sql = f"DELETE FROM {table} WHERE is_deleted = 1"
+        params: list = []
+        if older_than is not None:
+            sql += " AND deleted_at IS NOT NULL AND deleted_at <= ?"
+            params.append(older_than)
+        try:
+            with self._write_lock:
+                cur = self._conn.execute(sql, params)
+                return cur.rowcount if cur.rowcount is not None else 0
+        except Exception:
+            logger.warning("purge from %s failed", table, exc_info=True)
             return 0
 
     # Statuses the frontend may set via PATCH /api/alerts/{id}.
@@ -1002,7 +1132,8 @@ class SQLiteStore:
         try:
             with self._write_lock:
                 cur = self._conn.execute(
-                    "UPDATE alert_records SET status = ?, verified_at = ? WHERE id = ?",
+                    "UPDATE alert_records SET status = ?, verified_at = ? "
+                    "WHERE id = ? AND is_deleted = 0",
                     [status, time.time(), alert_id],
                 )
                 return cur.rowcount > 0
@@ -1032,7 +1163,7 @@ class SQLiteStore:
             with self._write_lock:
                 cur = self._conn.execute(
                     f"UPDATE alert_records SET {col} = ? "
-                    f"WHERE channel = ? AND created_at = ?",
+                    f"WHERE channel = ? AND created_at = ? AND is_deleted = 0",
                     [verdict, channel, alert_ts],
                 )
                 return cur.rowcount > 0
@@ -1056,8 +1187,12 @@ class SQLiteStore:
                 n_tel += cnt
                 ch_name = t[len("telemetry_"):]
                 tel_by_channel[ch_name] = cnt
-            n_det = self._conn.execute("SELECT COUNT(*) FROM detection_results").fetchone()[0]
-            n_alert = self._conn.execute("SELECT COUNT(*) FROM alert_records").fetchone()[0]
+            n_det = self._conn.execute(
+                "SELECT COUNT(*) FROM detection_results WHERE is_deleted = 0"
+            ).fetchone()[0]
+            n_alert = self._conn.execute(
+                "SELECT COUNT(*) FROM alert_records WHERE is_deleted = 0"
+            ).fetchone()[0]
         except Exception:
             return {"enabled": True, "error": "query_failed"}
         return {

@@ -225,6 +225,9 @@ class WarningService:
                 predict_start=predict_start,
                 predict_end=predict_end,
                 max_predict_score=max_pred,
+                raw_snapshot=raw_values.tolist() if hasattr(raw_values, 'tolist') else list(raw_values),
+                pred_snapshot=prediction.tolist() if hasattr(prediction, 'tolist') else list(prediction),
+                score_snapshot=predict_scores.tolist() if hasattr(predict_scores, 'tolist') else list(predict_scores),
             )
             if entry is not None:
                 created = entry.to_dict()

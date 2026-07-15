@@ -70,6 +70,13 @@ class AlertPacket:
     step: int
     timestamp: float = field(default_factory=time.time)
     message: str = ""
+    # Snapshot of the raw waveform + per-sample scores that triggered this
+    # alert (captured at space-segment detection time).  Stored so the
+    # ground segment and LLM diagnosis can inspect the triggering waveform
+    # without relying on a later telemetry-table lookup (which may have
+    # scrolled past the alert point by the time diagnosis runs).
+    raw_window: list | None = None
+    score_window: list | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -109,13 +116,15 @@ class SpaceServer:
         })
 
     def enqueue_alert(self, channel: str, score: float, step: int,
-                      message: str = ""):
+                      message: str = "", *, raw_window=None, score_window=None):
         self._enqueue({
             "type": "alert",
             "channel": channel,
             "score": score,
             "step": step,
             "message": message,
+            "raw_window": raw_window,
+            "score_window": score_window,
         })
 
     def start(self):
@@ -243,6 +252,8 @@ class GroundClient:
                         score=obj["score"],
                         step=obj["step"],
                         message=obj.get("message", ""),
+                        raw_window=obj.get("raw_window"),
+                        score_window=obj.get("score_window"),
                     ))
         except (socket.timeout, ConnectionRefusedError, OSError):
             pass

@@ -138,7 +138,7 @@ def alerts_view(request: HttpRequest):
 def alerts_history_view(request: HttpRequest):
     limit = min(max(int(request.GET.get('limit', 50)), 1), 500)
     from .models import AlertRecord
-    qs = AlertRecord.objects.order_by('-created_at')[:limit]
+    qs = AlertRecord.objects.filter(is_deleted=0).order_by('-created_at')[:limit]
     alerts = []
     for a in qs:
         alerts.append({
@@ -249,8 +249,8 @@ def detection_view(request: HttpRequest):
     if request.method == "GET":
         limit = min(max(int(request.GET.get('limit', 50)), 1), 500)
         from .models import DetectionResult
-        qs = DetectionResult.objects.order_by('-timestamp')[:limit] if channel is None \
-            else DetectionResult.objects.filter(channel=channel).order_by('-timestamp')[:limit]
+        qs = DetectionResult.objects.filter(is_deleted=0).order_by('-timestamp')[:limit] if channel is None \
+            else DetectionResult.objects.filter(channel=channel, is_deleted=0).order_by('-timestamp')[:limit]
         rows = []
         for d in qs:
             # l1_detail / l3_rules are stored as JSON TEXT in SQLiteStore;

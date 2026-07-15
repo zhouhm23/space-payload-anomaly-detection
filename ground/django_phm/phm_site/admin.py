@@ -1,8 +1,20 @@
-"""SimpleUI admin configuration for PHM data tables."""
+"""SimpleUI admin configuration for PHM data tables.
+
+Two delete actions are provided per table:
+  - **「软删除（可恢复）」** — custom action, marks ``is_deleted=1``,
+    executes immediately (no confirmation page, because it's reversible).
+  - **「删除选中项」** — Django's built-in ``delete_selected`` (with its
+    confirmation page), physically removes the rows.  The irreversible
+    operation gets the confirmation step.
+
+``get_queryset`` filters out soft-deleted rows so they don't clutter
+the admin list view.
+"""
 
 from __future__ import annotations
 
 import datetime
+import time
 
 from django.contrib import admin
 
@@ -23,8 +35,25 @@ def _fmt_utc(ts) -> str:
         return str(ts)
 
 
+class SoftDeleteModelAdmin(admin.ModelAdmin):
+    """Base admin: soft-delete action (reversible, no confirm) + built-in
+    hard-delete action (irreversible, has Django's confirmation page)."""
+
+    actions = ['soft_delete', 'delete_selected']
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).filter(is_deleted=0)
+
+    @admin.action(description='软删除（可恢复）')
+    def soft_delete(self, request, queryset):
+        """Mark selected rows is_deleted=1.  Reversible via direct SQL,
+        so no confirmation page needed."""
+        n = queryset.update(is_deleted=1, deleted_at=time.time())
+        self.message_user(request, f"已软删除 {n} 条记录（可在数据库中恢复）")
+
+
 @admin.register(AlertRecord)
-class AlertRecordAdmin(admin.ModelAdmin):
+class AlertRecordAdmin(SoftDeleteModelAdmin):
     """告警历史表 — 支持筛选 + 直接编辑人工标注."""
     list_display = (
         'id', 'channel', 'alert_type', 'score', 'created_at_display',
@@ -50,7 +79,7 @@ class AlertRecordAdmin(admin.ModelAdmin):
 
 
 @admin.register(DetectionResult)
-class DetectionResultAdmin(admin.ModelAdmin):
+class DetectionResultAdmin(SoftDeleteModelAdmin):
     """检测明细表 — 按通道/L1决策筛选."""
     list_display = ('id', 'channel', 'timestamp_display', 'l1_decision', 'final_score', 'ingested_at_display')
     list_display_links = ('id', 'channel')
@@ -68,8 +97,8 @@ class DetectionResultAdmin(admin.ModelAdmin):
 
 
 @admin.register(DiagnosisRecord)
-class DiagnosisRecordAdmin(admin.ModelAdmin):
-    """诊断记录表 — 只读浏览."""
+class DiagnosisRecordAdmin(SoftDeleteModelAdmin):
+    """诊断记录表 — 只读浏览（字段只读，但仍可软删除）."""
     list_display = ('id', 'channel', 'alert_type', 'alert_ts_display', 'llm_verdict', 'elapsed_sec', 'created_at_display')
     list_display_links = ('id', 'channel')
     list_filter = ('llm_verdict', 'alert_type', 'channel')

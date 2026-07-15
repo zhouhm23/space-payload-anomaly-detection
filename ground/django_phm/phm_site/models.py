@@ -29,6 +29,8 @@ class DetectionResult(models.Model):
     l3_rules = models.TextField('L3规则', null=True, blank=True)
     final_score = models.FloatField('最终分数', null=True, blank=True)
     ingested_at = models.FloatField('入库时间')
+    is_deleted = models.IntegerField('已删除', default=0)
+    deleted_at = models.FloatField('删除时间', null=True, blank=True)
 
     class Meta:
         verbose_name = '检测明细'
@@ -60,7 +62,11 @@ class AlertRecord(models.Model):
     verified_at = models.FloatField('核验时间', null=True, blank=True)
     llm_verdict = models.CharField('LLM裁决', max_length=16, null=True, blank=True)
     human_verdict = models.CharField('人工裁决', max_length=16, null=True, blank=True)
+    raw_snapshot = models.TextField('原始波形快照', null=True, blank=True)
+    score_snapshot = models.TextField('分数快照', null=True, blank=True)
     ingested_at = models.FloatField('入库时间')
+    is_deleted = models.IntegerField('已删除', default=0)
+    deleted_at = models.FloatField('删除时间', null=True, blank=True)
 
     class Meta:
         verbose_name = '告警记录'
@@ -98,6 +104,8 @@ class DiagnosisRecord(models.Model):
     error = models.TextField('错误', null=True, blank=True)
     llm_verdict = models.CharField('LLM裁决', max_length=16, null=True, blank=True)
     created_at = models.FloatField('创建时间')
+    is_deleted = models.IntegerField('已删除', default=0)
+    deleted_at = models.FloatField('删除时间', null=True, blank=True)
 
     class Meta:
         verbose_name = '诊断记录'

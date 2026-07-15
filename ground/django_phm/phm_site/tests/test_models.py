@@ -73,3 +73,47 @@ class TestDiagnosisRecord(TestCase):
                 channel="C-1", alert_type="measured", alert_ts=1700000000.0,
                 created_at=1700000002.0,
             )
+
+
+@pytest.mark.django_db
+class TestSoftDeleteColumns(TestCase):
+    """Verify the is_deleted / deleted_at fields exist with correct defaults."""
+
+    def test_alert_has_soft_delete_fields(self):
+        a = AlertRecord.objects.create(
+            channel="C-1", alert_type="measured", created_at=1700000000.0,
+            ingested_at=1700000001.0,
+        )
+        assert a.is_deleted == 0
+        assert a.deleted_at is None
+
+    def test_detection_has_soft_delete_fields(self):
+        d = DetectionResult.objects.create(
+            channel="C-1", timestamp=1700000000.0, ingested_at=1700000001.0,
+        )
+        assert d.is_deleted == 0
+        assert d.deleted_at is None
+
+    def test_diagnosis_has_soft_delete_fields(self):
+        d = DiagnosisRecord.objects.create(
+            channel="C-1", alert_type="measured", alert_ts=1700000000.0,
+            created_at=1700000001.0,
+        )
+        assert d.is_deleted == 0
+        assert d.deleted_at is None
+
+    def test_mark_deleted_then_query_excludes(self):
+        """ORM queries should be able to filter is_deleted=0."""
+        AlertRecord.objects.create(
+            channel="C-1", alert_type="measured", created_at=1700000000.0,
+            ingested_at=1700000001.0, is_deleted=1,
+        )
+        AlertRecord.objects.create(
+            channel="C-2", alert_type="measured", created_at=1700000000.0,
+            ingested_at=1700000001.0,
+        )
+        visible = AlertRecord.objects.filter(is_deleted=0)
+        assert visible.count() == 1
+        assert visible.first().channel == "C-2"
+        all_rows = AlertRecord.objects.all()
+        assert all_rows.count() == 2

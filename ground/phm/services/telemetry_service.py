@@ -226,6 +226,8 @@ class TelemetryService:
                     "message": p.message or f"异常分数 {p.score:.3f} 超阈值",
                     "time": time.time(),
                     "type": "measured",
+                    "raw_snapshot": p.raw_window,
+                    "score_snapshot": p.score_window,
                 })
 
         return channel_entries, alerts_list, exhausted

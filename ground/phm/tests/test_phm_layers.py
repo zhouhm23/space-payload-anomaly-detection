@@ -127,6 +127,30 @@ class TestWarningStore:
         changed = ws.verify("C-1", [(far_future - 50.0, 0.99)])
         assert changed == 0
 
+    def test_add_pending_stores_snapshot(self):
+        """add_pending should store raw/pred/score snapshots for diagnosis."""
+        ws = WarningStore()
+        entry = ws.add_pending(
+            "C-1", predict_start=0.0, predict_end=1.0, max_predict_score=0.9,
+            raw_snapshot=[1.0, 2.0, 3.0],
+            pred_snapshot=[4.0, 5.0],
+            score_snapshot=[0.1, 0.2, 0.3],
+        )
+        assert entry is not None
+        d = entry.to_dict()
+        assert d["raw_snapshot"] == [1.0, 2.0, 3.0]
+        assert d["pred_snapshot"] == [4.0, 5.0]
+        assert d["score_snapshot"] == [0.1, 0.2, 0.3]
+
+    def test_add_pending_without_snapshot(self):
+        """add_pending without snapshots should default to None (backward compat)."""
+        ws = WarningStore()
+        entry = ws.add_pending("C-1", 0.0, 1.0, 0.9)
+        d = entry.to_dict()
+        assert d["raw_snapshot"] is None
+        assert d["pred_snapshot"] is None
+        assert d["score_snapshot"] is None
+
 
 # ---------------------------------------------------------------------------
 # WarningEntry four-dimension verdict system

@@ -74,6 +74,13 @@ class WarningEntry:
     # Dimension 4: human annotation verdict (real/false_alarm/uncertain, None = not annotated).
     human_verdict: str | None = None
     message: str = ""
+    # Snapshot of the data that triggered this predicted warning — captured
+    # at prediction time so LLM diagnosis can inspect the triggering waveform
+    # without relying on _latest_cascade / _latest_predict_scores (which get
+    # overwritten by the next eval cycle).
+    raw_snapshot: list | None = None
+    pred_snapshot: list | None = None
+    score_snapshot: list | None = None
 
     # -- backward-compat: `status` property mirrors verify_status --------
 
@@ -103,6 +110,9 @@ class WarningEntry:
             "final_status": final,
             "message": self.message,
             "type": "predicted",
+            "raw_snapshot": self.raw_snapshot,
+            "pred_snapshot": self.pred_snapshot,
+            "score_snapshot": self.score_snapshot,
         }
 
 
@@ -124,6 +134,10 @@ class WarningStore:
         predict_end: float,
         max_predict_score: float,
         message: str = "",
+        *,
+        raw_snapshot: list | None = None,
+        pred_snapshot: list | None = None,
+        score_snapshot: list | None = None,
     ) -> WarningEntry | None:
         """Create a new pending warning if one for the same (channel,
         window) is not already present.  Returns the entry, or None if a
@@ -145,6 +159,9 @@ class WarningStore:
                 max_predict_score=float(max_predict_score),
                 message=message or f"预测异常分数 {max_predict_score:.3f} > {ANOMALY_THRESHOLD}",
                 id=self._next_id,
+                raw_snapshot=raw_snapshot,
+                pred_snapshot=pred_snapshot,
+                score_snapshot=score_snapshot,
             )
             self._next_id += 1
             self._entries.append(entry)

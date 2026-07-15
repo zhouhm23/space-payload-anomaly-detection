@@ -271,6 +271,8 @@ def main():
                             channel=src.channel_name,
                             score=mx,
                             step=step,
+                            raw_window=raw.tolist() if hasattr(raw, 'tolist') else list(raw),
+                            score_window=scores.tolist() if scores is not None and hasattr(scores, 'tolist') else (list(scores) if scores is not None else None),
                         )
 
             if not any_data:

@@ -45,25 +45,27 @@ logger = logging.getLogger(__name__)
 __all__ = ["DiagnosisService"]
 
 
-_SYSTEM_PROMPT = """你是航天器有效载荷健康管理（PHM）专家。根据检测数据给出异常诊断报告。
+_SYSTEM_PROMPT = """你是航天器有效载荷健康管理（PHM）分析师。你的任务是判断一条告警是真实异常还是误报。
 
-直接输出报告，不要复述输入数据，不要展示思考过程。报告格式（Markdown）：
+重要：告警已触发不代表一定是真实异常。检测模型（TSPulse 重建误差）会产生误报，尤其在周期性波形、数据漂移、短窗口等情况下。你需要基于数据独立判断，不要预设告警为真。
 
-## 根因分析
-推测异常原因，分类为：传感器故障 / 数据漂移 / 真实异常 / 模型误报。一句话给结论 + 关键依据。
+报告格式（Markdown），不要复述输入数据：
 
-## 趋势评估
-分数走势、是否恶化、是否需干预。两三句话。
+## 判断结论
+先给出你的判断，四选一：真实物理异常 / 传感器或采集异常 / 模型误报 / 数据不足无法判定。一句话结论 + 关键依据。
+
+## 依据分析
+对比当前数值与正常基线（如有）：偏离幅度是否足够大、是否超出正常波动范围、级联各层分数是否一致支持异常。两三句话。
 
 ## 置信度
 高/中/低 + 一句话理由。
 
 最后另起一行输出结构化判断，三选一：
-VERDICT: real          （确认是真实异常）
-VERDICT: false_alarm   （判断为误报）
+VERDICT: real          （判定为真实异常）
+VERDICT: false_alarm   （判定为误报）
 VERDICT: uncertain     （无法确定）
 
-用中文，简洁，只基于数据，不编造。总长不超过 300 字。"""
+判定原则：只有当偏离幅度显著超出正常波动、且多层检测一致支持时才判 real；若偏离在正常范围内或仅单层触发，倾向于 false_alarm 或 uncertain。用中文，简洁，只基于数据，不编造。总长不超过 300 字。"""
 
 
 class DiagnosisService:
@@ -176,7 +178,7 @@ class DiagnosisService:
                 "cached": False,
             }
 
-        context = self._build_context(channel, alert_type)
+        context = self._build_context(channel, alert_type, alert_ts)
         if context is None:
             return {
                 "channel": channel,
@@ -303,12 +305,53 @@ class DiagnosisService:
     # Context aggregation
     # ------------------------------------------------------------------
 
-    def _build_context(self, channel: str, alert_type: str) -> dict | None:
+    def _build_context(self, channel: str, alert_type: str,
+                       alert_ts: float | None = None) -> dict | None:
         """Gather all data points the diagnosis prompt needs.
 
         Returns ``None`` if there is no detection data at all for the
         channel (the LLM would have nothing to analyse).
+
+        If *alert_ts* is provided, the method tries to read the alert-time
+        **snapshot** (raw/score waveform captured when the alert fired)
+        instead of the current telemetry window.  This is critical for
+        late diagnosis: by the time a user clicks "diagnose", the
+        telemetry table and in-memory ``_latest_cascade`` may have
+        scrolled far past the alert point.
         """
+        # --- Snapshot lookup (preferred over live telemetry) ---
+        snapshot_raw: list | None = None
+        snapshot_scores: list | None = None
+        snapshot_pred: list | None = None
+        snapshot_source: str = "none"
+
+        if alert_ts is not None:
+            if alert_type == "measured" and self.sqlite is not None:
+                # Find the alert record by (channel, created_at≈alert_ts).
+                for a in (self.sqlite.query_alerts(limit=200) or []):
+                    if a.get("channel") == channel and abs(
+                        (a.get("created_at") or 0) - alert_ts
+                    ) < 1.0:
+                        snapshot_raw = a.get("raw_snapshot")
+                        snapshot_scores = a.get("score_snapshot")
+                        if snapshot_raw is not None:
+                            snapshot_source = "alert_records"
+                        break
+            elif alert_type == "predicted":
+                # Find the WarningEntry by matching created_at.
+                ws = self.warning_service.warnings
+                for w in (ws.all() if hasattr(ws, "all") else []):
+                    w_dict = w if isinstance(w, dict) else (w.to_dict() if hasattr(w, "to_dict") else {})
+                    if w_dict.get("channel") == channel and abs(
+                        (w_dict.get("created_at") or 0) - alert_ts
+                    ) < 1.0:
+                        snapshot_raw = w_dict.get("raw_snapshot")
+                        snapshot_pred = w_dict.get("pred_snapshot")
+                        snapshot_scores = w_dict.get("score_snapshot")
+                        if snapshot_raw is not None:
+                            snapshot_source = "warning_entry"
+                        break
+
         # Latest cascade (three-layer detail with per-point scores).
         cascade: CascadeOutput | None = self.warning_service._latest_cascade.get(channel)
         cascade_dict = cascade.to_dict(max_detail=False) if cascade else None
@@ -339,12 +382,25 @@ class DiagnosisService:
         # Device-tree position + display name.
         display_name, device_path = self._resolve_device(channel)
 
-        if cascade_dict is None and not recent_rows:
+        if cascade_dict is None and not recent_rows and snapshot_raw is None:
             return None
 
-        # Compact numeric summary of the recent window (avoid dumping 512
-        # raw numbers into the prompt).
-        window_stats = self._summarise_window(recent_rows)
+        # Window stats: prefer the alert-time snapshot if available (it
+        # captures the exact waveform that triggered the alert).  Fall back
+        # to the current telemetry window for old data without snapshots.
+        if snapshot_raw is not None:
+            window_stats = self._summarise_snapshot(snapshot_raw, snapshot_pred)
+            if snapshot_source != "none":
+                logger.debug("diagnosis using %s snapshot for %s", snapshot_source, channel)
+        else:
+            window_stats = self._summarise_window(recent_rows)
+
+        # Normal-baseline contrast: from a wider history window, extract
+        # rows whose anomaly_score is below threshold (i.e. "normal" samples)
+        # and compute their mean/std.  This gives the LLM a reference for
+        # "how much does the current value deviate vs. normal fluctuation",
+        # countering the prior that any alert must be real.
+        baseline_stats = self._compute_baseline(channel)
 
         # Cascade layer summary (decisions + scores + rules).
         layer_summary = self._summarise_cascade(cascade_dict)
@@ -357,6 +413,7 @@ class DiagnosisService:
             "threshold": ANOMALY_THRESHOLD,
             "n_recent_points": len(recent_rows),
             "window_stats": window_stats,
+            "baseline": baseline_stats,
             "cascade": layer_summary,
             "n_history_alerts": len(history),
             "history_statuses": [h.get("status", "?") for h in history][:5],
@@ -387,7 +444,7 @@ class DiagnosisService:
         lines = [
             f"通道：{channel}" + (f"（{s['display_name']}）" if s["display_name"] else ""),
             f"设备位置：{s['device_path'] or '未知'}",
-            f"告警类型：{'实测告警（space段TSPulse）' if s['alert_type']=='measured' else '预测预警（ground段级联）'}",
+            f"数据来源：{'实测段（space端TSPulse检测）' if s['alert_type']=='measured' else '预测段（ground端级联检测）'}",
             f"异常阈值：{s['threshold']}",
             "",
             f"【最近 {s['n_recent_points']} 点遥测统计】",
@@ -404,6 +461,20 @@ class DiagnosisService:
         else:
             lines.append("- （无遥测数据）")
 
+        # Normal-baseline contrast — let the LLM judge whether the current
+        # deviation is truly outside normal fluctuation.
+        bl = s.get("baseline")
+        if bl and ws:
+            dev_sigma = abs(ws["raw_last"] - bl["mean"]) / bl["std"]
+            lines += [
+                "",
+                f"【正常基线对比】（{bl['n']} 个正常样本，anomaly_score<{s['threshold']}）",
+                f"- 正常段原始值：mean={bl['mean']:.4f}, std={bl['std']:.4f}, "
+                f"range=[{bl['min']:.4f}, {bl['max']:.4f}]",
+                f"- 当前值相对正常基线偏离：{dev_sigma:.1f}σ"
+                + ("（超出正常波动范围）" if dev_sigma > 3 else "（在正常波动范围内）"),
+            ]
+
         lines += ["", "【三层级联检测结果】"]
         if ls:
             lines += [
@@ -418,18 +489,19 @@ class DiagnosisService:
             lines.append("- （无级联检测数据）")
 
         if s["predict_max_score"] is not None:
+            ratio = s["predict_max_score"] / s["threshold"] if s["threshold"] else 0
             lines += [
                 "",
                 f"【未来 {s['predict_horizon']} 点预测】",
                 f"- 预测段最大异常分数：{s['predict_max_score']:.4f}"
-                + ("（超过阈值，预示恶化）" if s["predict_max_score"] > s["threshold"] else "（低于阈值）"),
+                + f"（阈值 {s['threshold']:.2f}，为阈值的 {ratio:.1f} 倍）",
             ]
 
         lines += [
             "",
             f"【历史告警】过去共 {s['n_history_alerts']} 条，最近状态：{s['history_statuses'] or '无'}",
             "",
-            "请给出诊断报告。",
+            "请判断本条告警是真实异常还是误报，并给出依据。",
         ]
         return "\n".join(lines)
 
@@ -450,7 +522,14 @@ class DiagnosisService:
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": 0.1,
+            # temperature=0.3 (raised from 0.1) — the diagnosis prompt must
+            # counter a strong prior toward "real" (selective sampling feeds
+            # only alert evidence, no normal baseline).  A slightly higher
+            # temperature lets the model question the premise rather than
+            # defaulting to the alert-is-real bias baked into low-temp
+            # decoding.  Empirically 0.1 produced 84% "real" verdicts vs
+            # 30% false-alarm rate in human annotation.
+            "temperature": 0.3,
             "max_tokens": 768,
             # DeepSeek models default to thinking-enabled (chain-of-thought
             # before the final answer), which doubles latency and makes
@@ -538,6 +617,72 @@ class DiagnosisService:
             "raw_last_sigma": abs(float(raws[-1]) - mu) / sigma,
             "pred_last": float(preds[-1]) if preds else None,
             "n": len(raws),
+        }
+
+    @staticmethod
+    def _summarise_snapshot(raw_vals: list, pred_vals: list | None = None) -> dict | None:
+        """Compact statistics over an alert-time snapshot (raw waveform).
+
+        Unlike ``_summarise_window`` which takes telemetry row dicts,
+        this takes the raw list of floats captured at alert time — so
+        it reflects the exact waveform that triggered the alert, not
+        the current telemetry window which may have scrolled past.
+        """
+        if not raw_vals:
+            return None
+        raws = np.array(raw_vals, dtype=np.float64)
+        if len(raws) == 0:
+            return None
+        mu, sigma = float(raws.mean()), float(raws.std())
+        sigma = sigma if sigma > 1e-9 else 1e-9
+        pred_last = None
+        if pred_vals and len(pred_vals) > 0:
+            pred_last = float(pred_vals[-1])
+        return {
+            "raw_mean": mu,
+            "raw_std": sigma,
+            "raw_min": float(raws.min()),
+            "raw_max": float(raws.max()),
+            "raw_last": float(raws[-1]),
+            "raw_last_sigma": abs(float(raws[-1]) - mu) / sigma,
+            "pred_last": pred_last,
+            "n": len(raws),
+        }
+
+    def _compute_baseline(self, channel: str) -> dict | None:
+        """Normal-segment baseline for a channel.
+
+        Queries a wider history window (2048 points) and extracts rows
+        whose ``anomaly_score`` is below the detection threshold (i.e.
+        "normal" samples).  Returns their mean/std so the LLM can compare
+        the current deviation against normal fluctuation.
+
+        Returns ``None`` if there are insufficient normal samples.
+        """
+        if self.sqlite is None:
+            return None
+        try:
+            win = self.sqlite.query_window(channel, count=2048)
+            rows = (win or {}).get("data", []) if isinstance(win, dict) else []
+        except Exception:
+            logger.debug("baseline query_window failed for %s", channel, exc_info=True)
+            return None
+        normal = [
+            r for r in rows
+            if r.get("raw_value") is not None
+            and (r.get("anomaly_score") or 0) < ANOMALY_THRESHOLD
+        ]
+        if len(normal) < 30:
+            return None
+        raws = np.array([r["raw_value"] for r in normal], dtype=np.float64)
+        mu, sigma = float(raws.mean()), float(raws.std())
+        sigma = sigma if sigma > 1e-9 else 1e-9
+        return {
+            "mean": mu,
+            "std": sigma,
+            "min": float(raws.min()),
+            "max": float(raws.max()),
+            "n": len(normal),
         }
 
     @staticmethod

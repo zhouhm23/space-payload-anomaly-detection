@@ -578,3 +578,185 @@ class TestDiagnosisVerdictColumn:
         diag_cols = [c[1] for c in s._conn.execute("PRAGMA table_info(diagnosis_records)").fetchall()]
         assert "llm_verdict" in diag_cols
         s.close()
+
+
+class TestSoftDelete:
+    """Tests for the soft-delete feature (is_deleted / deleted_at)."""
+
+    def test_schema_has_soft_delete_columns(self, store):
+        """All three business tables should have is_deleted + deleted_at."""
+        for table in ("detection_results", "alert_records", "diagnosis_records"):
+            cols = [c[1] for c in store._conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            assert "is_deleted" in cols, f"{table} missing is_deleted"
+            assert "deleted_at" in cols, f"{table} missing deleted_at"
+
+    def test_migration_adds_soft_delete_columns(self, tmp_path):
+        """Pre-existing DB without soft-delete columns gets them on open."""
+        import sqlite3 as _sqlite3
+        db = tmp_path / "old_softdel.db"
+        conn = _sqlite3.connect(str(db))
+        conn.execute(
+            "CREATE TABLE alert_records (id INTEGER PRIMARY KEY, channel TEXT, "
+            "alert_type TEXT, score REAL, message TEXT, created_at REAL, "
+            "status TEXT DEFAULT 'active', verified_at REAL, "
+            "llm_verdict TEXT, human_verdict TEXT, ingested_at REAL)"
+        )
+        conn.execute(
+            "CREATE TABLE detection_results (id INTEGER PRIMARY KEY, channel TEXT, "
+            "timestamp REAL, l1_decision TEXT, l1_score REAL, l1_detail TEXT, "
+            "l2_score REAL, l3_score REAL, l3_rules TEXT, final_score REAL, ingested_at REAL)"
+        )
+        conn.execute(
+            "CREATE TABLE diagnosis_records (id INTEGER PRIMARY KEY, channel TEXT, "
+            "alert_type TEXT, alert_ts REAL, diagnosis TEXT, context_summary TEXT, "
+            "elapsed_sec REAL, error TEXT, llm_verdict TEXT, created_at REAL)"
+        )
+        conn.commit()
+        conn.close()
+        s = SQLiteStore(db, batch_size=5, flush_interval=0.5, enabled=True)
+        s.start()
+        for table in ("alert_records", "detection_results", "diagnosis_records"):
+            cols = [c[1] for c in s._conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            assert "is_deleted" in cols
+            assert "deleted_at" in cols
+        s.close()
+
+    def test_delete_alert_soft_deletes(self, store):
+        """delete_alert marks rows is_deleted=1, query_alerts hides them."""
+        store.enqueue_alert({"channel": "C-1", "type": "measured", "score": 0.8, "time": 1000.0})
+        store.enqueue_alert({"channel": "C-2", "type": "measured", "score": 0.9, "time": 2000.0})
+        time.sleep(1.0)
+        assert len(store.query_alerts()) == 2
+        n = store.delete_alert(channel="C-1")
+        assert n == 1
+        alerts = store.query_alerts()
+        assert len(alerts) == 1
+        assert alerts[0]["channel"] == "C-2"
+
+    def test_delete_alert_by_time_range(self, store):
+        store.enqueue_alert({"channel": "C-1", "type": "measured", "score": 0.8, "time": 1000.0})
+        store.enqueue_alert({"channel": "C-2", "type": "measured", "score": 0.9, "time": 2000.0})
+        time.sleep(1.0)
+        n = store.delete_alert(start_time=1500.0)
+        assert n == 1
+        alerts = store.query_alerts()
+        assert len(alerts) == 1
+        assert alerts[0]["channel"] == "C-1"
+
+    def test_delete_detection_soft_deletes(self, store):
+        cascade = CascadeOutput(
+            channel="C-1",
+            final_scores=np.array([0.1], dtype=np.float32),
+            layers=[],
+        )
+        store.enqueue_detection("C-1", 5000.0, cascade)
+        time.sleep(1.0)
+        assert len(store.query_detection()) == 1
+        n = store.delete_detection(channel="C-1")
+        assert n == 1
+        assert store.query_detection() == []
+
+    def test_delete_diagnosis_soft_deletes(self, store):
+        store.save_diagnosis("C-1", "measured", 7000.0, "report", {}, 1.0, None, "real")
+        assert store.get_diagnosis("C-1", "measured", 7000.0) is not None
+        n = store.delete_diagnosis(channel="C-1")
+        assert n == 1
+        assert store.get_diagnosis("C-1", "measured", 7000.0) is None
+        assert store.list_diagnosis_keys() == []
+
+    def test_update_verdict_skips_deleted(self, store):
+        """update_alert_verdict should not update soft-deleted rows."""
+        store.enqueue_alert({"channel": "C-1", "type": "measured", "score": 0.8, "time": 1000.0})
+        time.sleep(1.0)
+        store.delete_alert(channel="C-1")
+        ok = store.update_alert_verdict("C-1", 1000.0, "real")
+        assert ok is False
+
+    def test_purge_deleted_alerts(self, store):
+        """purge_deleted physically removes soft-deleted rows."""
+        store.enqueue_alert({"channel": "C-1", "type": "measured", "score": 0.8, "time": 1000.0})
+        time.sleep(1.0)
+        store.delete_alert(channel="C-1")
+        n = store.purge_deleted("alert_records")
+        assert n == 1
+        # Verify physically gone
+        count = store._conn.execute(
+            "SELECT COUNT(*) FROM alert_records WHERE is_deleted = 1"
+        ).fetchone()[0]
+        assert count == 0
+
+    def test_purge_deleted_invalid_table(self, store):
+        """purge_deleted rejects unknown table names."""
+        assert store.purge_deleted("bogus_table") == 0
+
+    def test_stats_excludes_deleted(self, store):
+        """stats() should only count non-deleted rows."""
+        store.enqueue_alert({"channel": "C-1", "type": "measured", "score": 0.8, "time": 1000.0})
+        store.enqueue_alert({"channel": "C-2", "type": "measured", "score": 0.9, "time": 2000.0})
+        time.sleep(1.0)
+        store.delete_alert(channel="C-1")
+        stats = store.stats()
+        assert stats["alert_records"] == 1
+
+    def test_delete_history_still_hard_deletes(self, store):
+        """Telemetry tables use HARD delete (no soft-delete columns)."""
+        t0 = time.time()
+        for i in range(3):
+            store.enqueue_telemetry("C-1", float(i), 0.1, t0 + i)
+        time.sleep(1.0)
+        n = store.delete_history(channel="C-1")
+        assert n == 3
+        # Verify physically removed
+        assert store.query_history("C-1") == []
+
+
+class TestAlertSnapshot:
+    """Tests for raw_snapshot / score_snapshot on alert_records."""
+
+    def test_schema_has_snapshot_columns(self, store):
+        cols = [c[1] for c in store._conn.execute("PRAGMA table_info(alert_records)").fetchall()]
+        assert "raw_snapshot" in cols
+        assert "score_snapshot" in cols
+
+    def test_enqueue_alert_with_snapshot_roundtrip(self, store):
+        """enqueue_alert with raw_snapshot/score_snapshot → query_alerts returns them."""
+        store.enqueue_alert({
+            "channel": "C-1", "type": "measured", "score": 0.85,
+            "time": 1000.0,
+            "raw_snapshot": [0.1, 0.2, 0.3, 0.4, 0.5],
+            "score_snapshot": [0.1, 0.5, 0.9, 0.3, 0.2],
+        })
+        time.sleep(1.0)
+        alerts = store.query_alerts()
+        assert len(alerts) == 1
+        assert alerts[0]["raw_snapshot"] == [0.1, 0.2, 0.3, 0.4, 0.5]
+        assert alerts[0]["score_snapshot"] == [0.1, 0.5, 0.9, 0.3, 0.2]
+
+    def test_enqueue_alert_without_snapshot(self, store):
+        """Alerts without snapshots should have None (backward compat)."""
+        store.enqueue_alert({"channel": "C-1", "type": "measured", "score": 0.5, "time": 1000.0})
+        time.sleep(1.0)
+        alerts = store.query_alerts()
+        assert alerts[0]["raw_snapshot"] is None
+        assert alerts[0]["score_snapshot"] is None
+
+    def test_migration_adds_snapshot_columns(self, tmp_path):
+        """Pre-existing DB without snapshot columns gets them on open."""
+        import sqlite3 as _sqlite3
+        db = tmp_path / "old_snap.db"
+        conn = _sqlite3.connect(str(db))
+        conn.execute(
+            "CREATE TABLE alert_records (id INTEGER PRIMARY KEY, channel TEXT, "
+            "alert_type TEXT, score REAL, message TEXT, created_at REAL, "
+            "status TEXT DEFAULT 'active', verified_at REAL, "
+            "llm_verdict TEXT, human_verdict TEXT, ingested_at REAL, "
+            "is_deleted INTEGER DEFAULT 0, deleted_at REAL)"
+        )
+        conn.commit()
+        conn.close()
+        s = SQLiteStore(db, batch_size=5, flush_interval=0.5, enabled=True)
+        s.start()
+        cols = [c[1] for c in s._conn.execute("PRAGMA table_info(alert_records)").fetchall()]
+        assert "raw_snapshot" in cols
+        assert "score_snapshot" in cols
+        s.close()
