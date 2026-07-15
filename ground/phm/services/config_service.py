@@ -48,11 +48,23 @@ class ConfigService:
         # the key).  Default to "min" per Slice 0 spec.
         if "aggregation_strategy" not in body:
             body["aggregation_strategy"] = "min"
+        # Safety guard: refuse to save an empty device tree.  An empty tree
+        # would stop all auto-poll collection and wipe the existing config —
+        # almost always a mistake (e.g. frontend deleted all nodes then
+        # auto-saved).  Return the existing config unchanged instead.
+        tree = body.get("device_tree", [])
+        if not tree:
+            existing = self.load()
+            return {
+                "status": "error",
+                "message": "拒绝保存空设备树（安全保护）",
+                "current_tree": existing.get("device_tree", []),
+            }
         # Defensive uniqueness check: duplicate sourceId would make two
         # sensors share the same ring-buffer channel and SQLite table,
         # silently corrupting data.  The frontend also checks this, but a
         # client can bypass it.
-        dup = self._find_duplicate_source(body.get("device_tree", []))
+        dup = self._find_duplicate_source(tree)
         if dup:
             return {"status": "error", "message": f"重复的数据源标识: {dup}"}
         self.config_path.write_text(
@@ -61,7 +73,7 @@ class ConfigService:
         # Push tree to space segment via TCP (best-effort)
         try:
             client = GroundClient(host=self.space_host, port=self.space_port, timeout=2)
-            client.poll({"device_tree": body.get("device_tree", [])})
+            client.poll({"device_tree": tree})
         except Exception:
             pass
         return {"status": "ok"}

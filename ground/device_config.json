@@ -1,68 +1,48 @@
 {
   "device_tree": [
     {
-      "id": "node-1783924082334",
+      "id": "node-dataset",
       "name": "数据集",
       "type": "folder",
       "children": [
         {
-          "id": "node-1783872227648",
+          "id": "node-c1",
+          "name": "C-1 温度",
+          "type": "sensor",
+          "sourceId": "file:NASA-MSL/C-1",
+          "channelName": "C-1",
+          "blockSize": 512
+        },
+        {
+          "id": "node-d14",
           "name": "D-14",
           "type": "sensor",
           "sourceId": "file:NASA-MSL/D-14",
           "channelName": "D-14",
-          "blockSize": 512,
-          "position": {
-            "x": 0.25,
-            "y": 0.5,
-            "module": "组1"
-          }
-        },
-        {
-          "id": "node-1783917809294",
-          "name": "C-14",
-          "type": "sensor",
-          "sourceId": "file:NASA-MSL/C-1",
-          "channelName": "C-1",
-          "blockSize": 512,
-          "position": {
-            "x": 0.5,
-            "y": 0.5,
-            "module": "组1"
-          }
+          "blockSize": 512
         }
       ]
     },
     {
-      "id": "node-1783924103718",
+      "id": "node-virtual",
       "name": "模拟信号",
       "type": "folder",
       "children": [
         {
-          "id": "node-1783870440813",
+          "id": "node-vs-sine",
           "name": "正弦波",
           "type": "sensor",
           "sourceId": "virtual:sine",
           "channelName": "VS-sine",
-          "blockSize": 512,
-          "position": {
-            "x": 0.5,
-            "y": 0.74,
-            "module": "组2"
-          }
+          "blockSize": 512
         },
         {
-          "id": "node-1783872254463",
+          "id": "node-vs-multi-sine",
           "name": "多谐波",
           "type": "sensor",
           "sourceId": "virtual:multi_sine",
           "channelName": "VS-multi_sine",
-          "blockSize": 512,
-          "position": {
-            "x": 0.71,
-            "y": 0.5,
-            "module": "组2"
-          }
+          "blockSize": 512
         }
       ]
     }
