@@ -1543,21 +1543,20 @@
     autoSaveConfig();
   }
 
-  // 自动保存（静默、防抖 800ms）—— 增删改设备树后保证后端 config 与前端一致，
-  // 否则后端 health 聚合 / auto-poll 采集会漏掉前端新建的节点。
-  // 安全保护：空树不保存（防止误删全部节点导致配置丢失、auto-poll 停摆）。
-  let _autoSaveTimer = null;
+  // autoSaveConfig — DISABLED.
+  // The original debounced auto-save (800ms after every tree mutation) caused
+  // unintended device_config.json writes: the backfill() step on load adds
+  // channelName/blockSize to legacy nodes, and any subsequent edit would
+  // silently persist the backfilled tree. Users reported config changing
+  // without their action.
+  //
+  // Now a no-op — device tree changes require an explicit click on the 💾
+  // save button (saveConfig() below). The 3 call sites (drag / modal-edit /
+  // delete) remain in place but do nothing until saveConfig() is called.
+  // Permanent fix: migrate device-tree config editing to Django SimpleUI
+  // admin (requirement #13), which provides history-tracked editing.
   function autoSaveConfig() {
-    if(_autoSaveTimer) clearTimeout(_autoSaveTimer);
-    _autoSaveTimer = setTimeout(async () => {
-      _autoSaveTimer = null;
-      if(!state.deviceTree || state.deviceTree.length === 0) {
-        console.warn('autoSaveConfig skipped: device tree is empty (safety guard)');
-        return;
-      }
-      try { await api.saveConfig(state.deviceTree); }
-      catch(e) { console.warn('自动保存配置失败:', e); }
-    }, 800);
+    return;
   }
 
   async function saveConfig() {

@@ -1,7 +1,0 @@
-node_modules/
-dist/
-.vite/
-*.local
-.playwright/
-test-results/
-playwright-report/
