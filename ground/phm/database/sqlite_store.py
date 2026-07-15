@@ -549,16 +549,16 @@ class SQLiteStore:
                     self._conn.executemany(
                         """INSERT INTO detection_results
                            (channel, timestamp, l1_decision, l1_score, l1_detail,
-                            l2_score, l3_score, l3_rules, final_score)
-                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                            l2_score, l3_score, l3_rules, final_score, ingested_at, is_deleted)
+                           VALUES (?,?,?,?,?,?,?,?,?, unixepoch(), 0)""",
                         det_rows,
                     )
                 if alert_rows:
                     self._conn.executemany(
                         """INSERT INTO alert_records
                            (channel, alert_type, score, message, created_at, status, verified_at,
-                            raw_snapshot, score_snapshot)
-                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                            raw_snapshot, score_snapshot, ingested_at, is_deleted)
+                           VALUES (?,?,?,?,?,?,?,?,?, unixepoch(), 0)""",
                         alert_rows,
                     )
                 # Pred rows: group by channel, same per-channel table.
@@ -925,8 +925,8 @@ class SQLiteStore:
             self._conn.execute(
                 "INSERT OR REPLACE INTO diagnosis_records "
                 "(channel, alert_type, alert_ts, diagnosis, context_summary, "
-                " elapsed_sec, error, llm_verdict, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, unixepoch())",
+                " elapsed_sec, error, llm_verdict, created_at, is_deleted) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, unixepoch(), 0)",
                 [channel, alert_type, alert_ts, diagnosis,
                  _json.dumps(context_summary, ensure_ascii=False),
                  elapsed_sec, error, verdict],

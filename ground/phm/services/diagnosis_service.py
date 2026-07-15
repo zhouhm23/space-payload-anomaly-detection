@@ -134,7 +134,8 @@ class DiagnosisService:
     # ------------------------------------------------------------------
 
     def diagnose(self, channel: str, alert_type: str = "measured",
-                 alert_ts: float | None = None) -> dict:
+                 alert_ts: float | None = None,
+                 force_refresh: bool = False) -> dict:
         """Produce a diagnosis report for one channel.
 
         Args:
@@ -144,6 +145,9 @@ class DiagnosisService:
             alert_ts: the alert/warning timestamp — used as the cache key
                 so repeated clicks on the same alert return the stored
                 diagnosis without re-calling the LLM.
+            force_refresh: if True, bypass the cache and re-run the LLM.
+                Used after prompt/data changes so stale diagnoses are
+                regenerated with the latest code.
 
         Returns:
             ``{"channel", "alert_type", "diagnosis", "context_summary",
@@ -151,7 +155,7 @@ class DiagnosisService:
             ``diagnosis`` is empty and ``error`` carries the reason.
         """
         # Cache lookup — one diagnosis per unique (channel, type, alert_ts).
-        if alert_ts is not None and self.sqlite is not None:
+        if not force_refresh and alert_ts is not None and self.sqlite is not None:
             cached = self.sqlite.get_diagnosis(channel, alert_type, alert_ts)
             if cached is not None and cached.get("diagnosis"):
                 return {
@@ -389,7 +393,9 @@ class DiagnosisService:
         # captures the exact waveform that triggered the alert).  Fall back
         # to the current telemetry window for old data without snapshots.
         if snapshot_raw is not None:
-            window_stats = self._summarise_snapshot(snapshot_raw, snapshot_pred)
+            window_stats = self._summarise_snapshot(
+                snapshot_raw, snapshot_pred, snapshot_scores,
+            )
             if snapshot_source != "none":
                 logger.debug("diagnosis using %s snapshot for %s", snapshot_source, channel)
         else:
@@ -460,6 +466,23 @@ class DiagnosisService:
                 lines.append(f"- 预测值（最近）：{ws['pred_last']:.4f}")
         else:
             lines.append("- （无遥测数据）")
+
+        # Waveform shape — the KEY section that lets the LLM "see" what
+        # a human sees on a chart.  Without this, mean/std make a periodic
+        # sine and a mid-window step jump look identical.
+        wf = ws.get("waveform") if ws else None
+        if wf:
+            lines += [
+                "",
+                "【波形形态分析】（降采样到 32 点，保留时间结构）",
+                f"- 异常分数峰值位置：{wf['score_peak_pos']}",
+                f"- 异常宽度：{wf['score_width']}（超阈值占比 {wf['score_over_frac']:.1%}）",
+                f"- 异常分数最大值：{wf['score_max']:.4f}",
+                f"- 原始值趋势：{wf['raw_trend']}",
+                f"- 周期性：{wf['raw_periodicity']}",
+                f"- 原始值降采样（32点，从左到右）：{wf['raw_downsample']}",
+                f"- 异常分数降采样（32点，从左到右）：{wf['score_downsample']}",
+            ]
 
         # Normal-baseline contrast — let the LLM judge whether the current
         # deviation is truly outside normal fluctuation.
@@ -620,13 +643,21 @@ class DiagnosisService:
         }
 
     @staticmethod
-    def _summarise_snapshot(raw_vals: list, pred_vals: list | None = None) -> dict | None:
+    def _summarise_snapshot(
+        raw_vals: list, pred_vals: list | None = None,
+        score_vals: list | None = None,
+    ) -> dict | None:
         """Compact statistics over an alert-time snapshot (raw waveform).
 
         Unlike ``_summarise_window`` which takes telemetry row dicts,
         this takes the raw list of floats captured at alert time — so
         it reflects the exact waveform that triggered the alert, not
         the current telemetry window which may have scrolled past.
+
+        When ``score_vals`` is provided (per-sample anomaly scores from
+        the alert-time snapshot), waveform shape features are computed
+        so the LLM can "see" the anomaly's temporal structure instead
+        of only scalar aggregates.
         """
         if not raw_vals:
             return None
@@ -638,7 +669,7 @@ class DiagnosisService:
         pred_last = None
         if pred_vals and len(pred_vals) > 0:
             pred_last = float(pred_vals[-1])
-        return {
+        result = {
             "raw_mean": mu,
             "raw_std": sigma,
             "raw_min": float(raws.min()),
@@ -647,6 +678,125 @@ class DiagnosisService:
             "raw_last_sigma": abs(float(raws[-1]) - mu) / sigma,
             "pred_last": pred_last,
             "n": len(raws),
+        }
+        # Waveform shape features — give the LLM temporal structure that
+        # mean/std completely destroy.  Without this, a periodic sine and
+        # a mid-window step jump look identical to the LLM.
+        if score_vals and len(score_vals) > 0:
+            scores_arr = np.array(score_vals, dtype=np.float64)
+            wf = DiagnosisService._extract_waveform_features(raws, scores_arr)
+            result["waveform"] = wf
+        return result
+
+    # ── Waveform shape analysis for the LLM ───────────────────────────
+
+    @staticmethod
+    def _downsample_curve(values: np.ndarray, n_bins: int = 32) -> list[float]:
+        """Downsample a 1-D curve to ``n_bins`` representative points.
+
+        Splits the array into ``n_bins`` equal-length segments and takes
+        each segment's mean.  This preserves the temporal structure (peak
+        position, trend) while reducing 512 points to ~32 numbers that
+        fit comfortably in an LLM prompt (~100 tokens).
+        """
+        if len(values) == 0:
+            return []
+        n = len(values)
+        if n <= n_bins:
+            return [float(v) for v in values]
+        # np.array_split handles uneven division gracefully.
+        segments = np.array_split(values, n_bins)
+        return [float(seg.mean()) for seg in segments]
+
+    @staticmethod
+    def _extract_waveform_features(
+        raws: np.ndarray, scores: np.ndarray,
+    ) -> dict:
+        """Extract human-readable waveform shape descriptors.
+
+        These let a non-vision LLM "see" what a human sees on a chart:
+        where the anomaly is, how wide it is, whether the signal is
+        trending or periodic.  All features are categorical or ratios,
+        not raw arrays, to minimise token cost.
+        """
+        n = len(scores)
+        threshold = float(ANOMALY_THRESHOLD)
+
+        # --- Score-curve features ---
+        # Peak position: where in the window is the max score?
+        peak_idx = int(np.argmax(scores))
+        if peak_idx < n / 3:
+            peak_pos = "前段（1/3）"
+        elif peak_idx < 2 * n / 3:
+            peak_pos = "中段（1/3）"
+        else:
+            peak_pos = "后段（1/3）"
+
+        # Anomaly width: fraction of points above threshold
+        over_mask = scores > threshold
+        over_frac = float(over_mask.sum()) / n if n > 0 else 0.0
+        if over_frac == 0:
+            width_desc = "无超阈值点"
+        elif over_frac < 0.1:
+            width_desc = "窄峰（<10% 超阈值）"
+        elif over_frac < 0.3:
+            width_desc = "中等（10-30% 超阈值）"
+        else:
+            width_desc = "宽峰（>30% 超阈值）"
+
+        # Score curve downsample (32 points) for the LLM to "see" shape
+        score_downsample = DiagnosisService._downsample_curve(scores, 32)
+
+        # --- Raw-curve features ---
+        raw_downsample = DiagnosisService._downsample_curve(raws, 32)
+
+        # Trend: compare first-third vs last-third mean
+        third = max(1, n // 3)
+        first_mean = float(raws[:third].mean())
+        last_mean = float(raws[-third:].mean())
+        raw_std = float(raws.std())
+        if raw_std < 1e-9:
+            trend = "平稳（近常数）"
+        elif abs(last_mean - first_mean) < 0.5 * raw_std:
+            trend = "平稳（无趋势）"
+        elif last_mean > first_mean:
+            trend = "上升趋势"
+        else:
+            trend = "下降趋势"
+
+        # Periodicity: autocorrelation at lag 1.
+        # Periodic signals have high positive autocorrelation; step changes
+        # and noise don't.  We guard against near-constant segments (which
+        # can inflate autocorrelation artificially) by checking local
+        # variation: compute std of the first and last thirds separately.
+        if raw_std > 1e-9 and n > 4:
+            normalized = (raws - raws.mean()) / raw_std
+            ac1 = float(np.mean(normalized[:-1] * normalized[1:]))
+            # Detect step-change: if the signal has a large DC shift between
+            # first and last third, it's a step/trend, not periodic — even
+            # if autocorrelation is high (constant segments inflate it).
+            # For a clean step, |diff|/std ≈ 2.0; for a periodic sine, < 0.5.
+            is_step = abs(last_mean - first_mean) >= 1.5 * raw_std
+            if is_step:
+                periodicity = "非周期（阶跃跳变）"
+            elif ac1 > 0.7:
+                periodicity = "强周期性（类似正弦）"
+            elif ac1 > 0.3:
+                periodicity = "弱周期性"
+            else:
+                periodicity = "非周期（突变/噪声）"
+        else:
+            periodicity = "无法判定（近常数）"
+
+        return {
+            "score_peak_pos": peak_pos,
+            "score_width": width_desc,
+            "score_over_frac": round(over_frac, 3),
+            "score_max": float(np.max(scores)),
+            "raw_trend": trend,
+            "raw_periodicity": periodicity,
+            "raw_downsample": [round(v, 4) for v in raw_downsample],
+            "score_downsample": [round(v, 4) for v in score_downsample],
         }
 
     def _compute_baseline(self, channel: str) -> dict | None:

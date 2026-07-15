@@ -63,7 +63,7 @@ class AlertRecordAdmin(SoftDeleteModelAdmin):
     list_filter = ('alert_type', 'status', 'llm_verdict', 'human_verdict', 'channel')
     list_editable = ('human_verdict',)
     search_fields = ('channel', 'message')
-    readonly_fields = ('final_status',)
+    readonly_fields = ('final_status', 'raw_snapshot', 'score_snapshot')
     # Note: date_hierarchy omitted — AlertRecord.created_at is a FloatField
     # (unix timestamp), not a DateField/DateTimeField, which would trigger
     # Django admin.E128.

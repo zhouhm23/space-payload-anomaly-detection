@@ -15,6 +15,7 @@ class DiagnosisRequest(BaseModel):
     channel: str = Field(..., description="Telemetry channel name, e.g. 'C-1'")
     alert_type: str = Field("measured", description="'measured' or 'predicted'")
     alert_ts: float | None = Field(None, description="Alert/warning timestamp — cache key")
+    force_refresh: bool = Field(False, description="Bypass cache and re-run the LLM")
 
 
 @router.post("/api/diagnosis")
@@ -36,7 +37,10 @@ async def api_diagnosis(req: DiagnosisRequest):
                 "detail": "Set OPENAI_API_KEY, OPENAI_BASE_URL, LLM_MODEL environment variables.",
             },
         )
-    result = c.diagnosis.diagnose(req.channel, alert_type=req.alert_type, alert_ts=req.alert_ts)
+    result = c.diagnosis.diagnose(
+        req.channel, alert_type=req.alert_type, alert_ts=req.alert_ts,
+        force_refresh=req.force_refresh,
+    )
     if result.get("error"):
         # LLM call failed or no data — return 502 with the detail.
         return JSONResponse(

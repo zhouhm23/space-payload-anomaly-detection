@@ -9,6 +9,16 @@ from __future__ import annotations
 
 from django.db import models
 
+# Verdict choices shared by AlertRecord.llm_verdict / human_verdict and
+# DiagnosisRecord.llm_verdict.  Must match the canonical set in
+# phm.database.warning_store._VALID_VERDICTS.
+VERDICT_CHOICES = [
+    ('',            '—（未标注）—'),
+    ('real',        '真实异常'),
+    ('false_alarm', '误报'),
+    ('uncertain',   '不确定'),
+]
+
 
 class DetectionResult(models.Model):
     """Per-block three-layer cascade detection results.
@@ -60,8 +70,8 @@ class AlertRecord(models.Model):
     created_at = models.FloatField('创建时间')
     status = models.CharField('状态', max_length=16, default='active')
     verified_at = models.FloatField('核验时间', null=True, blank=True)
-    llm_verdict = models.CharField('LLM裁决', max_length=16, null=True, blank=True)
-    human_verdict = models.CharField('人工裁决', max_length=16, null=True, blank=True)
+    llm_verdict = models.CharField('LLM裁决', max_length=16, null=True, blank=True, choices=VERDICT_CHOICES)
+    human_verdict = models.CharField('人工裁决', max_length=16, null=True, blank=True, choices=VERDICT_CHOICES)
     raw_snapshot = models.TextField('原始波形快照', null=True, blank=True)
     score_snapshot = models.TextField('分数快照', null=True, blank=True)
     ingested_at = models.FloatField('入库时间')
@@ -102,7 +112,7 @@ class DiagnosisRecord(models.Model):
     context_summary = models.TextField('上下文摘要', null=True, blank=True)
     elapsed_sec = models.FloatField('耗时(秒)', null=True, blank=True)
     error = models.TextField('错误', null=True, blank=True)
-    llm_verdict = models.CharField('LLM裁决', max_length=16, null=True, blank=True)
+    llm_verdict = models.CharField('LLM裁决', max_length=16, null=True, blank=True, choices=VERDICT_CHOICES)
     created_at = models.FloatField('创建时间')
     is_deleted = models.IntegerField('已删除', default=0)
     deleted_at = models.FloatField('删除时间', null=True, blank=True)

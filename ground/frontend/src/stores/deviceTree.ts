@@ -54,18 +54,20 @@ export const useDeviceTreeStore = defineStore('deviceTree', () => {
   /** Currently-selected folder (new sensors get created inside it). null = top-level. */
   const selectedFolderId = ref<string | null>(null)
 
-  // ---- auto-save (debounced 800ms, silent) ----
+  // ---- auto-save DISABLED ----
+  // Previously: debounced 800ms auto-save on every tree mutation (add/
+  // delete/drag/set-position).  This caused unintended config changes
+  // (e.g. backfill of channelName/blockSize on legacy nodes, or accidental
+  // drag-drops) to be silently persisted to device_config.json.
+  //
+  // Now: save is MANUAL only — click "💾 保存" in DeviceTree.vue.
+  // Future: device config will move to Django admin (SimpleUI) for
+  // history-tracked editing.
   let _autoSaveTimer: ReturnType<typeof setTimeout> | null = null
   function autoSaveConfig(): void {
-    if (_autoSaveTimer) clearTimeout(_autoSaveTimer)
-    _autoSaveTimer = setTimeout(async () => {
-      _autoSaveTimer = null
-      try {
-        await api.saveConfig({ device_tree: tree.value })
-      } catch (e) {
-        console.warn('自动保存配置失败:', e)
-      }
-    }, 800)
+    // No-op — auto-save disabled.  Use the manual saveConfig() function
+    // (wired to the "💾 保存" button) to persist changes.
+    return
   }
 
   // ---- lookup helpers ----

@@ -362,7 +362,10 @@ def diagnosis_view(request: HttpRequest):
             "error": "LLM diagnosis not configured",
             "detail": "Set OPENAI_API_KEY, OPENAI_BASE_URL, LLM_MODEL environment variables.",
         }, status=503)
-    result = c.diagnosis.diagnose(d['channel'], alert_type=d['alert_type'], alert_ts=d['alert_ts'])
+    result = c.diagnosis.diagnose(
+        d['channel'], alert_type=d['alert_type'], alert_ts=d['alert_ts'],
+        force_refresh=bool(body.get('force_refresh', False)),
+    )
     if result.get("error"):
         status = 502 if "LLM" in result["error"] else 404
         return JsonResponse(result, status=status)
