@@ -169,9 +169,46 @@ class SensorSource(ABC):
 
 
 # ---------------------------------------------------------------------------
+# Source registry (extensible factory — replaces if/elif chains)
+# ---------------------------------------------------------------------------
+# Each concrete source registers itself under a prefix via the
+# ``@register_source`` decorator. ``create_source`` then becomes a single dict
+# lookup, so adding a new source type only requires decorating the new class —
+# no edits to the factory.
+#
+# A registered class must expose a ``from_source_id(source_id, **kwargs)``
+# classmethod that parses the source_id and returns an instance.  This moves
+# the parsing logic next to the class that owns it.
+
+_SOURCE_REGISTRY: dict[str, type[SensorSource]] = {}
+
+
+def register_source(prefix: str):
+    """Class decorator: register a ``SensorSource`` subclass under ``prefix``.
+
+    The class must implement ``from_source_id(cls, source_id, **kwargs)``.
+    """
+    def decorator(cls: type[SensorSource]) -> type[SensorSource]:
+        if prefix in _SOURCE_REGISTRY:
+            raise RuntimeError(
+                f"Source prefix {prefix!r} already registered "
+                f"to {_SOURCE_REGISTRY[prefix].__name__}"
+            )
+        _SOURCE_REGISTRY[prefix] = cls
+        return cls
+    return decorator
+
+
+def registered_source_prefixes() -> list[str]:
+    """Return all registered source-id prefixes (for diagnostics)."""
+    return sorted(_SOURCE_REGISTRY.keys())
+
+
+# ---------------------------------------------------------------------------
 # File replay source (was DatasetSource)
 # ---------------------------------------------------------------------------
 
+@register_source(FILE_PREFIX)
 class FileSource(SensorSource):
     """Replays a NASA-SMAP/MSL telemetry channel as a live sensor stream.
 
@@ -297,6 +334,26 @@ class FileSource(SensorSource):
         self._pos = 0
         self._exhausted = False
 
+    @classmethod
+    def from_source_id(
+        cls,
+        source_id: str,
+        *,
+        sample_rate: float = 1.0,
+        noise: SensorNoiseConfig | None = None,
+        loop: bool = False,
+        **_unused,
+    ) -> "FileSource":
+        """Parse ``file:NASA-MSL/C-1`` and build a FileSource."""
+        dataset, channel = _parse_file_id(source_id)
+        return cls(
+            dataset=dataset,
+            channel=channel,
+            sample_rate=sample_rate,
+            noise=noise,
+            loop=loop,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Synthetic signal configuration (unchanged)
@@ -351,6 +408,7 @@ _VIRTUAL_LABELS = {
 }
 
 
+@register_source(VIRTUAL_PREFIX)
 class VirtualSensorSource(SensorSource):
     """Generates continuous synthetic sensor signals.
 
@@ -467,6 +525,30 @@ class VirtualSensorSource(SensorSource):
     def is_virtual(self) -> bool:
         return True
 
+    @classmethod
+    def from_source_id(
+        cls,
+        source_id: str,
+        *,
+        sample_rate: float = 1.0,
+        noise: SensorNoiseConfig | None = None,
+        signal_freq_hz: float | None = None,
+        **_unused,
+    ) -> "VirtualSensorSource":
+        """Parse ``virtual:sine`` and build a VirtualSensorSource."""
+        signal_type = source_id[len(VIRTUAL_PREFIX):]
+        if signal_type not in _VIRTUAL_PRESETS:
+            raise ValueError(
+                f"Unknown virtual sensor: {signal_type}. "
+                f"Available: {list(_VIRTUAL_PRESETS.keys())}"
+            )
+        return cls(
+            signal_type=signal_type,
+            sample_rate=sample_rate,
+            noise=noise,
+            signal_freq_hz=signal_freq_hz,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Global source registry
@@ -517,6 +599,10 @@ def list_all_sources(dataset_dir: str | None = None) -> list[dict]:
     return sources
 
 
+# ---------------------------------------------------------------------------
+# Factory (delegates to the registry populated above)
+# ---------------------------------------------------------------------------
+
 def create_source(
     source_id: str,
     sample_rate: float = 1.0,
@@ -525,6 +611,10 @@ def create_source(
     signal_freq_hz: float | None = None,
 ) -> SensorSource:
     """Factory: create a SensorSource from a source ID.
+
+    Looks up the prefix in ``_SOURCE_REGISTRY`` and delegates to the
+    matching class's ``from_source_id`` classmethod.  Unrecognised prefixes
+    raise ``ValueError`` listing the registered prefixes.
 
     Args:
         source_id: e.g. ``"file:NASA-MSL/C-1"`` or ``"virtual:sine"``
@@ -537,33 +627,19 @@ def create_source(
     Returns:
         A ``SensorSource`` instance ready for ``read()``.
     """
-    if source_id.startswith(FILE_PREFIX):
-        dataset, channel = _parse_file_id(source_id)
-        return FileSource(
-            dataset=dataset,
-            channel=channel,
-            sample_rate=sample_rate,
-            noise=noise,
-            loop=loop,
-        )
-    elif source_id.startswith(VIRTUAL_PREFIX):
-        signal_type = source_id[len(VIRTUAL_PREFIX):]
-        if signal_type not in _VIRTUAL_PRESETS:
-            raise ValueError(
-                f"Unknown virtual sensor: {signal_type}. "
-                f"Available: {list(_VIRTUAL_PRESETS.keys())}"
+    for prefix, cls in _SOURCE_REGISTRY.items():
+        if source_id.startswith(prefix):
+            return cls.from_source_id(
+                source_id,
+                sample_rate=sample_rate,
+                noise=noise,
+                loop=loop,
+                signal_freq_hz=signal_freq_hz,
             )
-        return VirtualSensorSource(
-            signal_type=signal_type,
-            sample_rate=sample_rate,
-            noise=noise,
-            signal_freq_hz=signal_freq_hz,
-        )
-    else:
-        raise ValueError(
-            f"Invalid source ID: {source_id!r}. "
-            f"Must start with '{FILE_PREFIX}' or '{VIRTUAL_PREFIX}'."
-        )
+    raise ValueError(
+        f"Invalid source ID: {source_id!r}. "
+        f"Registered prefixes: {registered_source_prefixes()}"
+    )
 
 
 # ---------------------------------------------------------------------------

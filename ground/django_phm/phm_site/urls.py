@@ -6,6 +6,8 @@ from . import views
 urlpatterns = [
     # monitor page (real-time dashboard, migrated from frontend/dashboard.html)
     path('monitor/', views.monitor_view),
+    # monitor embedded in SimpleUI admin (iframe wrapper, staff login required)
+    path('monitor-embed/', views.monitor_embed_view),
     # poll / forecast / config / reset / health / sensors
     path('api/poll', views.poll_view),
     path('api/forecast', views.forecast_view),

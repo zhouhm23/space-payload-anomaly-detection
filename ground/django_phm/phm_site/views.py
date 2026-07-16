@@ -441,3 +441,19 @@ def monitor_view(request: HttpRequest):
     """Render the real-time monitoring page (migrated from dashboard.html)."""
     from django.shortcuts import render
     return render(request, 'phm_site/monitor.html')
+
+
+def monitor_embed_view(request: HttpRequest):
+    """Render the monitoring dashboard embedded in the SimpleUI admin chrome.
+
+    Uses an iframe pointing at /monitor/ so the full-screen flex layout is
+    preserved while the admin sidebar/topbar provides navigation context.
+    Requires staff login (same as the rest of the admin site).
+    """
+    from django.contrib.admin.views.decorators import staff_member_required
+    from django.shortcuts import render
+
+    @staff_member_required
+    def _view(req):
+        return render(req, 'phm_site/monitor_embed.html')
+    return _view(request)

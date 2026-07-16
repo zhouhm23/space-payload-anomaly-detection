@@ -1,0 +1,55 @@
+{
+  "_doc": "System-wide runtime configuration for the PHM ground segment. Every value here overrides a default baked into phm/config.py; if this file is missing or a key is absent, the code falls back to the documented default. Edit this file (no restart needed for services that reload) to tune thresholds, storage sizing, network endpoints, and feature flags.",
+
+  "network": {
+    "_doc": "Space↔ground TCP link and ground HTTP port.",
+    "space_host": "127.0.0.1",
+    "space_port": 9876,
+    "ground_port": 8501,
+    "link_fail_threshold": 3
+  },
+
+  "storage": {
+    "_doc": "SQLite persistence and in-memory ring buffer sizing.",
+    "db_path": "data/phm.db",
+    "ring_buffer_max": 20000,
+    "sqlite_batch_size": 200,
+    "sqlite_flush_interval_sec": 2.0,
+    "sqlite_enabled": true
+  },
+
+  "thresholds": {
+    "_doc": "Anomaly detection thresholds. ANOMALY_THRESHOLD aligns with the space-segment alert trigger.",
+    "anomaly": 0.5,
+    "l1_constant_std": 0.001,
+    "l1_sigma_k": 3.0,
+    "l1_iqr_factor": 1.5,
+    "l3_constant_std": 0.001,
+    "l3_range_boost": 0.95,
+    "l3_rate_boost": 0.85
+  },
+
+  "forecast": {
+    "_doc": "TTM-R3 forecaster context/prediction lengths (must match the loaded model).",
+    "context_length": 512,
+    "prediction_length": 96
+  },
+
+  "warning": {
+    "_doc": "Predicted-anomaly early-warning lifecycle.",
+    "min_predict_scores": 1
+  },
+
+  "rul": {
+    "_doc": "RUL degradation prediction (LSTM+Attention on C-MAPSS).",
+    "enabled": true,
+    "window_cycles": 30,
+    "history_len": 20,
+    "poll_interval_sec": 5.0
+  },
+
+  "llm": {
+    "_doc": "LLM diagnosis timeout. API key/base_url/model come from .env (secrets belong in env vars, not JSON).",
+    "timeout_sec": 30.0
+  }
+}

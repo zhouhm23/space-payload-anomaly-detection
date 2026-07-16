@@ -27,10 +27,14 @@ from .base import BaseDetector
 # huggingface.co (avoids multi-second SSL timeouts + meta-tensor corruption).
 ensure_offline_env()
 
-# Model constants — preserved for backwards-compatible ``from ... import
-# CONTEXT_LENGTH`` callers (e.g. ground/tests/test_models.py).
-DEFAULT_MODEL = "ibm-granite/granite-timeseries-tspulse-r1"
-CONTEXT_LENGTH = 512
+# Model constants — sourced from the central registry (single source of
+# truth).  The names are kept for backwards-compatible imports
+# (``from phm.algorithm.tspulse import DEFAULT_MODEL`` still works).
+from ._registry import get_model_entry as _get_entry
+
+_TSP_ENTRY = _get_entry("tspulse")
+DEFAULT_MODEL = _TSP_ENTRY.hub_id
+CONTEXT_LENGTH = _TSP_ENTRY.context_length
 
 
 class AnomalyDetector(BaseDetector):

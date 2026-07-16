@@ -107,8 +107,6 @@ _CMAPSS_COLS = (
     + [f"op_setting_{i}" for i in range(1, 4)]
     + [f"sensor_{i}" for i in range(1, 22)]
 )
-# 14 sensors that carry degradation info (drop constant cols 1/5/6/10/16/18/19).
-_CMAPSS_SENSORS = [f"sensor_{i}" for i in (2, 3, 4, 7, 8, 9, 11, 12, 13, 14, 15, 17, 20, 21)]
 
 
 class CMAPSSDataSource:
@@ -123,11 +121,22 @@ class CMAPSSDataSource:
 
     Channel ids follow ``CMAPSS_<SUBSET>_<unit>`` (e.g. ``CMAPSS_FD001_1``),
     matching the ``channelName`` the user puts in the device tree.
+
+    Class attributes (structured metadata — no magic values in method bodies):
+      ``SENSORS``: the 14 degradation-bearing sensor column names
+        (drops constant cols 1/5/6/10/16/18/19).
+      ``SUPPORTED_SUBSETS``: C-MAPSS subsets with test data available.
     """
+
+    # 14 sensors that carry degradation info.
+    SENSORS: list[str] = [
+        f"sensor_{i}" for i in (2, 3, 4, 7, 8, 9, 11, 12, 13, 14, 15, 17, 20, 21)
+    ]
+    SUPPORTED_SUBSETS: tuple[str, ...] = ("FD001", "FD002", "FD003", "FD004")
 
     def __init__(self, data_dir: str | Path, subset: str = "FD001") -> None:
         subset = subset.upper()
-        if subset not in ("FD001", "FD002", "FD003", "FD004"):
+        if subset not in self.SUPPORTED_SUBSETS:
             raise ValueError(f"Unsupported C-MAPSS subset: {subset}")
         self.subset = subset
         self._prefix = f"CMAPSS_{subset}_"
@@ -141,7 +150,7 @@ class CMAPSSDataSource:
         self._channel_to_idx: dict[str, int] = {}
         for i, unit_id in enumerate(sorted(df["unit"].unique())):
             mask = df["unit"] == unit_id
-            sensors = df.loc[mask, _CMAPSS_SENSORS].to_numpy(dtype=np.float32)
+            sensors = df.loc[mask, self.SENSORS].to_numpy(dtype=np.float32)
             self._engines.append(sensors)
             self._channel_to_idx[f"{self._prefix}{int(unit_id)}"] = i
         # Per-engine playback pointer (how many cycles have been "observed").
@@ -192,21 +201,25 @@ class RulService:
     """Long-horizon RUL prediction service polled by the front-end.
 
     Holds a dict of :class:`RULPredictor` instances keyed by model id
-    (``"fd001"`` etc.) and one :class:`RulDataSource`.  Each call to
-    :meth:`predict_all` advances the data source by one cycle and predicts
-    RUL for every channel whose device-tree description carries a
-    ``@rul:<model>`` tag.
+    (``"fd001"`` etc.) and a matching dict of :class:`RulDataSource`
+    instances.  Each call to :meth:`predict_all` advances every data source
+    by one cycle and predicts RUL for every channel whose device-tree
+    description carries a ``@rul:<model>`` tag.
+
+    Multi-source routing: each tagged channel is routed to the data source
+    whose key matches its model id.  This lets fd001 and fd003 coexist —
+    each subset has its own CMAPSSDataSource reading its own test_FD00X.txt.
     """
 
     def __init__(
         self,
-        data_source: RulDataSource,
+        data_sources: dict[str, RulDataSource],
         predictors: dict[str, RULPredictor],
         config_service: ConfigService,
         window_cycles: int = 30,
         history_len: int = 20,
     ) -> None:
-        self._source = data_source
+        self._sources = data_sources
         self._predictors = predictors
         self._config = config_service
         self.window_cycles = window_cycles
@@ -244,6 +257,10 @@ class RulService:
         walk(tree)
         return out
 
+    def _source_for(self, model_id: str) -> RulDataSource | None:
+        """Return the data source registered under ``model_id``, or None."""
+        return self._sources.get(model_id)
+
     # ── Prediction ─────────────────────────────────────────────────────
 
     def predict_all(self) -> list[dict]:
@@ -254,11 +271,15 @@ class RulService:
         front-end trend sparkline.
         """
         with self._lock:
-            self._source.advance()
+            for src in self._sources.values():
+                src.advance()
             tagged = self.channels_with_rul()
             results: list[dict] = []
             for channel, model_id in tagged.items():
-                window = self._source.get_window(channel, self.window_cycles)
+                source = self._source_for(model_id)
+                if source is None:
+                    continue
+                window = source.get_window(channel, self.window_cycles)
                 if window is None:
                     continue
                 predictor = self._predictors[model_id]
@@ -288,7 +309,10 @@ class RulService:
         model_id = tagged.get(channel)
         if model_id is None:
             return None
-        window = self._source.get_window(channel, self.window_cycles)
+        source = self._source_for(model_id)
+        if source is None:
+            return None
+        window = source.get_window(channel, self.window_cycles)
         if window is None:
             return None
         rul = self._predictors[model_id].predict_rul(window, raw=True)
@@ -300,4 +324,25 @@ class RulService:
             "model": model_id,
             "source": f"C-MAPSS {model_id.upper()}（基准演示）",
             "history": list(self._history.get(channel, [])),
+        }
+
+    # ── Agent-friendly introspection (shared by CLI and /api/rul/status) ──
+
+    def status(self) -> dict:
+        """Return a structured snapshot of the RUL service state.
+
+        Exposes the loaded models, their data sources, and the currently
+        tagged channels.  Used by ``manage.py rul status`` and the API so
+        agents and operators can inspect what is enabled without parsing
+        logs.  Pure read — no side effects.
+        """
+        return {
+            "enabled_models": sorted(self._predictors.keys()),
+            "data_sources": {
+                mid: sorted(src.channels())
+                for mid, src in self._sources.items()
+            },
+            "tagged_channels": self.channels_with_rul(),
+            "window_cycles": self.window_cycles,
+            "history_len": self.history_len,
         }

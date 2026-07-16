@@ -1,0 +1,34 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{# monitor_embed.html — wraps the full-screen /monitor/ dashboard inside the
+   SimpleUI admin chrome via an iframe. This lets operators reach the live
+   monitoring workspace from the admin sidebar (Task A: 工作台纳入后台首页)
+   without leaving the authenticated admin context.
+
+   The dashboard itself stays a standalone full-screen page at /monitor/
+   (its flex layout breaks if wrapped in admin's #content padding). The
+   iframe gives us the best of both: admin navigation + uncompromised
+   dashboard sizing. #}
+
+{% block title %}监控工作台{{ block.super }}{% endblock %}
+
+{% block extrastyle %}{{ block.super }}
+<style>
+  {# Stretch the iframe to fill the admin content area minus the header. #}
+  #content { padding: 0 !important; margin: 0 !important; max-width: 100% !important; }
+  .monitor-embed-frame {
+    width: 100%;
+    height: calc(100vh - 60px);
+    border: none;
+    display: block;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1 style="display:none">监控工作台</h1>
+<iframe src="/monitor/" class="monitor-embed-frame"
+        title="PHM 实时监控工作台"
+        loading="eager"></iframe>
+{% endblock %}

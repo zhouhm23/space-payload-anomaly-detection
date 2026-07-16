@@ -24,6 +24,26 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>空间站有效载荷预测性维护支持系统</title>
+  <!-- Inject UI theme synchronously (no fetch delay). monitor.js reads
+       window.THEME with built-in fallbacks, so a missing payload never
+       breaks the page. The same colours drive the :root CSS variables
+       below so Canvas (C object) and DOM (var()) stay in sync. -->
+  <script>window.THEME = {{ PHM_THEME_JSON|safe }};</script>
+  <style>
+    :root {
+      --bg-primary: {{ PHM_THEME.colors.bgPrimary }};
+      --bg-secondary: {{ PHM_THEME.colors.bgSecondary }};
+      --bg-card: {{ PHM_THEME.colors.bgCard }};
+      --border: {{ PHM_THEME.colors.border }};
+      --text-primary: {{ PHM_THEME.colors.textPri }};
+      --text-secondary: {{ PHM_THEME.colors.textSec }};
+      --accent-blue: {{ PHM_THEME.colors.blue }};
+      --accent-green: {{ PHM_THEME.colors.green }};
+      --accent-yellow: {{ PHM_THEME.colors.yellow }};
+      --accent-red: {{ PHM_THEME.colors.red }};
+      --accent-cyan: {{ PHM_THEME.colors.cyan }};
+    }
+  </style>
   <link rel="stylesheet" type="text/css" href="{% static 'phm_site/css/monitor.css' %}">
 </head>
 <body>

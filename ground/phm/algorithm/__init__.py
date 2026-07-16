@@ -11,6 +11,7 @@ model registry swap-point localised.
 """
 
 from .base import BaseDetector, BaseForecaster, BaseRULPredictor
+from ._registry import MODEL_REGISTRY, ModelEntry, get_model_entry
 from .tspulse import AnomalyDetector, DEFAULT_MODEL as TSPULSE_DEFAULT_MODEL
 from .ttm import TrendForecaster
 from .ttm import DEFAULT_MODEL as TTM_DEFAULT_MODEL
@@ -50,7 +51,11 @@ __all__ = [
     # Cascade data types
     "LayerResult",
     "CascadeOutput",
-    # Model constants
+    # Model registry (agent-friendly: enumerate models without torch import)
+    "MODEL_REGISTRY",
+    "ModelEntry",
+    "get_model_entry",
+    # Model constants (backwards-compat aliases)
     "TSPULSE_DEFAULT_MODEL",
     "TTM_DEFAULT_MODEL",
     "CONTEXT_LENGTH",

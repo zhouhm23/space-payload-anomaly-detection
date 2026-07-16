@@ -1,0 +1,70 @@
+{
+  "_doc": "Front-end display configuration for the PHM monitor dashboard. Every value here was previously hard-coded in monitor.js / monitor.css. The Django context processor injects this as window.THEME on page load (synchronous, no fetch delay). monitor.js reads from THEME with built-in fallbacks so the page still renders if injection fails.",
+
+  "colors": {
+    "_doc": "Canvas colour palette (Canvas cannot use CSS var(), so these hex values are injected into both the JS C object and the :root CSS variables to stay in sync).",
+    "bgPrimary": "#0b0f1a",
+    "bgSecondary": "#131825",
+    "bgCard": "#1a1f2e",
+    "border": "#2a3348",
+    "textPri": "#e0e6f0",
+    "textSec": "#8e9bb5",
+    "blue": "#2d8cf0",
+    "green": "#19be6b",
+    "yellow": "#f5a623",
+    "red": "#ed3f14",
+    "cyan": "#00c9db"
+  },
+
+  "thresholds": {
+    "_doc": "Score/health colour boundaries. anomalyScoreRed aligns with ANOMALY_THRESHOLD(0.5) in system_config.json.",
+    "anomalyScoreRed": 0.5,
+    "anomalyScoreYellow": 0.25,
+    "healthRed": 60,
+    "healthYellow": 80,
+    "rulGreen": 0.6,
+    "rulYellow": 0.25
+  },
+
+  "poll": {
+    "_doc": "Polling intervals (ms). chart follows the space-segment cadence; rul is slow (degradation is cycle-scale).",
+    "chart": 2000,
+    "health": 3000,
+    "sensors": 3000,
+    "alerts": 3000,
+    "warnings": 3000,
+    "rul": 5000,
+    "dbStats": 5000,
+    "diagnosis": 2000
+  },
+
+  "chart": {
+    "_doc": "Telemetry chart sizing. cacheCount is the prefetch window (4x the viewport); viewCount is the visible slice.",
+    "cacheCount": 2048,
+    "viewCount": 512,
+    "prefetchThreshold": 256,
+    "topRatio": 0.7,
+    "padding": { "top": 20, "right": 50, "bottom": 30, "left": 60 },
+    "gapWidthPx": 40
+  },
+
+  "display": {
+    "_doc": "Cosmetic / locale strings.",
+    "systemTitle": "空间站有效载荷预测性维护支持系统",
+    "clockTimezone": "Asia/Shanghai",
+    "datetimeFormat": "YYYY-MM-DD HH:MM:SS UTC"
+  },
+
+  "layout": {
+    "_doc": "Panel geometry (px / flex). Synced with CSS variables in monitor.css.",
+    "headerHeight": 60,
+    "leftPanelWidth": 240,
+    "rightPanelWidth": 340,
+    "bottomPanelFlex": 1.4
+  },
+
+  "network": {
+    "_doc": "Front-end link-status indicator.",
+    "linkFailThreshold": 3
+  }
+}

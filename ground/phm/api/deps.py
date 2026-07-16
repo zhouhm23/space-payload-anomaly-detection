@@ -131,9 +131,15 @@ def init(
 def _maybe_build_rul(config: ConfigService) -> RulService | None:
     """Construct the RUL service if assets are present; else None.
 
-    Looks for the C-MAPSS data directory (test_FD001.txt) and the FD001
-    model weights + scaler JSON under ``src/ground/models/rul/``.  Any
-    missing piece → return None (logged) so the rest of the stack starts.
+    Scans ``src/ground/models/rul/`` for weight+scaler pairs and the C-MAPSS
+    data directory for matching test files.  Each subset with all three
+    assets (``fd00X_lstm_attn.pt`` + ``scaler_fd00X.json`` +
+    ``test_FD00X.txt``) gets its own :class:`CMAPSSDataSource` and
+    :class:`RULPredictor`.  Subsets with incomplete assets are skipped with
+    a warning.  If none qualify, the service stays disabled (503).
+
+    This is data-driven — adding a new subset (e.g. FD002 once its scaler
+    is trained) only requires dropping the files in place; no code edit.
     """
     if not RUL_ENABLED:
         logger.info("RUL service disabled by config (RUL_ENABLED=False)")
@@ -142,46 +148,65 @@ def _maybe_build_rul(config: ConfigService) -> RulService | None:
     from ..algorithm import RULPredictor  # local import keeps startup lean
 
     data_dir = Path(RUL_CMAPSS_DATA_DIR)
-    if not (data_dir / "test_FD001.txt").exists():
-        logger.warning(
-            "RUL service disabled — C-MAPSS data not found at %s. "
-            "Place test_FD001.txt/train_FD001.txt/RUL_FD001.txt there.",
-            data_dir,
-        )
-        return None
-
     models_dir = Path(__file__).resolve().parent.parent.parent / "models" / "rul"
-    fd001_weights = models_dir / "fd001_lstm_attn.pt"
-    fd001_scaler = models_dir / "scaler_fd001.json"
-    if not (fd001_weights.exists() and fd001_scaler.exists()):
+
+    # Discover every subset that has both weights and a scaler JSON.
+    # Pattern: scaler_fd00X.json + fd00X_lstm_attn.pt + test_FD00X.txt
+    available_subsets: list[str] = []
+    for scaler_file in sorted(models_dir.glob("scaler_fd00*.json")):
+        # scaler_fd001.json → "fd001"
+        subset_lower = scaler_file.stem.replace("scaler_", "")
+        weights_file = models_dir / f"{subset_lower}_lstm_attn.pt"
+        subset_upper = subset_lower.upper()
+        test_file = data_dir / f"test_{subset_upper}.txt"
+        if weights_file.exists() and test_file.exists():
+            available_subsets.append(subset_upper)
+        else:
+            logger.warning(
+                "RUL subset %s skipped — scaler found but weights (%s) "
+                "or test data (%s) missing.",
+                subset_upper, weights_file, test_file,
+            )
+
+    if not available_subsets:
         logger.warning(
-            "RUL service disabled — FD001 weights (%s) or scaler (%s) missing.",
-            fd001_weights, fd001_scaler,
+            "RUL service disabled — no complete subset assets under %s. "
+            "Each subset needs scaler_fd00X.json + fd00X_lstm_attn.pt + "
+            "test_FD00X.txt.",
+            models_dir,
         )
         return None
 
+    import numpy as np
+    predictors: dict[str, RULPredictor] = {}
+    data_sources: dict[str, CMAPSSDataSource] = {}
     try:
-        data_source = CMAPSSDataSource(data_dir, subset="FD001")
-        predictors = {"fd001": RULPredictor(subset="FD001")}
-        # Eagerly load the model NOW (during init, before the auto-poll/eval
-        # threads start spinning up TSPulse).  Lazy loading defers the LSTM
-        # creation to the first /api/rul call, where a concurrent tsfm_public
-        # from_pretrained can leave torch in a meta-tensor state and corrupt
-        # the new module.  Loading here avoids that race entirely.
-        import numpy as np
-        predictors["fd001"].predict_rul(
-            np.zeros((RUL_WINDOW_CYCLES, 14), dtype=np.float32), raw=True
-        )
+        for subset in available_subsets:
+            tag = subset.lower()
+            data_sources[tag] = CMAPSSDataSource(data_dir, subset=subset)
+            predictors[tag] = RULPredictor(subset=subset)
+            # Eagerly pre-warm the model NOW (during init, before the
+            # auto-poll/eval threads start spinning up TSPulse).  Lazy
+            # loading defers LSTM creation to the first /api/rul call,
+            # where a concurrent tsfm_public from_pretrained can leave
+            # torch in a meta-tensor state and corrupt the new module.
+            predictors[tag].predict_rul(
+                np.zeros(
+                    (RUL_WINDOW_CYCLES, len(CMAPSSDataSource.SENSORS)),
+                    dtype=np.float32,
+                ),
+                raw=True,
+            )
         rul = RulService(
-            data_source=data_source,
+            data_sources=data_sources,
             predictors=predictors,
             config_service=config,
             window_cycles=RUL_WINDOW_CYCLES,
             history_len=RUL_HISTORY_LEN,
         )
         logger.info(
-            "RUL service enabled (FD001, %d engines, window=%d cycles, model pre-warmed)",
-            len(data_source.channels()), RUL_WINDOW_CYCLES,
+            "RUL service enabled (subsets=%s, window=%d cycles, models pre-warmed)",
+            available_subsets, RUL_WINDOW_CYCLES,
         )
         return rul
     except Exception as e:  # never let RUL construction abort startup

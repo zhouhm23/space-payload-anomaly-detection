@@ -89,6 +89,7 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
+                'phm_site.context_processors.theme',
             ],
         },
     },
@@ -118,7 +119,26 @@ STATICFILES_DIRS = [BASE_DIR / 'django_phm' / 'static']
 # ── SimpleUI config ─────────────────────────────────────────────────────────
 SIMPLEUI_HOME_INFO = False
 SIMPLEUI_ANALYSIS = False
+# 登录后台默认跳转全屏监控页（保持原有行为）。
 SIMPLEUI_INDEX = '/monitor/'
+# 自定义菜单：把监控工作台（iframe 嵌入版）作为第一项，紧跟业务数据管理。
+# 这落地了「工作台纳入后台首页」的方向——后台成为操作中枢，工作台从菜单直达。
+SIMPLEUI_CONFIG = {
+    'system_keep': False,
+    'menus': [
+        {
+            'name': '监控工作台',
+            'icon': 'dashboard',
+            'url': '/monitor-embed/',
+            'models': [],
+        },
+        {
+            'app': 'phm_site',
+            'name': '业务数据',
+            'icon': 'database',
+        },
+    ],
+}
 
 # ── PHM runtime config ──────────────────────────────────────────────────────
 SPACE_HOST = os.environ.get("SPACE_HOST", "127.0.0.1")

@@ -23,10 +23,15 @@ from .base import BaseForecaster
 # huggingface.co (avoids multi-second SSL timeouts + meta-tensor corruption).
 ensure_offline_env()
 
-# Model constants — preserved for backwards-compatible imports.
-DEFAULT_MODEL = "ibm-research/ttm-r3"
-CONTEXT_LENGTH = 512
-PREDICTION_LENGTH = 96
+# Model constants — sourced from the central registry (single source of
+# truth).  The names are kept for backwards-compatible imports
+# (``from phm.algorithm.ttm import DEFAULT_MODEL`` still works).
+from ._registry import get_model_entry as _get_entry
+
+_TTM_ENTRY = _get_entry("ttm_r3")
+DEFAULT_MODEL = _TTM_ENTRY.hub_id
+CONTEXT_LENGTH = _TTM_ENTRY.context_length
+PREDICTION_LENGTH = _TTM_ENTRY.prediction_length
 
 
 class TrendForecaster(BaseForecaster):

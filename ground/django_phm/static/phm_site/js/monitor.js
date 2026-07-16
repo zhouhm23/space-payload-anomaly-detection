@@ -1,11 +1,32 @@
-  // ====================== 颜色常量（Canvas 不支持 var()，必须用 hex） ======================
-  // 与 :root 中的 CSS 变量保持同步
-  const C = {
-    bgPrimary: '#0b0f1a', bgSecondary: '#131825', bgCard: '#1a1f2f',
+  // ====================== 主题配置（从 window.THEME 读取，带 fallback） ======================
+  // THEME 由 Django context processor 注入（data/ui_theme.json）。
+  // 如果注入失败（如直开静态 HTML），fallback 保证页面仍可渲染。
+  const THEME = window.THEME || {};
+  const C = Object.assign({
+    bgPrimary: '#0b0f1a', bgSecondary: '#131825', bgCard: '#1a1f2e',
     border: '#2a3348', textPri: '#e0e6f0', textSec: '#8e9bb5',
     blue: '#2d8cf0', green: '#19be6b', yellow: '#f5a623',
     red: '#ed3f14', cyan: '#00c9db'
-  };
+  }, THEME.colors || {});
+  const T = Object.assign({
+    anomalyScoreRed: 0.5, anomalyScoreYellow: 0.25,
+    healthRed: 60, healthYellow: 80,
+    rulGreen: 0.6, rulYellow: 0.25
+  }, THEME.thresholds || {});
+  const POLL = Object.assign({
+    chart: 2000, health: 3000, sensors: 3000,
+    alerts: 3000, warnings: 3000, rul: 5000,
+    dbStats: 5000, diagnosis: 2000
+  }, THEME.poll || {});
+  const CHART_CFG = Object.assign({
+    cacheCount: 2048, viewCount: 512, prefetchThreshold: 256,
+    topRatio: 0.7,
+    padding: { top: 20, right: 50, bottom: 30, left: 60 },
+    gapWidthPx: 40
+  }, THEME.chart || {});
+  const NET_CFG = Object.assign({
+    linkFailThreshold: 3
+  }, THEME.network || {});
 
   // ====================== 全局状态 ======================
   const state = {
@@ -44,15 +65,14 @@
   }
   function fmt(n, d=3) { return n == null ? '—' : n.toFixed(d); }
 
-  // CSS 颜色（用于 DOM style，可以用 var()）
+  // CSS 颜色（用于 DOM style，可以用 var()）。阈值从 T 读取，与后端 ANOMALY_THRESHOLD 同源。
   function colorForScore(s) {
     if (s == null) return 'var(--text-secondary)';
-    // 阈值对齐 ANOMALY_THRESHOLD(0.5)：>0.5 红（异常），>0.25 黄（警戒），否则绿
-    return s > 0.5 ? 'var(--accent-red)' : (s > 0.25 ? 'var(--accent-yellow)' : 'var(--accent-green)');
+    return s > T.anomalyScoreRed ? 'var(--accent-red)' : (s > T.anomalyScoreYellow ? 'var(--accent-yellow)' : 'var(--accent-green)');
   }
   function healthColor(v) {
-    if (v < 60) return 'var(--accent-red)';
-    if (v < 80) return 'var(--accent-yellow)';
+    if (v < T.healthRed) return 'var(--accent-red)';
+    if (v < T.healthYellow) return 'var(--accent-yellow)';
     return 'var(--accent-green)';
   }
 
@@ -113,7 +133,7 @@
       this.stop(name);
       state.pollingTimers[name] = setInterval(async () => {
         try { await fn(); state.linkFailCount = 0; updateLinkStatus(true); }
-        catch(e) { state.linkFailCount++; if(state.linkFailCount>=3) updateLinkStatus(false); }
+        catch(e) { state.linkFailCount++; if(state.linkFailCount>=NET_CFG.linkFailThreshold) updateLinkStatus(false); }
       }, interval);
     },
     stop(name) {
@@ -132,7 +152,7 @@
   async function fetchWindow() {
     if(!state.currentChannel) return;
     // 预取缓存：拉 CACHE_COUNT 行（4× 可视区），drawChart 截取可视子段画
-    const params = { channel: state.currentChannel, count: CACHE_COUNT };
+    const params = { channel: state.currentChannel, count: CHART_CFG.cacheCount };
     if(state.mode === 'frozen' && state.viewEndTs != null) params.end_ts = state.viewEndTs;
     const data = await api.window(params);
 
@@ -273,7 +293,7 @@
         if(node.type === 'folder') {
           dot.style.background = folderHealth == null ? 'var(--text-secondary)' : healthColor(folderHealth);
         } else {
-          dot.style.background = score == null ? 'var(--text-secondary)' : (score>0.5?'var(--accent-red)':(score>0.25?'var(--accent-yellow)':'var(--accent-green)'));
+          dot.style.background = colorForScore(score);
         }
         div.appendChild(dot);
 
@@ -505,9 +525,9 @@
   }
 
   function rulColor(ratio) {
-    // ratio = rul / max_rul。>0.6 绿（健康）/ 0.25-0.6 黄（关注）/ <0.25 红（告急）
-    if (ratio > 0.6) return 'var(--accent-green)';
-    if (ratio > 0.25) return 'var(--accent-yellow)';
+    // ratio = rul / max_rul。阈值从 T 读取（ui_theme.json thresholds.rulGreen/rulYellow）
+    if (ratio > T.rulGreen) return 'var(--accent-green)';
+    if (ratio > T.rulYellow) return 'var(--accent-yellow)';
     return 'var(--accent-red)';
   }
 
@@ -566,7 +586,7 @@
     renderGauges();
     if(state.mode === 'realtime') {
       pollManager.stop('chart');
-      pollManager.start('chart', fetchWindow, 2000);
+      pollManager.start('chart', fetchWindow, POLL.chart);
       fetchWindow();  // 立即拉取，不等 2s 定时器（消除切换等 3s）
     } else {
       // 切换通道时冻结模式也抓一次最新
@@ -581,7 +601,7 @@
     document.getElementById('btnFrozen').classList.toggle('active', mode==='frozen');
     if(mode === 'realtime') {
       state.viewEndTs = null;
-      pollManager.start('chart', fetchWindow, 2000);
+      pollManager.start('chart', fetchWindow, POLL.chart);
       fetchWindow();  // 立即拉最新，不等定时器
     } else {
       pollManager.stop('chart');
@@ -620,9 +640,9 @@
   // 预取缓存：fetchWindow 拉 CACHE_COUNT 行（4× 可视区），drawChart 按 viewEndTs
   // 截取最后 VIEW_COUNT 行画。拖拽时本地截取重画（无 HTTP），仅 viewEndTs 距
   // 缓存边界不足 PREFETCH_THRESHOLD 行时才重新 fetch。
-  const CACHE_COUNT = 2048;        // 单次拉取行数（后端上限 10000）
-  const VIEW_COUNT = 512;          // 可视区行数
-  const PREFETCH_THRESHOLD = 256;  // 距缓存边界多少行触发预取
+  const CACHE_COUNT = CHART_CFG.cacheCount;        // 单次拉取行数（后端上限 10000）
+  const VIEW_COUNT = CHART_CFG.viewCount;          // 可视区行数
+  const PREFETCH_THRESHOLD = CHART_CFG.prefetchThreshold;  // 距缓存边界多少行触发预取
   // Y 轴范围输入框：drawChart 每次读取，改值后需标记重绘（之前靠 rAF 每帧兜底）
   ['yMin', 'yMax'].forEach(id => {
     const el = document.getElementById(id);
@@ -674,8 +694,13 @@
       // 实时模式 或 数据不足：取最后 VIEW_COUNT 行
       data = fullData.slice(-VIEW_COUNT);
     }
-    const topH = h * 0.7, bottomH = h * 0.3;
-    const pad = { top: 20*dpr, right: 50*dpr, bottom: 30*dpr, left: 60*dpr };
+    const topH = h * CHART_CFG.topRatio, bottomH = h * (1 - CHART_CFG.topRatio);
+    const pad = {
+      top: CHART_CFG.padding.top * dpr,
+      right: CHART_CFG.padding.right * dpr,
+      bottom: CHART_CFG.padding.bottom * dpr,
+      left: CHART_CFG.padding.left * dpr
+    };
 
     // ---- X 轴：时间轴折叠 ----
     // 后端返回 gaps 列表（系统中断），折叠后 gap 两侧数据紧凑排列，
@@ -694,7 +719,7 @@
 
     // 计算折叠后的视觉 X 坐标：数据段按真实时间比例分配宽度，
     // gap 占固定 GAP_W 像素。先算各段真实时间跨度，再按比例分配。
-    const GAP_W = 40 * dpr;  // 每个缺口占的视觉宽度
+    const GAP_W = CHART_CFG.gapWidthPx * dpr;  // 每个缺口占的视觉宽度
     let segCount = gapIndices.length + 1;
     let totalGapW = gapIndices.length * GAP_W;
     let dataW = plotW - totalGapW;  // 数据区总像素
@@ -856,7 +881,7 @@
 
     const topLayout = drawSubChart(0, topH, 'raw_value', 'predicted_value', C.blue, C.green, null, null);
     // 异常分数图：anomaly_score(黄实线) + predicted_anomaly_score(绿虚线)，Y 轴固定 0~1
-    const botLayout = drawSubChart(topH, bottomH, 'anomaly_score', 'predicted_anomaly_score', C.yellow, C.green, 0.5, [0, 1]);
+    const botLayout = drawSubChart(topH, bottomH, 'anomaly_score', 'predicted_anomaly_score', C.yellow, C.green, T.anomalyScoreRed, [0, 1]);
 
     // ---- 缺口竖虚线 + "中断Xh" 标注 ----
     for (const gi of gapIndices) {
@@ -1181,7 +1206,7 @@
   function openDbModal() {
     document.getElementById('dbModalOverlay').classList.add('active');
     switchDbTab(0);
-    pollManager.start('dbStats', fetchDbStats, 5000);
+    pollManager.start('dbStats', fetchDbStats, POLL.dbStats);
     fetchDbStats();
   }
   function closeDbModal() {
@@ -1234,7 +1259,7 @@
       const rows = data.data || [];
       document.getElementById('histTable').innerHTML = rows.length ? `
         <table><tr><th>时间</th><th>通道</th><th>原始值</th><th>异常分数</th><th>操作</th></tr>
-        ${rows.map(r => `<tr class="${(r.score!=null && r.score>0.5)?'row-alert':''}">
+        ${rows.map(r => `<tr class="${(r.score!=null && r.score>T.anomalyScoreRed)?'row-alert':''}">
           <td>${formatTime(r.received_at)}</td><td>${r.channel}</td><td>${fmt(r.raw)}</td><td>${fmt(r.score)}</td>
           <td><button class="btn-sm" onclick="deleteHistory('${r.channel}',${r.received_at})">🗑</button></td>
         </tr>`).join('')}</table>` : '<div class="empty-state">无数据</div>';
@@ -1270,7 +1295,7 @@
       const rows = data.data || [];
       document.getElementById('detTable').innerHTML = rows.length ? `
         <table><tr><th>时间</th><th>通道</th><th>L1决策</th><th>L1分</th><th>L2分</th><th>L3规则</th><th>最终分数</th><th>操作</th></tr>
-        ${rows.map(r => `<tr class="${(r.final_score!=null && r.final_score>0.5)?'row-alert':''} ${r.l1_decision==='skip'?'row-skip':''}">
+        ${rows.map(r => `<tr class="${(r.final_score!=null && r.final_score>T.anomalyScoreRed)?'row-alert':''} ${r.l1_decision==='skip'?'row-skip':''}">
           <td>${formatTime(r.timestamp)}</td><td>${r.channel}</td><td>${r.l1_decision||'—'}</td><td>${fmt(r.l1_score)}</td><td>${fmt(r.l2_score)}</td>
           <td>${(r.l3_rules||[]).join(', ')||'—'}</td><td>${fmt(r.final_score)}</td>
           <td><button class="btn-sm" onclick="deleteDetection('${r.channel}',${r.timestamp})">🗑</button></td>
@@ -1681,11 +1706,11 @@
     return { cols, rows: Math.ceil(n / cols) };
   }
 
-  // 健康度→颜色（canvas 用 hex，不能用 var()）
+  // 健康度→颜色（canvas 用 hex，不能用 var()）。阈值与 healthColor 同源（T.healthRed/healthYellow）。
   function healthColorHex(h) {
     if (h == null) return C.textSec;
-    if (h < 60) return C.red;
-    if (h < 80) return C.yellow;
+    if (h < T.healthRed) return C.red;
+    if (h < T.healthYellow) return C.yellow;
     return C.green;
   }
 
@@ -1751,10 +1776,9 @@
         const dx = mx + 6 * dpr + fx * (cellW - 12 * dpr);
         const dy = dotAreaY + fy * dotAreaH;
         const ch = node.channelName;
-        // 点位颜色按异常分数着色（与设备树圆点一致，阈值对齐 ANOMALY_THRESHOLD 0.5）：
-        // score>0.5 红 / >0.25 黄 / 否则绿；无数据灰
+        // 点位颜色按异常分数着色（与设备树圆点一致，阈值从 T 读取）：
         const sc = state.sensors[ch] ? state.sensors[ch].latest_score : null;
-        const color = sc == null ? C.textSec : (sc > 0.5 ? C.red : (sc > 0.25 ? C.yellow : C.green));
+        const color = sc == null ? C.textSec : (sc > T.anomalyScoreRed ? C.red : (sc > T.anomalyScoreYellow ? C.yellow : C.green));
         const isSel = state.currentChannel === ch;
         const dotR = (isSel ? 7 : 5) * dpr;
         dots.push({ node, x: dx, y: dy, r: dotR, color, isSel });
@@ -1877,7 +1901,8 @@
     const w = c.width, h = c.height;
     cx.clearRect(0,0,w,h);
     const val = (state.systemHealth || 0) / 100;
-    const color = val >= 0.8 ? C.green : (val >= 0.6 ? C.yellow : C.red);
+    // 健康环阈值与 healthColor 同源：T.healthYellow(80)/100 绿黄分界，T.healthRed(60)/100 黄红分界
+    const color = val >= T.healthYellow/100 ? C.green : (val >= T.healthRed/100 ? C.yellow : C.red);
     const r = 36;  // 半径加大（配合 96×96 画布）
     // 背景轨道
     cx.beginPath();
@@ -1910,12 +1935,12 @@
     const sensors = getFlatSensors();
     if(sensors.length) selectChannel(sensors[0].channelName || sensors[0].name);
 
-    pollManager.start('health', fetchHealth, 3000);
-    pollManager.start('sensors', fetchSensors, 3000);
+    pollManager.start('health', fetchHealth, POLL.health);
+    pollManager.start('sensors', fetchSensors, POLL.sensors);
     await fetchDiagnosedKeys();  // 页面加载即标记已诊断告警（持久化，刷新不丢）
-    pollManager.start('alerts', fetchAlerts, 3000);
-    pollManager.start('warnings', fetchWarnings, 3000);
-    pollManager.start('rul', fetchRul, 5000);  // RUL 退化慢，5s 轮询
+    pollManager.start('alerts', fetchAlerts, POLL.alerts);
+    pollManager.start('warnings', fetchWarnings, POLL.warnings);
+    pollManager.start('rul', fetchRul, POLL.rul);  // RUL 退化慢，5s 轮询
 
     setInterval(() => {
       const now = new Date();

@@ -89,6 +89,12 @@ def _make_predictors(model_ids: list[str]) -> dict:
     return preds
 
 
+def _wrap_source(source, model_id: str = "fd001") -> dict:
+    """Wrap a single mock source into the ``{model_id: source}`` dict that
+    RulService now expects (multi-source routing)."""
+    return {model_id: source}
+
+
 class TestChannelsWithRul:
     def test_finds_tagged_sensor(self, cfg_service: ConfigService):
         cfg_service.config_path.write_text(json.dumps({
@@ -98,7 +104,7 @@ class TestChannelsWithRul:
             ],
         }), encoding="utf-8")
         svc = RulService(
-            data_source=MagicMock(),
+            data_sources=_wrap_source(MagicMock()),
             predictors=_make_predictors(["fd001"]),
             config_service=cfg_service,
         )
@@ -111,7 +117,7 @@ class TestChannelsWithRul:
                  "description": "MSL channel, no RUL"},
             ],
         }), encoding="utf-8")
-        svc = RulService(MagicMock(), _make_predictors(["fd001"]), cfg_service)
+        svc = RulService(_wrap_source(MagicMock()), _make_predictors(["fd001"]), cfg_service)
         assert svc.channels_with_rul() == {}
 
     def test_skips_tag_with_unloaded_model(self, cfg_service: ConfigService):
@@ -122,7 +128,7 @@ class TestChannelsWithRul:
                  "description": "@rul:fd002"},
             ],
         }), encoding="utf-8")
-        svc = RulService(MagicMock(), _make_predictors(["fd001"]), cfg_service)
+        svc = RulService(_wrap_source(MagicMock()), _make_predictors(["fd001"]), cfg_service)
         assert svc.channels_with_rul() == {}
 
     def test_nested_folder(self, cfg_service: ConfigService):
@@ -136,7 +142,7 @@ class TestChannelsWithRul:
                 ]},
             ],
         }), encoding="utf-8")
-        svc = RulService(MagicMock(), _make_predictors(["fd001"]), cfg_service)
+        svc = RulService(_wrap_source(MagicMock()), _make_predictors(["fd001"]), cfg_service)
         assert svc.channels_with_rul() == {"E1": "fd001"}
 
     def test_falls_back_to_name_when_no_channelName(self, cfg_service: ConfigService):
@@ -146,7 +152,7 @@ class TestChannelsWithRul:
                  "description": "@rul:fd001"},
             ],
         }), encoding="utf-8")
-        svc = RulService(MagicMock(), _make_predictors(["fd001"]), cfg_service)
+        svc = RulService(_wrap_source(MagicMock()), _make_predictors(["fd001"]), cfg_service)
         assert svc.channels_with_rul() == {"FallbackName": "fd001"}
 
 
@@ -216,7 +222,7 @@ class TestRulServicePredict:
         # Serve a deterministic (30,14) window for any channel.
         source.get_window.return_value = np.zeros((30, 14), dtype=np.float32)
         preds = _make_predictors(["fd001"])
-        return RulService(source, preds, cfg_service)
+        return RulService(_wrap_source(source), preds, cfg_service)
 
     def test_predict_all_returns_one_result_per_tagged_channel(
         self, cfg_service: ConfigService
@@ -259,7 +265,7 @@ class TestRulServicePredict:
         svc = self._build_svc(cfg_service, ["E1"])
         svc.predict_all()
         svc.predict_all()
-        assert svc._source.advance.call_count == 2
+        assert svc._sources["fd001"].advance.call_count == 2
 
     def test_history_accumulates_and_caps(self, cfg_service: ConfigService):
         cfg_service.config_path.write_text(json.dumps({
@@ -286,7 +292,7 @@ class TestRulServicePredict:
         r = svc.predict("E1")
         assert r is not None
         assert r["channel"] == "E1"
-        assert svc._source.advance.call_count == 0
+        assert svc._sources["fd001"].advance.call_count == 0
 
     def test_predict_unknown_channel_returns_none(self, cfg_service: ConfigService):
         cfg_service.config_path.write_text(json.dumps({
@@ -312,7 +318,7 @@ class TestRulServicePredict:
         source.get_window.side_effect = lambda ch, n: (
             np.zeros((30, 14), dtype=np.float32) if ch == "E1" else None
         )
-        svc = RulService(source, _make_predictors(["fd001"]), cfg_service)
+        svc = RulService(_wrap_source(source), _make_predictors(["fd001"]), cfg_service)
         results = svc.predict_all()
         assert len(results) == 1
         assert results[0]["channel"] == "E1"
