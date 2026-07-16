@@ -34,4 +34,6 @@ urlpatterns = [
     path('api/diagnosis/done', views.diagnosis_done_view),
     path('api/diagnosis/auto', views.diagnosis_auto_view),
     path('api/diagnosis/auto/status', views.diagnosis_auto_status_view),
+    # RUL degradation prediction
+    path('api/rul', views.rul_view),
 ]

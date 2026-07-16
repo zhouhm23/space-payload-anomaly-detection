@@ -11,16 +11,25 @@ The class is lazy-loading: the PyTorch model is only instantiated and
 weights loaded on the first ``predict_rul`` call.  This keeps the ground
 server startup fast even when the RUL feature is not exercised.
 
+**Normalisation**: callers pass **raw** sensor readings (physical units, e.g.
+T24 ≈ 641 K) and the class normalises internally using the Min-Max scaler
+fitted on the training set and persisted as ``scaler_fd00X.json`` next to
+the checkpoint.  This mirrors the training pipeline
+(``experiments/rul/data_loader._normalise_sensors``) so online inference
+matches training bit-for-bit.  Pass ``raw=False`` to bypass normalisation
+if the input is already normalised (legacy/advanced use).
+
 Usage::
 
     from phm.algorithm import RULPredictor
 
     rul = RULPredictor(subset="FD001")          # lazy, no model loaded yet
-    remaining = rul.predict_rul(sensor_window)   # (30, 14) → 87.5 cycles
+    remaining = rul.predict_rul(raw_window)      # (30, 14) raw → 87.5 cycles
 """
 
 from __future__ import annotations
 
+import json
 import os
 import logging
 
@@ -133,6 +142,9 @@ class RULPredictor(BaseRULPredictor):
         self._weights_path = os.path.join(
             self._models_dir, f"{self.subset.lower()}_lstm_attn.pt"
         )
+        self._scaler_path = os.path.join(
+            self._models_dir, f"scaler_{self.subset.lower()}.json"
+        )
 
         if device == "auto":
             self._device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -142,6 +154,7 @@ class RULPredictor(BaseRULPredictor):
         # Lazy-loaded state.
         self._model: _LSTMAttentionRUL | None = None
         self._config: dict = {}
+        self._scaler: dict | None = None  # {"min":[...],"range":[...]}
         self.n_params: int = 0
         self.model_source: str = self._weights_path
 
@@ -174,12 +187,47 @@ class RULPredictor(BaseRULPredictor):
         ).to(self._device)
         model.load_state_dict(ckpt["model_state"])
         model.eval()
+
+        # Detect meta-tensor corruption: under rare race conditions (e.g. the
+        # TSPulse pipeline's from_pretrained failing mid-download and leaving
+        # torch's init_empty_weights context partially active), newly-created
+        # modules can end up with meta tensors that have no data.  Catch this
+        # here with a clear message rather than letting the subsequent .to()
+        # raise an opaque NotImplementedError.
+        bad = [n for n, p in model.named_parameters() if p.is_meta]
+        if bad:
+            raise RuntimeError(
+                f"RUL model {self.subset} has {len(bad)} meta-tensor params "
+                f"(e.g. {bad[0]}). This indicates torch's module-init state "
+                f"was corrupted (often by a concurrent from_pretrained failure). "
+                f"Retry; if it persists, load this model before any tsfm_public "
+                f"model. Param names: {bad[:5]}"
+            )
+
         self._model = model
         self.n_params = sum(p.numel() for p in model.parameters())
+
+        # Load the Min-Max scaler fitted on the training set.  Without it,
+        # predictions on raw sensor values would be garbage (the LSTM was
+        # trained on normalised [0,1] inputs).  A missing scaler is a soft
+        # error — log a warning so callers know raw=True will misbehave, but
+        # don't crash (lets raw=False legacy callers still work).
+        if os.path.exists(self._scaler_path):
+            with open(self._scaler_path, "r", encoding="utf-8") as f:
+                self._scaler = json.load(f)
+        else:
+            log.warning(
+                "RUL scaler not found: %s. Raw-input prediction (raw=True) "
+                "will produce incorrect results. Run "
+                "experiments/rul/export_scaler.py to generate it.",
+                self._scaler_path,
+            )
+
         log.info(
-            "RULPredictor loaded %s (%.2fM params, best_epoch=%d, best_rmse=%.3f)",
+            "RULPredictor loaded %s (%.2fM params, best_epoch=%d, best_rmse=%.3f, scaler=%s)",
             self.subset, self.n_params / 1e6,
             ckpt.get("best_epoch", -1), ckpt.get("best_rmse", -1),
+            "loaded" if self._scaler else "MISSING",
         )
 
     # ── Public API ─────────────────────────────────────────────────────
@@ -196,31 +244,42 @@ class RULPredictor(BaseRULPredictor):
         """RUL cap used during training (predictions are clipped to this)."""
         return self._config.get("max_rul", DEFAULT_MAX_RUL)
 
-    def predict_rul(self, window: np.ndarray) -> float:
+    def predict_rul(self, window: np.ndarray, raw: bool = True) -> float:
         """Predict remaining useful life from a sensor window.
 
         Args:
-            window: ``(window_size, n_sensors)`` normalised sensor
-                    readings.  If the shape mismatch is minor (n_sensors
-                    correct but length differs) the window is padded /
-                    truncated to ``window_size``.
+            window: ``(window_size, n_sensors)`` sensor readings.  By default
+                    ``raw=True`` — pass **physical-unit** readings (e.g. T24
+                    ≈ 641 K) and the class normalises internally using the
+                    persisted Min-Max scaler, exactly as during training.
+                    Pass ``raw=False`` if the input is already normalised to
+                    [0,1] (legacy/advanced use).
+                    Minor shape mismatch (n_sensors correct but length
+                    differs) is handled by padding / truncation.
+            raw: whether the input is in physical units (True, default) or
+                 already normalised (False).
 
         Returns:
             Predicted RUL in cycles, clipped to ``[0, max_rul]``.
         """
         self._ensure_loaded()
-        x = self._prepare_window(window)
+        x = self._prepare_window(window, raw=raw)
         with torch.no_grad():
             x_t = torch.from_numpy(x).unsqueeze(0).to(self._device)
             pred = self._model(x_t)
         rul = float(pred.squeeze().cpu().item())
         return max(0.0, min(rul, float(self.max_rul)))
 
-    def predict_rul_batch(self, windows: np.ndarray) -> np.ndarray:
+    def predict_rul_batch(
+        self, windows: np.ndarray, raw: bool = True
+    ) -> np.ndarray:
         """Batch RUL prediction.
 
         Args:
-            windows: ``(N, window_size, n_sensors)`` array.
+            windows: ``(N, window_size, n_sensors)`` array.  See
+                     :meth:`predict_rul` for the ``raw`` flag semantics.
+            raw: whether inputs are in physical units (True, default) or
+                 already normalised (False).
 
         Returns:
             ``(N,)`` array of predicted RUL values, clipped to
@@ -231,7 +290,7 @@ class RULPredictor(BaseRULPredictor):
             raise ValueError(
                 f"Expected 3-D array (N, window_size, n_sensors), got {windows.shape}"
             )
-        prepared = np.stack([self._prepare_window(w) for w in windows])
+        prepared = np.stack([self._prepare_window(w, raw=raw) for w in windows])
         with torch.no_grad():
             x_t = torch.from_numpy(prepared).to(self._device)
             preds = self._model(x_t)
@@ -240,8 +299,33 @@ class RULPredictor(BaseRULPredictor):
 
     # ── Internal helpers ───────────────────────────────────────────────
 
-    def _prepare_window(self, window: np.ndarray) -> np.ndarray:
-        """Ensure window is (window_size, n_sensors) float32, padded/truncated."""
+    def _normalise(self, raw_window: np.ndarray) -> np.ndarray:
+        """Apply training-time Min-Max normalisation to a raw sensor window.
+
+        ``raw_window`` is in physical units; output is clipped to [0,1],
+        matching ``data_loader._normalise_sensors``.  Requires the scaler
+        JSON to have been loaded — raises if missing.
+        """
+        if self._scaler is None:
+            raise RuntimeError(
+                f"Cannot normalise raw input: scaler {self._scaler_path} not "
+                f"loaded. Run experiments/rul/export_scaler.py to generate it, "
+                f"or call predict_rul(..., raw=False) with pre-normalised input."
+            )
+        mins = np.asarray(self._scaler["min"], dtype=np.float32)
+        ranges = np.asarray(self._scaler["range"], dtype=np.float32)
+        norm = (raw_window - mins) / ranges
+        return np.clip(norm, 0.0, 1.0).astype(np.float32)
+
+    def _prepare_window(
+        self, window: np.ndarray, raw: bool = True
+    ) -> np.ndarray:
+        """Ensure window is (window_size, n_sensors) float32, padded/truncated.
+
+        When ``raw=True`` the input is treated as physical-unit readings and
+        Min-Max normalised to [0,1] before returning (matching training).
+        When ``raw=False`` the input is assumed already normalised.
+        """
         w = np.asarray(window, dtype=np.float32)
         if w.ndim != 2:
             raise ValueError(
@@ -260,4 +344,8 @@ class RULPredictor(BaseRULPredictor):
             w = np.vstack([pad, w])
         elif w.shape[0] > ws:
             w = w[-ws:]  # take the most recent window_size cycles
+        # Normalise last so padding uses raw values (matches data_loader,
+        # which normalises the whole engine array then builds windows).
+        if raw:
+            w = self._normalise(w)
         return w.astype(np.float32)

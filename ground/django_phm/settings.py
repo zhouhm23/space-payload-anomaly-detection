@@ -33,13 +33,22 @@ def _load_dotenv() -> None:
     except Exception:
         pass
 
-
 _load_dotenv()
 
-# HuggingFace mirror (preserved from server.py)
+# ── HuggingFace cache + offline mode (ported from deleted server.py) ────────
+# IMPORTANT: this must run BEFORE any `from_pretrained` call.  Without it the
+# TSPulse/TTM-R3 loaders default to ~/.cache/huggingface (empty) and re-download
+# on every startup, which (a) makes startup slow and (b) when the download hits
+# an SSL error triggers a meta-tensor fallback that corrupts subsequent model
+# construction (the RUL NotImplementedError root cause).  HF_HUB_OFFLINE=1
+# forces use of the local cache and never hits the network.
+_HF_CACHE = SRC_DIR / ".hf_cache"
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-os.environ.setdefault("HF_HOME", str(SRC_DIR / ".hf_cache"))
+os.environ.setdefault("HF_HOME", str(_HF_CACHE))
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 
 # ── Django core ─────────────────────────────────────────────────────────────
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'dev-insecure-key-change-in-prod')

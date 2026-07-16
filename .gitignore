@@ -5,4 +5,5 @@
 __pycache__
 ground/device_config.json
 ground/data
-models
+# Model weights (large binary) — keep scaler/config JSONs, exclude .pt
+*.pt

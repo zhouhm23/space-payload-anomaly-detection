@@ -31,6 +31,9 @@
     chartLayout: null,          // 缓存上次 drawChart 的坐标映射，供 tooltip 用
     modalOpen: false,           // 模态框打开时暂停 canvas 重绘（避免输入卡顿）
     diagnosedKeys: new Set(),   // 已诊断告警的 key 集合 "channel|type|ts"
+    rulData: [],                // RUL 预测结果（@rul:fd00X 标记通道，C-MAPSS 基准演示）
+    rulDisabled: false,         // /api/rul 返回 503（资产缺失）
+    rulFetchError: false,       // /api/rul 报错（模型加载竞态等），保留上次数据
   };
 
   function formatTime(ts) {
@@ -92,6 +95,7 @@
     alertVerdict(channel, ts, verdict) { return this.request('POST','/api/alerts/verdict',{channel,alert_ts:ts,human_verdict:verdict}); },
     diagnosisAuto() { return this.request('POST','/api/diagnosis/auto',{}); },
     diagnosisAutoStatus() { return this.request('GET','/api/diagnosis/auto/status'); },
+    rul() { return this.request('GET','/api/rul'); },
     async exportData(params) {
       const blob = await this.request('GET','/api/export?'+new URLSearchParams(params));
       const url = URL.createObjectURL(blob);
@@ -477,6 +481,78 @@
         <span style="font-size:0.7rem;">${formatTime(w.created_at)}</span>
         ${verdictButtons('predicted', w.id, w.human_verdict)}
         <button class="diag-btn ${done ? 'diag-done' : ''}" onclick="requestDiagnosis('${w.channel}','predicted',${w.created_at},this)">${done ? '✓' : '诊断'}</button>
+      </div>`;
+    }).join('');
+  }
+
+  // ====================== RUL 剩余寿命（Slice 3） ======================
+  async function fetchRul() {
+    try {
+      const data = await api.rul();
+      // 503 disabled 时 data 形如 {status:"disabled"}；正常 {status:"ok", data:[...]}
+      if (data && data.status === 'ok' && Array.isArray(data.data)) {
+        state.rulData = data.data;
+      } else if (data && data.status === 'disabled') {
+        // 服务未启用（资产缺失），保留空态提示，不覆盖已有数据
+        state.rulDisabled = true;
+      }
+    } catch (e) {
+      // API 报错（如模型加载竞态/500）——保留上次成功的数据，不清空面板。
+      // pollManager 会重试，下一次轮询成功即恢复。
+      if (!state.rulData.length) state.rulFetchError = true;
+    }
+    renderRulPanel();
+  }
+
+  function rulColor(ratio) {
+    // ratio = rul / max_rul。>0.6 绿（健康）/ 0.25-0.6 黄（关注）/ <0.25 红（告急）
+    if (ratio > 0.6) return 'var(--accent-green)';
+    if (ratio > 0.25) return 'var(--accent-yellow)';
+    return 'var(--accent-red)';
+  }
+
+  function rulSparkline(history, color) {
+    // history 是最近 N 次 RUL 值的数组；画一个迷你 SVG 折线（无坐标轴）。
+    if (!history || history.length < 2) return '';
+    const w = 80, h = 20, pad = 2;
+    const lo = Math.min(...history), hi = Math.max(...history);
+    const span = (hi - lo) || 1;
+    const pts = history.map((v, i) => {
+      const x = pad + (i / (history.length - 1)) * (w - 2 * pad);
+      const y = h - pad - ((v - lo) / span) * (h - 2 * pad);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    return `<svg width="${w}" height="${h}" style="vertical-align:middle;"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5"/></svg>`;
+  }
+
+  function renderRulPanel() {
+    const container = document.getElementById('rulList');
+    if (!container) return;
+    if (!state.rulData.length) {
+      // 区分三种空态：服务禁用 / 加载出错 / 确无标记通道
+      let msg = '无启用 RUL 的通道（在后台设备树 description 加 @rul:fd001）';
+      if (state.rulDisabled) msg = 'RUL 服务未启用（C-MAPSS 数据/权重缺失）';
+      else if (state.rulFetchError) msg = 'RUL 数据加载中…（模型首次推理较慢，稍候自动刷新）';
+      container.innerHTML = `<div class="empty-state">${msg}</div>`;
+      return;
+    }
+    container.innerHTML = state.rulData.map(r => {
+      const ratio = r.max_rul > 0 ? r.rul / r.max_rul : 0;
+      const col = rulColor(ratio);
+      const pct = Math.max(0, Math.min(100, ratio * 100)).toFixed(0);
+      const spark = rulSparkline(r.history, col);
+      return `
+      <div class="rul-item">
+        <div class="rul-head">
+          <span class="rul-ch">${r.channel}</span>
+          <span class="rul-model">${(r.model || '').toUpperCase()}</span>
+        </div>
+        <div class="rul-body">
+          <span class="rul-val" style="color:${col}">${r.rul}</span>
+          <span class="rul-unit">${r.unit || 'cycles'}</span>
+          ${spark}
+        </div>
+        <div class="rul-bar"><div class="rul-bar-fill" style="width:${pct}%;background:${col}"></div></div>
       </div>`;
     }).join('');
   }
@@ -1839,6 +1915,7 @@
     await fetchDiagnosedKeys();  // 页面加载即标记已诊断告警（持久化，刷新不丢）
     pollManager.start('alerts', fetchAlerts, 3000);
     pollManager.start('warnings', fetchWarnings, 3000);
+    pollManager.start('rul', fetchRul, 5000);  // RUL 退化慢，5s 轮询
 
     setInterval(() => {
       const now = new Date();

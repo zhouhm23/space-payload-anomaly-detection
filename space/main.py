@@ -27,6 +27,12 @@ if _HERE not in sys.path:
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HOME", os.path.join(_HERE, "..", ".hf_cache"))
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+# Force offline mode: models are pre-cached in src/.hf_cache.  Without this
+# transformers still pings huggingface.co on every startup to check for updates
+# — slow (multi-second SSL handshake) and, when the network/SSL fails, it
+# triggers a meta-tensor fallback that corrupts model construction.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(name)s] %(levelname)s %(message)s")

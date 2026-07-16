@@ -192,3 +192,59 @@ class TestDiagnosis(TestCase):
             '/api/diagnosis', data=json.dumps(body), content_type='application/json'
         )
         assert resp.status_code == 422
+
+
+@pytest.mark.django_db
+class TestRul(TestCase):
+    """Fifth batch: RUL degradation prediction."""
+
+    def setUp(self):
+        services_bridge.start()
+        self.client = Client()
+
+    def test_get_rul_returns_200_or_503(self):
+        # Status depends on whether C-MAPSS data + weights are present in the
+        # test environment.  Either is acceptable — the contract is:
+        #   200 {"status":"ok","data":[...]} when enabled
+        #   503 {"status":"disabled",...} when assets missing
+        resp = self.client.get('/api/rul')
+        assert resp.status_code in (200, 503)
+        data = resp.json()
+        assert data['status'] in ('ok', 'disabled')
+
+    def test_get_rul_503_when_service_none(self):
+        """When c.rul is None the view returns 503 with a helpful message."""
+        c = services_bridge.get_container()
+        if c.rul is not None:
+            pytest.skip("RUL service is enabled — 503 path not exercisable here")
+        resp = self.client.get('/api/rul')
+        assert resp.status_code == 503
+        assert resp.json()['status'] == 'disabled'
+
+    def test_get_rul_data_shape_when_enabled(self):
+        """When RUL is enabled, /api/rul returns a list of per-channel dicts."""
+        c = services_bridge.get_container()
+        if c.rul is None:
+            pytest.skip("RUL service disabled — data-shape test needs assets")
+        resp = self.client.get('/api/rul')
+        assert resp.status_code == 200
+        data = resp.json()['data']
+        assert isinstance(data, list)
+        if data:
+            r = data[0]
+            for key in ('channel', 'rul', 'max_rul', 'unit', 'model', 'source', 'history'):
+                assert key in r, f"missing field {key}"
+
+    def test_get_rul_single_channel(self):
+        """?channel=xxx returns a single result (or null if not tagged)."""
+        c = services_bridge.get_container()
+        if c.rul is None:
+            pytest.skip("RUL service disabled")
+        resp = self.client.get('/api/rul', {'channel': 'CMAPSS_FD001_1'})
+        assert resp.status_code == 200
+        data = resp.json()['data']
+        assert data is None or isinstance(data, dict)
+
+    def test_rul_method_not_allowed(self):
+        resp = self.client.post('/api/rul', data='{}', content_type='application/json')
+        assert resp.status_code == 405

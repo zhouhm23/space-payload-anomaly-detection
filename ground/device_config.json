@@ -22,6 +22,15 @@
           "channelName": "D-14",
           "blockSize": 512,
           "description": "载荷驱动机构位移反馈通道。监测驱动电机位置传感器输出，归一化值。正常时随机构动作产生阶梯式变化，异常表现为卡滞（信号不动）或抖动（高频噪声）。"
+        },
+        {
+          "id": "node-cmapss-fd001-demo",
+          "name": "CMAPSS-1",
+          "type": "sensor",
+          "sourceId": "cmapss:FD001:1",
+          "channelName": "CMAPSS_FD001_1",
+          "blockSize": 30,
+          "description": "C-MAPSS 涡扇发动机退化基准（1 号机）。14 传感器随运行周期单调漂移，体现物理退化趋势。@rul:fd001 启用 RUL 退化预测（基准演示）。"
         }
       ]
     },

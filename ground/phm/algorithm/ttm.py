@@ -6,20 +6,22 @@ name (``TrendForecaster``) and method signature are unchanged.
 
 from __future__ import annotations
 
-import os
-
 import numpy as np
 import pandas as pd
 import torch
 from sklearn.preprocessing import StandardScaler
 
-from tsfm_public.toolkit.get_model import get_model
 from tsfm_public.toolkit.time_series_forecasting_pipeline import (
     TimeSeriesForecastingPipeline,
 )
 from tsfm_public.toolkit.time_series_preprocessor import TimeSeriesPreprocessor
 
+from ._hf_cache import ensure_offline_env, model_load_lock, resolve_local_model_path
 from .base import BaseForecaster
+
+# Set offline mode BEFORE any from_pretrained call so the loader never pings
+# huggingface.co (avoids multi-second SSL timeouts + meta-tensor corruption).
+ensure_offline_env()
 
 # Model constants — preserved for backwards-compatible imports.
 DEFAULT_MODEL = "ibm-research/ttm-r3"
@@ -43,25 +45,48 @@ class TrendForecaster(BaseForecaster):
 
     def __init__(self, device="cuda", model_path=None):
         self.device = device
-        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
         path = model_path or DEFAULT_MODEL
-        if path and os.path.isdir(path):
-            # Local model: load directly without get_model
-            from tsfm_public.models.tinytimemixer import TinyTimeMixerForPrediction
-            self.model = TinyTimeMixerForPrediction.from_pretrained(
-                path, prediction_filter_length=PREDICTION_LENGTH
-            )
-        else:
-            # Online model: use get_model for automatic branch matching
-            self.model = get_model(
-                model_path=path,
-                context_length=CONTEXT_LENGTH,
-                prediction_length=PREDICTION_LENGTH,
-            )
+        # Serialise model construction: get_model / from_pretrained use
+        # non-thread-safe module-level init hooks; concurrent calls corrupt
+        # torch's parameter state and produce meta tensors.
+        with model_load_lock:
+            self.model = self._load_model(path)
         self.model = self.model.to(device).eval()
         self.n_params = sum(p.numel() for p in self.model.parameters())
         self.model_source = path
+
+    @staticmethod
+    def _load_model(path: str):
+        """Load TTM-R3 with the correct architecture class, fully offline.
+
+        ``tsfm_public.toolkit.get_model.get_model`` knows how to pick the right
+        model class + revision for a given (context_length, prediction_length),
+        but it ignores ``HF_HUB_OFFLINE`` and always pings huggingface.co —
+        which fails with an SSL error on this machine and corrupts model
+        construction (meta tensors).  We replicate its selection logic for the
+        one configuration this system uses (context=512, prediction=96 on
+        ``ibm-research/ttm-r3``) and call ``from_pretrained`` directly with the
+        resolved revision, so the HF cache is read without any network access.
+
+        The selection rule (from get_model source): for r3 models the chosen
+        revision contains "-dec-" → use ``TinyTimeMixerForDecomposedPrediction``;
+        otherwise ``TinyTimeMixerForPrediction``.  Using the wrong class leaves
+        weights randomly initialised and produces jagged garbage predictions.
+        """
+        # The r3 revision for context=512, prediction=96 is "512-96-dec-512-r3".
+        # It contains "-dec-" → decomposed prediction variant.
+        # Resolve to a local snapshot path so from_pretrained never pings the
+        # hub (a hub id + revision forces a network round-trip even with
+        # HF_HUB_OFFLINE set, because transformers must confirm the revision).
+        local_path = resolve_local_model_path(path) or path
+        from tsfm_public.models.tinytimemixer import (
+            TinyTimeMixerForDecomposedPrediction,
+        )
+        return TinyTimeMixerForDecomposedPrediction.from_pretrained(
+            local_path,
+            prediction_filter_length=PREDICTION_LENGTH,
+        )
 
     def forecast(self, values, train_values_for_scaler=None):
         """Forecast future PREDICTION_LENGTH steps from the last CONTEXT_LENGTH steps.

@@ -1,4 +1,4 @@
-"""Django views for PHM API endpoints (22 total, paths identical to FastAPI).
+"""Django views for PHM API endpoints (23 total, paths identical to FastAPI).
 
 All /api/* views are CSRF-exempt (called by frontend JS via fetch).
 Services are accessed through services_bridge.get_container().
@@ -402,6 +402,37 @@ def diagnosis_auto_status_view(request: HttpRequest):
     if not c.diagnosis:
         return JsonResponse({"running": False, "done": 0, "total": 0, "errors": 0})
     return JsonResponse(c.diagnosis.auto_status)
+
+
+# ── RUL degradation prediction ──────────────────────────────────────────────
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def rul_view(request: HttpRequest):
+    """Return RUL predictions for channels tagged ``@rul:fd00X``.
+
+    With no ``channel`` query param, advances the C-MAPSS playback by one
+    cycle and predicts for every tagged channel (the front-end polls this).
+    With ``?channel=xxx`` returns a single channel without advancing.
+    """
+    c = get_container()
+    if c.rul is None:
+        return JsonResponse({
+            "status": "disabled",
+            "message": "RUL 服务未启用（C-MAPSS 数据 / FD001 权重 / scaler 缺失）",
+        }, status=503)
+    channel = request.GET.get('channel')
+    if channel:
+        result = c.rul.predict(channel)
+        if result is None:
+            return JsonResponse({
+                "status": "ok",
+                "data": None,
+                "message": "通道未启用 RUL 或无足够数据",
+            })
+        return JsonResponse({"status": "ok", "data": result})
+    data = c.rul.predict_all()
+    return JsonResponse({"status": "ok", "data": data})
 
 
 # ── monitor page ────────────────────────────────────────────────────────────

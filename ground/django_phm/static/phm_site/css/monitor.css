@@ -290,6 +290,36 @@
       justify-content:center;
       padding:20px;
     }
+    /* RUL 剩余寿命卡片（Slice 3） */
+    .rul-item {
+      padding:8px 0;
+      border-bottom:1px solid var(--border-color);
+    }
+    .rul-item:last-child { border-bottom:none; }
+    .rul-head {
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      font-size:0.75rem;
+      margin-bottom:4px;
+    }
+    .rul-ch { color:var(--text-primary); font-weight:600; }
+    .rul-model {
+      font-size:0.6rem; padding:1px 5px; border-radius:6px;
+      background:var(--border-color); color:var(--text-secondary);
+    }
+    .rul-body {
+      display:flex;
+      align-items:baseline;
+      gap:4px;
+      margin-bottom:4px;
+    }
+    .rul-val { font-size:1.3rem; font-weight:700; }
+    .rul-unit { font-size:0.65rem; color:var(--text-secondary); }
+    .rul-bar {
+      height:4px; background:var(--border-color); border-radius:2px; overflow:hidden;
+    }
+    .rul-bar-fill { height:100%; transition:width 0.5s ease, background 0.5s ease; }
     .diag-btn {
       background:transparent; border:1px solid var(--accent-blue, #4a9eff);
       color:var(--accent-blue, #4a9eff); border-radius:3px;

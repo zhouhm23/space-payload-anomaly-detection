@@ -12,6 +12,7 @@ standalone process and does not import the ground PHM package).
 """
 
 import os
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
@@ -22,6 +23,30 @@ from tsfm_public.toolkit.time_series_anomaly_detection_pipeline import (
     TimeSeriesAnomalyDetectionPipeline,
     AnomalyScoreMethods,
 )
+
+
+def _resolve_local_snapshot(hub_id: str) -> str | None:
+    """Resolve a HF hub id to its local snapshot dir under HF_HOME.
+
+    Mirrors ground/phm/algorithm/_hf_cache.py (kept inline here because the
+    space segment is a standalone process that must not import the ground PHM
+    package).  Returns the snapshot path if cached, else None — so the loader
+    can fall back to from_pretrained with the hub id (which, with
+    HF_HUB_OFFLINE=1 set in main.py, will still read from the cache).
+    """
+    hf_home = os.environ.get("HF_HOME", "")
+    if not hf_home:
+        # src/space/anomaly_detection.py → src/.hf_cache
+        hf_home = str(Path(__file__).resolve().parent.parent / ".hf_cache")
+    cache_name = "models--" + hub_id.replace("/", "--")
+    snapshots = Path(hf_home) / "hub" / cache_name / "snapshots"
+    if not snapshots.is_dir():
+        return None
+    for entry in sorted(snapshots.iterdir()):
+        if entry.is_dir() and (entry / "config.json").exists():
+            return str(entry)
+    return None
+
 
 # Model constants
 DEFAULT_MODEL = "ibm-granite/granite-timeseries-tspulse-r1"
@@ -44,9 +69,9 @@ class AnomalyDetector:
 
     def __init__(self, device="cuda", model_path=None, model_revision="main"):
         self.device = device
-        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
-        path = model_path or DEFAULT_MODEL
+        raw_path = model_path or DEFAULT_MODEL
+        path = _resolve_local_snapshot(raw_path) or raw_path
         load_kwargs = {}
         # If path is a local directory, don't pass revision
         if path and os.path.isdir(path):

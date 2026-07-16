@@ -88,7 +88,10 @@
         <button id="autoDiagBtn" class="diag-btn" data-running="false" onclick="toggleAutoDiag()">🤖 全自动诊断</button>
         <span id="autoDiagStatus" style="font-size:0.7rem;color:var(--text-secondary);"></span>
       </div>
-      <div class="right-card placeholder-card">🚧 RUL 剩余寿命 — 开发中</div>
+      <div class="right-card" id="rulCard">
+        <h3>🔋 RUL 剩余寿命 <span style="font-size:0.65rem;color:var(--text-secondary);">C-MAPSS 基准</span></h3>
+        <div id="rulList"></div>
+      </div>
     </div>
   </div>
 

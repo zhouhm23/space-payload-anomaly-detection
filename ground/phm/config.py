@@ -6,6 +6,8 @@ alarm / warning / health services.
 
 from __future__ import annotations
 
+from pathlib import Path as _Path
+
 # ── Thresholds ──────────────────────────────────────────────────────────────
 # Anomaly score above which a sample is considered anomalous.  Aligns with
 # the space-side alert trigger (space/main.py ALERT_THRESHOLD).  Tuned at
@@ -53,3 +55,18 @@ LLM_BASE_URL: str = _os.environ.get("OPENAI_BASE_URL", "")
 LLM_API_KEY: str = _os.environ.get("OPENAI_API_KEY", "")
 LLM_MODEL: str = _os.environ.get("LLM_MODEL", "deepseek-chat")
 LLM_TIMEOUT_SEC: float = 30.0
+
+# ── RUL degradation prediction (Slice 3) ────────────────────────────────────
+# Long-horizon degradation forecast via LSTM+Attention trained on NASA C-MAPSS.
+# The development-time data source replays the C-MAPSS benchmark; channels opt
+# in by carrying an ``@rul:fd001`` tag in their device-tree description.
+# When RUL_ENABLED is True but the data dir / weights are missing, deps.init
+# logs a warning and leaves c.rul = None (the /api/rul endpoint returns 503).
+_RUL_HERE = _Path(__file__).resolve().parent  # src/ground/phm/
+RUL_ENABLED: bool = True
+RUL_CMAPSS_DATA_DIR: str = str(
+    _RUL_HERE.parent.parent.parent / "datasets" / "CMAPSSData"
+)
+RUL_WINDOW_CYCLES: int = 30       # LSTM input length (matches training)
+RUL_HISTORY_LEN: int = 20         # rolling RUL history kept per channel
+RUL_POLL_INTERVAL_SEC: float = 5.0  # front-end poll interval (degradation is slow)

@@ -20,7 +20,12 @@ from tsfm_public.toolkit.time_series_anomaly_detection_pipeline import (
     AnomalyScoreMethods,
 )
 
+from ._hf_cache import ensure_offline_env, resolve_local_model_path, model_load_lock
 from .base import BaseDetector
+
+# Set offline mode BEFORE any from_pretrained call so the loader never pings
+# huggingface.co (avoids multi-second SSL timeouts + meta-tensor corruption).
+ensure_offline_env()
 
 # Model constants — preserved for backwards-compatible ``from ... import
 # CONTEXT_LENGTH`` callers (e.g. ground/tests/test_models.py).
@@ -44,9 +49,10 @@ class AnomalyDetector(BaseDetector):
 
     def __init__(self, device="cuda", model_path=None, model_revision="main"):
         self.device = device
-        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
-        path = model_path or DEFAULT_MODEL
+        # Resolve hub id → local snapshot path so the loader stays offline.
+        raw_path = model_path or DEFAULT_MODEL
+        path = resolve_local_model_path(raw_path) or raw_path
         load_kwargs = {}
         # If path is a local directory, don't pass revision
         if path and os.path.isdir(path):
@@ -54,7 +60,9 @@ class AnomalyDetector(BaseDetector):
         else:
             load_kwargs = {"revision": model_revision}
 
-        self.model = TSPulseForReconstruction.from_pretrained(path, **load_kwargs)
+        # Serialise model construction (see _hf_cache.model_load_lock docstring).
+        with model_load_lock:
+            self.model = TSPulseForReconstruction.from_pretrained(path, **load_kwargs)
         self.model = self.model.to(device).float().eval()
         self.n_params = sum(p.numel() for p in self.model.parameters())
         self.model_source = path
