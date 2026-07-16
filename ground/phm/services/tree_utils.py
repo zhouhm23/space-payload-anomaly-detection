@@ -122,6 +122,31 @@ def _find_node_by_id(tree: list[Node], node_id: str) -> Node | None:
     return None
 
 
+def remove_node(tree: list[Node], node_id: str) -> bool:
+    """Remove the node with ``node_id`` from ``tree`` in place.
+
+    Walks the tree depth-first; the first match is deleted and the function
+    returns ``True``.  Removing a folder also discards its ``children``.
+    Returns ``False`` if no node with that id exists.
+
+    The list is mutated in place — callers that need the original tree
+    should pass a deep copy.  This matches the semantics of
+    :func:`list.remove` and keeps the helper allocation-free for the
+    common ``load → modify → save`` CLI flow.
+    """
+    for i, n in enumerate(tree):
+        if not isinstance(n, dict):
+            continue
+        if n.get("id") == node_id:
+            del tree[i]
+            return True
+    for n in tree:
+        if isinstance(n, dict) and _is_folder(n):
+            if remove_node(n.get("children") or [], node_id):
+                return True
+    return False
+
+
 def get_sensors_in_folder(tree: list[Node], folder_id: str) -> list[Node]:
     """Return all sensor nodes under the folder with ``folder_id`` (recursive).
 
@@ -153,4 +178,5 @@ __all__ = [
     "get_sensor_to_folder",
     "get_sensors_in_folder",
     "get_aggregation_strategy",
+    "remove_node",
 ]

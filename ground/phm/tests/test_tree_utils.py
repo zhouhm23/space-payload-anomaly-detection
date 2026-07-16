@@ -20,6 +20,7 @@ from phm.services.tree_utils import (  # noqa: E402
     get_folders,
     get_sensor_to_folder,
     get_sensors_in_folder,
+    remove_node,
 )
 
 
@@ -218,3 +219,50 @@ class TestGetAggregationStrategy:
     def test_none_falls_back_to_min(self):
         assert get_aggregation_strategy({}) == "min"
         assert get_aggregation_strategy(None) == "min"  # type: ignore[arg-type]
+
+
+# ---- remove_node ------------------------------------------------------------
+
+
+class TestRemoveNode:
+    def test_remove_top_level_sensor(self):
+        tree = _nested_tree()
+        assert remove_node(tree, "s4") is True
+        ids = [n.get("id") for n in get_flat_sensors(tree)]
+        assert "s4" not in ids
+        # Other sensors untouched
+        assert {"s1", "s2", "s3"} == set(ids)
+
+    def test_remove_nested_sensor(self):
+        tree = _nested_tree()
+        assert remove_node(tree, "s1") is True
+        ids = [n.get("id") for n in get_flat_sensors(tree)]
+        assert "s1" not in ids
+        assert {"s2", "s3", "s4"} == set(ids)
+
+    def test_remove_folder_drops_children(self):
+        tree = _nested_tree()
+        # Removing folder_power should also drop s1 + s2 inside it.
+        assert remove_node(tree, "folder_power") is True
+        ids = [n.get("id") for n in get_flat_sensors(tree)]
+        assert "s1" not in ids and "s2" not in ids
+        assert {"s3", "s4"} == set(ids)
+        folders = [f.get("id") for f in get_folders(tree)]
+        assert "folder_power" not in folders
+
+    def test_remove_nonexistent_returns_false(self):
+        tree = _nested_tree()
+        original_count = len(get_flat_sensors(tree))
+        assert remove_node(tree, "nope") is False
+        # Tree unchanged
+        assert len(get_flat_sensors(tree)) == original_count
+
+    def test_remove_from_empty_tree(self):
+        assert remove_node([], "x") is False
+
+    def test_mutates_in_place(self):
+        """Same list object is mutated — caller sees the change directly."""
+        tree = _nested_tree()
+        original_id = id(tree)
+        remove_node(tree, "s1")
+        assert id(tree) == original_id
