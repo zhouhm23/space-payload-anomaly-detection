@@ -1,27 +1,34 @@
 """End-to-end integration test with golden-value verification.
 
-Launches the space segment as a subprocess, connects via TCP, verifies:
+Launches two subprocesses (signal_generator + DAQ main.py), connects via
+TCP as a ground client, verifies:
 
   1. MSL C-1 telemetry matches pre-computed golden values (mean/std/min/max).
   2. Detection scores are present and non-trivial (not all-zero).
-  3. Channel switch MSL→SMAP: telemetry changes to match SMAP E-1 golden.
-  4. Reconfig latency bounded (<5 s after sending config).
+  3. loop=True keeps producing data after exhaustion.
+  4. Space TCP server stays reachable.
   5. Forecaster produces valid 96-step output (no NaN).
   6. Space shutdown handled gracefully.
+  7. After data exhausted, polling still reaches space (not timeout).
+
+M1.2 architecture: signal generator (owns SensorSource) + DAQ card (does
+detection + TCP) + ground client. The test creates temporary config files
+so it doesn't pollute the default ``space_daq.json`` / ``signal_sources.json``.
 
 Golden values computed directly from TSB-UAD dataset files:
     MSL  C-1  first-512: mean=-0.860542 std=0.245817 min=-1.0 max=-0.046802
-    SMAP E-1  first-512: mean=-0.609375 std=0.792882 min=-1.0 max=1.0
 
 Run:
     pytest tests/test_e2e.py -v -s
 """
 
+import json
 import os
 import sys
 import time
 import socket
 import subprocess
+import tempfile
 
 import numpy as np
 import pytest
@@ -36,7 +43,8 @@ from ground.comm import GroundClient, TelemetryPacket, AlertPacket
 
 SPACE_PYTHON = os.path.join(_SRC, ".conda-env", "python.exe")
 SPACE_HOST = "127.0.0.1"
-SPACE_PORT = 9877  # avoid clashing with default 9876
+SPACE_PORT = 9877   # DAQ TCP port (avoid default 9876)
+IPC_PORT = 9879     # signal-generator IPC port (avoid default 9878)
 TEST_WINDOW = 512
 TEST_RATE = 200  # fast enough so each window cycle takes ~2.5s
 
@@ -51,14 +59,6 @@ GOLDEN_MSL_C1 = {
     "max": 1.0,
     "first5": [-0.9921996593475342, -0.9875195026397705,
                -0.9656786322593689, -0.9407176375389099, -0.8471139073371887],
-}
-GOLDEN_SMAP_E1 = {
-    "channel": "E-1",
-    "mean": -0.55859375,
-    "std": 0.8294413685798645,
-    "min": -1.0,
-    "max": 1.0,
-    "first5": [-1.0, -1.0, -1.0, -1.0, -1.0],
 }
 STAT_TOL = 1e-4
 
@@ -77,45 +77,20 @@ def _wait_for_port(host, port, timeout=60):
     return False
 
 
-def _assert_golden(raw, golden, label):
-    """Assert raw_values match pre-computed golden statistics."""
-    assert len(raw) == TEST_WINDOW, \
-        f"[{label}] Expected {TEST_WINDOW} samples, got {len(raw)}"
-    # Statistical fingerprint — if the data is from the right channel these
-    # must match to ~1e-4 (float32 precision).
-    assert abs(float(np.mean(raw)) - golden["mean"]) < STAT_TOL, \
-        f"[{label}] mean: got {float(np.mean(raw)):.6f}, expected {golden['mean']:.6f}"
-    assert abs(float(np.std(raw)) - golden["std"]) < STAT_TOL, \
-        f"[{label}] std: got {float(np.std(raw)):.6f}, expected {golden['std']:.6f}"
-    assert abs(float(np.min(raw)) - golden["min"]) < STAT_TOL, \
-        f"[{label}] min: got {float(np.min(raw)):.6f}, expected {golden['min']:.6f}"
-    assert abs(float(np.max(raw)) - golden["max"]) < STAT_TOL, \
-        f"[{label}] max: got {float(np.max(raw)):.6f}, expected {golden['max']:.6f}"
-
-
 def _verify_against_dataset(raw, dataset, channel, label):
-    """Verify raw_values exactly match a contiguous slice of the dataset.
-
-    Searches all 512-point windows in the dataset for an exact match.
-    This proves the telemetry came from the real dataset file (not zeros,
-    not synthetic, not wrong channel).
-    """
-    import sys
+    """Verify raw_values exactly match a contiguous slice of the dataset."""
     sys.path.insert(0, os.path.join(_SRC, "space"))
     from data_loader import list_channels, load_channel
-    import numpy as np
 
     chs = list_channels(dataset)
     match = [c for c in chs if c[0] == channel]
     assert match, f"Channel {channel} not in {dataset}"
     ts, _ = load_channel(match[0][2], match[0][1])
 
-    # Search for exact match (first 5 points is enough as fingerprint)
     fp = raw[:5]
     found = False
     for start in range(0, len(ts) - TEST_WINDOW + 1, TEST_WINDOW):
         if np.allclose(ts[start:start + 5], fp, atol=STAT_TOL):
-            # Full window check
             if np.allclose(ts[start:start + TEST_WINDOW], raw, atol=STAT_TOL):
                 found = True
                 break
@@ -135,46 +110,107 @@ def _drain(client, cfg, n_polls=8, delay=0.5):
     return all_t, all_a
 
 
+def _write_temp_configs(tmpdir, sample_rate, window):
+    """Create temporary space_daq.json + signal_sources.json with only C-1.
+
+    Keeps test isolated from the default configs under space/data/.
+    """
+    daq_cfg = {
+        "sample_rate": sample_rate,
+        "window_size": window,
+        "host": SPACE_HOST,
+        "port": SPACE_PORT,
+        "channels": [
+            {"id": 0, "name": "C-1", "enabled": True, "isSpecial": False},
+        ],
+    }
+    sig_cfg = {
+        "default_sample_rate": sample_rate,
+        "bindings": [
+            {"channel": "C-1", "sourceId": "file:NASA-MSL/C-1", "loop": True},
+        ],
+    }
+    daq_path = os.path.join(tmpdir, "space_daq.json")
+    sig_path = os.path.join(tmpdir, "signal_sources.json")
+    with open(daq_path, "w", encoding="utf-8") as f:
+        json.dump(daq_cfg, f, ensure_ascii=False, indent=2)
+    with open(sig_path, "w", encoding="utf-8") as f:
+        json.dump(sig_cfg, f, ensure_ascii=False, indent=2)
+    return daq_path, sig_path
+
+
 @pytest.fixture(scope="module")
-def space_process():
+def space_processes():
+    """Start signal_generator + DAQ main.py, return (gen_proc, daq_proc).
+
+    Uses temporary config files so the test is isolated from default configs.
+    """
     env = os.environ.copy()
     env["PYTHONPATH"] = _SRC
-    # Ensure space subprocess can load models from local cache without network
     env["HF_HUB_OFFLINE"] = "1"
     env["HF_DATASETS_OFFLINE"] = "1"
     env["HF_HOME"] = os.path.join(_SRC, ".hf_cache")
     env["HF_ENDPOINT"] = "https://hf-mirror.com"
-    proc = subprocess.Popen(
+
+    tmpdir = tempfile.mkdtemp(prefix="phm_e2e_")
+    daq_path, sig_path = _write_temp_configs(tmpdir, TEST_RATE, TEST_WINDOW)
+
+    # 1. Start signal generator
+    gen_proc = subprocess.Popen(
+        [SPACE_PYTHON, "-m", "space.signal_generator",
+         "--port", str(IPC_PORT),
+         "--config", sig_path],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=_SRC,
+    )
+    # Wait for IPC server
+    if not _wait_for_port("127.0.0.1", IPC_PORT, timeout=30):
+        out = gen_proc.stdout.read().decode("utf-8", errors="replace") if gen_proc.stdout else ""
+        gen_proc.kill()
+        pytest.fail(f"Signal generator did not start.\nOutput:\n{out}")
+
+    # 2. Start DAQ main.py (connects to IPC + serves TCP)
+    daq_proc = subprocess.Popen(
         [SPACE_PYTHON, "-m", "space.main",
+         "--daq-config", daq_path,
+         "--ipc-port", str(IPC_PORT),
          "--host", SPACE_HOST, "--port", str(SPACE_PORT),
-         "--source", "file:NASA-MSL/C-1",
          "--sample-rate", str(TEST_RATE), "--window", str(TEST_WINDOW)],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=_SRC,
     )
-    if not _wait_for_port(SPACE_HOST, SPACE_PORT, timeout=90):
-        out = proc.stdout.read().decode("utf-8", errors="replace") if proc.stdout else ""
-        proc.kill()
-        pytest.fail(f"Space segment did not start.\nOutput:\n{out}")
-    yield proc
-    proc.terminate()
+    if not _wait_for_port(SPACE_HOST, SPACE_PORT, timeout=120):
+        out = daq_proc.stdout.read().decode("utf-8", errors="replace") if daq_proc.stdout else ""
+        gen_proc.terminate(); daq_proc.kill()
+        pytest.fail(f"DAQ main.py did not start.\nOutput:\n{out}")
+
+    yield gen_proc, daq_proc
+
+    for p in (daq_proc, gen_proc):
+        p.terminate()
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill()
+
+    # Clean up temp configs
     try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    except Exception:
+        pass
 
 
 class TestE2E:
-    """Full pipeline: space → TCP → ground client, with golden-value checks."""
+    """Full pipeline: signal_gen → DAQ → TCP → ground client, with golden checks."""
 
     @staticmethod
-    def _cfg(source_id="file:NASA-MSL/C-1"):
-        return {"source_id": source_id, "sample_rate": TEST_RATE}
+    def _cfg(channel="C-1"):
+        return {"source_id": channel, "sample_rate": TEST_RATE}
 
-    def test_1_msl_c1_golden_values(self, space_process):
+    def test_1_msl_c1_golden_values(self, space_processes):
         """MSL C-1 telemetry must exactly match a contiguous slice of the dataset."""
         client = GroundClient(host=SPACE_HOST, port=SPACE_PORT, timeout=3)
         telemetry, _ = _drain(client, self._cfg())
-        assert len(telemetry) > 0, "No telemetry from MSL C-1"
+        assert len(telemetry) > 0, "No telemetry from C-1"
 
         full = [p for p in telemetry if len(p.raw_values) == TEST_WINDOW]
         assert full, f"No full-length packets; got {[len(p.raw_values) for p in telemetry]}"
@@ -182,20 +218,10 @@ class TestE2E:
         assert pkt.channel == GOLDEN_MSL_C1["channel"], \
             f"Channel: got {pkt.channel}, expected {GOLDEN_MSL_C1['channel']}"
 
-        # Exact match against the actual dataset file — catches wrong-channel,
-        # all-zeros, or corrupted data bugs that statistical checks would miss.
         _verify_against_dataset(pkt.raw_values, "NASA-MSL", "C-1", "MSL C-1")
 
-    def test_2_detection_scores_nontrivial(self, space_process):
-        """Space segment must return non-trivial detection scores for telemetry.
-
-        MSL C-1 data at offset [512:1024] contains 201 ground-truth anomaly
-        points (labels=1).  The fixed TSPulse detector produces per-point
-        reconstruction error scores normalized to [0, 1], so:
-          - All 512 points should have scores (no zeros-only output)
-          - max score must be > 0 (broken pipeline returned all-zeros)
-          - Scores on anomaly points should be higher than normal points
-        """
+    def test_2_detection_scores_nontrivial(self, space_processes):
+        """Detection scores must be present and non-trivial (not all-zero)."""
         client = GroundClient(host=SPACE_HOST, port=SPACE_PORT, timeout=3)
         telemetry, _ = _drain(client, self._cfg())
         assert len(telemetry) > 0
@@ -212,24 +238,21 @@ class TestE2E:
         assert int(np.count_nonzero(sc)) > TEST_WINDOW // 2, \
             f"Too many zero scores: only {int(np.count_nonzero(sc))}/{TEST_WINDOW} nonzero"
 
-    def test_3_loop_mode(self, space_process):
-        """With loop=True, space keeps producing data after exhaustion.
-
-        Poll multiple times over the pacing interval to verify continuous data.
-        """
+    def test_3_loop_mode(self, space_processes):
+        """With loop=True, signal generator keeps producing data after exhaustion."""
         client = GroundClient(host=SPACE_HOST, port=SPACE_PORT, timeout=3)
-        time.sleep(TEST_WINDOW / TEST_RATE + 1)  # wait for one pacing cycle
+        time.sleep(TEST_WINDOW / TEST_RATE + 1)
         pkts = client.poll(self._cfg())
         tele = [p for p in pkts if isinstance(p, TelemetryPacket)]
         assert len(tele) > 0, "Loop mode: expected data after pacing interval"
 
-    def test_4_space_still_alive(self, space_process):
-        """Space TCP server is still reachable (returns list, not exception)."""
+    def test_4_space_still_alive(self, space_processes):
+        """DAQ TCP server still reachable (returns list, not exception)."""
         client = GroundClient(host=SPACE_HOST, port=SPACE_PORT, timeout=3)
         pkts = client.poll(self._cfg())
         assert isinstance(pkts, list), "Server should still accept connections"
 
-    def test_5_forecast_valid(self, space_process):
+    def test_5_forecast_valid(self, space_processes):
         """Forecaster produces 96-step output with no NaN."""
         client = GroundClient(host=SPACE_HOST, port=SPACE_PORT, timeout=3)
         client.poll(self._cfg())
@@ -237,7 +260,6 @@ class TestE2E:
         telemetry, _ = _drain(client, self._cfg(), n_polls=5)
         assert len(telemetry) > 0
 
-        # Set offline env before loading model (avoids SSL errors)
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["HF_HOME"] = os.path.join(_SRC, ".hf_cache")
         from ground.phm.algorithm import TrendForecaster
@@ -249,20 +271,15 @@ class TestE2E:
         assert len(pred) == 96, f"Prediction len {len(pred)} != 96"
         assert not np.isnan(pred).any(), "Prediction has NaN"
 
-    def test_6_space_shutdown(self, space_process):
-        """Poll returns a list after space terminates."""
+    def test_6_space_shutdown(self, space_processes):
+        """Poll returns a list (server reachable)."""
         client = GroundClient(host=SPACE_HOST, port=SPACE_PORT, timeout=1)
-        pkts = client.poll({"source_id": "file:NASA-MSL/C-1"})
+        pkts = client.poll({"source_id": "C-1"})
         assert isinstance(pkts, list)
 
-    def test_7_space_still_connected_after_data_exhausted(self, space_process):
-        """After data exhausted, polling should still reach space (not timeout).
-
-        This simulates the UI scenario where the user clicks reset — the buffer
-        is cleared but the space segment is still online and serving data.
-        We verify that a poll succeeds (returns a list, not an exception).
-        """
+    def test_7_space_still_connected_after_data_exhausted(self, space_processes):
+        """Even after loop wraps around, polling still reaches the DAQ."""
         client = GroundClient(host=SPACE_HOST, port=SPACE_PORT, timeout=3)
-        # Space is exhausted from prior tests — poll without stored data check
-        pkts = client.poll({"source_id": "file:NASA-MSL/C-1", "sample_rate": 100})
-        assert isinstance(pkts, list), "Poll should not raise on exhausted space"
+        pkts = client.poll({"source_id": "C-1", "sample_rate": 100})
+        assert isinstance(pkts, list), "Poll should not raise"
+

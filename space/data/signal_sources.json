@@ -1,0 +1,10 @@
+{
+  "_doc": "信号源绑定（开发期仿真用）。每个采集卡通道接什么数据源由这里指定，采集卡本身不知道数据源的存在。channel 字段必须与 space_daq.json 的 channels[].name 对应。",
+  "default_sample_rate": 100.0,
+  "bindings": [
+    {"channel": "C-1",  "sourceId": "file:NASA-MSL/C-1",   "loop": true},
+    {"channel": "D-14", "sourceId": "file:NASA-MSL/D-14",  "loop": true},
+    {"channel": "VS-sine",       "sourceId": "virtual:sine",       "signal_freq_hz": 2.0},
+    {"channel": "VS-multi_sine", "sourceId": "virtual:multi_sine", "signal_freq_hz": 5.0}
+  ]
+}

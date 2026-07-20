@@ -1,0 +1,13 @@
+{
+  "_doc": "采集卡硬件配置（天基专属，发射前固化，地基无权改）。这里只描述硬件拓扑：通道插槽号、通道名、是否启用、是否特殊通道（如 RUL）。数据源绑定见 signal_sources.json。",
+  "sample_rate": 100.0,
+  "window_size": 512,
+  "host": "0.0.0.0",
+  "port": 9876,
+  "channels": [
+    {"id": 0, "name": "C-1",  "enabled": true, "isSpecial": false},
+    {"id": 1, "name": "D-14", "enabled": true, "isSpecial": false},
+    {"id": 2, "name": "VS-sine",       "enabled": true, "isSpecial": false},
+    {"id": 3, "name": "VS-multi_sine", "enabled": true, "isSpecial": false}
+  ]
+}
