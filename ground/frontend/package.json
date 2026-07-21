@@ -1,0 +1,30 @@
+{
+  "name": "phm-monitor-frontend",
+  "version": "1.1.0",
+  "description": "空间有效载荷天地协同健康管理系统 - 前台监控大屏 (Vue 3 + Vite + Element Plus + ECharts)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "build:no-check": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.4.21",
+    "vue-router": "^4.3.0",
+    "pinia": "^2.1.7",
+    "element-plus": "^2.7.0",
+    "@element-plus/icons-vue": "^2.3.1",
+    "echarts": "^5.5.0",
+    "vue-echarts": "^6.7.0",
+    "axios": "^1.6.8",
+    "dayjs": "^1.11.10"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.4",
+    "typescript": "^5.4.0",
+    "vite": "^5.2.0",
+    "vue-tsc": "^2.0.0",
+    "@types/node": "^20.12.0"
+  }
+}

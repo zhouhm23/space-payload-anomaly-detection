@@ -1,12 +1,9 @@
 """Django context processors for the PHM front-end.
 
-These inject server-side configuration into every template's context so the
-front-end can read it synchronously (no fetch delay on page load). The
-template renders the JSON into ``window.THEME`` before monitor.js runs.
-
-Registered in settings.py TEMPLATES → OPTIONS → context_processors.
+注入服务端配置到每个模板的 context，让前端无 fetch 延迟读取。
+- PHM_THEME: dict，模板可点访问（{{ PHM_THEME.colors.blue }}）
+- PHM_THEME_JSON: JSON string，供 <script>window.THEME = ...</script>
 """
-
 from __future__ import annotations
 
 import json
@@ -15,17 +12,10 @@ from phm.services.theme_service import get_theme
 
 
 def theme(request):
-    """Inject the UI theme for both JS and CSS/template consumption.
+    """注入前台主题（颜色/阈值/轮询/图表配置）。
 
-    Two context variables are exposed:
-      * ``PHM_THEME``: the theme as a Python dict — templates can dot-access
-        individual values (e.g. ``{{ PHM_THEME.colors.blue }}``) to drive
-        inline CSS / dynamic :root variables.
-      * ``PHM_THEME_JSON``: the same dict serialised to a JSON string, ready
-        for ``<script>window.THEME = {{ PHM_THEME_JSON|safe }};</script>``.
-
-    monitor.js reads ``window.THEME`` with built-in fallbacks, so a missing
-    or empty payload never breaks the page.
+    Vue3 前端从 /api/v2/theme/ 读取（动态可刷），但首屏仍用此 context
+    同步注入避免白屏闪烁。
     """
     theme_dict = get_theme().as_dict()
     return {

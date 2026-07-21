@@ -1,117 +1,72 @@
-"""SimpleUI admin configuration for PHM data tables.
+"""SimpleUI 后台注册（最小骨架）。
 
-Two delete actions are provided per table:
-  - **「软删除（可恢复）」** — custom action, marks ``is_deleted=1``,
-    executes immediately (no confirmation page, because it's reversible).
-  - **「删除选中项」** — Django's built-in ``delete_selected`` (with its
-    confirmation page), physically removes the rows.  The irreversible
-    operation gets the confirmation step.
-
-``get_queryset`` filters out soft-deleted rows so they don't clutter
-the admin list view.
+v1.1 第一轮（1a）只做基本注册 + 软删除过滤。后续轮次按需求书补：
+- 自定义页面（仪表盘/设备树/系统设置/模型管理/回收站）
+- 详情抽屉、批量标注、导出 CSV/JSON
 """
-
 from __future__ import annotations
-
-import datetime
-import time
 
 from django.contrib import admin
 
 from .models import AlertRecord, DetectionResult, DiagnosisRecord
 
 
-def _fmt_utc(ts) -> str:
-    """Format an epoch-seconds float as a human-readable UTC string.
-
-    Returns '—' for None/empty values. The stored timestamps are unix epoch
-    seconds (float); displaying the raw number is unreadable for operators.
-    """
-    if ts is None or ts == '':
-        return '—'
-    try:
-        return datetime.datetime.fromtimestamp(float(ts), tz=datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    except (TypeError, ValueError, OSError):
-        return str(ts)
-
-
 class SoftDeleteModelAdmin(admin.ModelAdmin):
-    """Base admin: soft-delete action (reversible, no confirm) + built-in
-    hard-delete action (irreversible, has Django's confirmation page)."""
+    """软删除基类：get_queryset 过滤已删除，delete 改软删除。
 
-    actions = ['soft_delete', 'delete_selected']
-
+    后续轮次补「彻底删除」action 供管理员物理清理。
+    """
     def get_queryset(self, request):
-        return super().get_queryset(request).filter(is_deleted=0)
+        qs = super().get_queryset(request)
+        return qs.filter(is_deleted=0)
 
-    @admin.action(description='软删除（可恢复）')
-    def soft_delete(self, request, queryset):
-        """Mark selected rows is_deleted=1.  Reversible via direct SQL,
-        so no confirmation page needed."""
-        n = queryset.update(is_deleted=1, deleted_at=time.time())
-        self.message_user(request, f"已软删除 {n} 条记录（可在数据库中恢复）")
+    def delete_model(self, request, obj):
+        """单条删除 → 软删除（UPDATE is_deleted=1）。"""
+        from phm.database.sqlite_store import SQLiteStore
+        # 委托给 SQLiteStore 的软删除（保持业务表写入同源）
+        # v1.1 第一轮先简化为 ORM 直接 update
+        obj.is_deleted = 1
+        from time import time
+        obj.deleted_at = time()
+        obj.save()
 
-
-@admin.register(AlertRecord)
-class AlertRecordAdmin(SoftDeleteModelAdmin):
-    """告警历史表 — 支持筛选 + 直接编辑人工标注."""
-    list_display = (
-        'id', 'channel', 'alert_type', 'score', 'created_at_display',
-        'status', 'llm_verdict', 'human_verdict', 'final_status_display',
-    )
-    list_display_links = ('id', 'channel')
-    list_filter = ('alert_type', 'status', 'llm_verdict', 'human_verdict', 'channel')
-    list_editable = ('human_verdict',)
-    search_fields = ('channel', 'message')
-    readonly_fields = ('final_status', 'raw_snapshot', 'score_snapshot')
-    # Note: date_hierarchy omitted — AlertRecord.created_at is a FloatField
-    # (unix timestamp), not a DateField/DateTimeField, which would trigger
-    # Django admin.E128.
-    list_per_page = 50
-
-    @admin.display(description='创建时间(UTC)', ordering='created_at')
-    def created_at_display(self, obj):
-        return _fmt_utc(obj.created_at)
-
-    @admin.display(description='最终状态', ordering='status')
-    def final_status_display(self, obj):
-        return obj.final_status
+    def delete_queryset(self, request, queryset):
+        """批量删除 → 软删除。"""
+        from time import time
+        now = time()
+        queryset.update(is_deleted=1, deleted_at=now)
 
 
 @admin.register(DetectionResult)
 class DetectionResultAdmin(SoftDeleteModelAdmin):
-    """检测明细表 — 按通道/L1决策筛选."""
-    list_display = ('id', 'channel', 'timestamp_display', 'l1_decision', 'final_score', 'ingested_at_display')
-    list_display_links = ('id', 'channel')
+    list_display = ('channel', 'timestamp', 'l1_decision', 'final_score', 'ingested_at')
     list_filter = ('channel', 'l1_decision')
     search_fields = ('channel',)
     list_per_page = 50
+    date_hierarchy = None  # timestamp 是 float 不是 date
 
-    @admin.display(description='时间戳(UTC)', ordering='timestamp')
-    def timestamp_display(self, obj):
-        return _fmt_utc(obj.timestamp)
 
-    @admin.display(description='入库时间(UTC)', ordering='ingested_at')
-    def ingested_at_display(self, obj):
-        return _fmt_utc(obj.ingested_at)
+@admin.register(AlertRecord)
+class AlertRecordAdmin(SoftDeleteModelAdmin):
+    list_display = (
+        'id', 'channel', 'alert_type', 'score', 'created_at',
+        'status', 'llm_verdict', 'human_verdict',
+    )
+    list_filter = ('alert_type', 'status', 'llm_verdict', 'human_verdict', 'channel')
+    search_fields = ('channel', 'message')
+    list_editable = ('human_verdict',)  # 列表页直接改人工裁决
+    list_per_page = 50
+    readonly_fields = ('raw_snapshot', 'score_snapshot')
+
+    @admin.display(description='综合状态')
+    def final_status_display(self, obj):
+        return obj.final_status
 
 
 @admin.register(DiagnosisRecord)
 class DiagnosisRecordAdmin(SoftDeleteModelAdmin):
-    """诊断记录表 — 只读浏览（字段只读，但仍可软删除）."""
-    list_display = ('id', 'channel', 'alert_type', 'alert_ts_display', 'llm_verdict', 'elapsed_sec', 'created_at_display')
-    list_display_links = ('id', 'channel')
-    list_filter = ('llm_verdict', 'alert_type', 'channel')
-    readonly_fields = (
-        'channel', 'alert_type', 'alert_ts', 'diagnosis', 'context_summary',
-        'elapsed_sec', 'error', 'llm_verdict', 'created_at',
-    )
-    list_per_page = 30
-
-    @admin.display(description='告警时间(UTC)', ordering='alert_ts')
-    def alert_ts_display(self, obj):
-        return _fmt_utc(obj.alert_ts)
-
-    @admin.display(description='创建时间(UTC)', ordering='created_at')
-    def created_at_display(self, obj):
-        return _fmt_utc(obj.created_at)
+    list_display = ('channel', 'alert_type', 'alert_ts', 'llm_verdict', 'elapsed_sec', 'created_at')
+    list_filter = ('alert_type', 'llm_verdict')
+    search_fields = ('channel', 'diagnosis')
+    list_per_page = 50
+    readonly_fields = ('diagnosis', 'context_summary')

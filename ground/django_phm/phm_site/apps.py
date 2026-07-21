@@ -1,4 +1,4 @@
-"""AppConfig for phm_site — starts background threads on ready()."""
+"""AppConfig for phm_site — 启动时拉起后台线程（auto-poll + eval + auto-diagnosis）."""
 import os
 import sys
 
@@ -11,10 +11,9 @@ class PhmSiteConfig(AppConfig):
     verbose_name = 'PHM数据管理'
 
     def ready(self):
-        # Start background threads eagerly when running the server. The
-        # services_bridge.get_container() also lazy-inits as a fallback, so
-        # if ready() runs in a process that doesn't serve requests, the
-        # serving process will init on first request.
+        # 仅在 runserver 时启动后台线程。
+        # services_bridge.get_container() 也有 lazy-init 兜底，
+        # 因此即便 ready() 跑在非服务进程（如 migrate），也不会阻塞。
         is_runserver = 'runserver' in sys.argv
         is_main = os.environ.get('RUN_MAIN') == 'true'
         is_noreload = '--noreload' in sys.argv

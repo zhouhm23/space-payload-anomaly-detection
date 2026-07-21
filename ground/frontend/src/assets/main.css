@@ -1,0 +1,17 @@
+/* 全局基础样式 - 1a 骨架阶段的最小样式 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  font-family: 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #0a0e27;
+  color: #e0e6ed;
+  overflow: hidden;
+}

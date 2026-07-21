@@ -17,11 +17,11 @@
   },
 
   "thresholds": {
-    "_doc": "Score/health colour boundaries. anomalyScoreRed aligns with ANOMALY_THRESHOLD(0.5) in system_config.json.",
+    "_doc": "Score/health colour boundaries. anomalyScoreRed aligns with ANOMALY_THRESHOLD(0.5) in system_config.json. healthRed/healthYellow are in [0,1] since v1.0 (health formula is 1 - abnormal/total).",
     "anomalyScoreRed": 0.5,
     "anomalyScoreYellow": 0.25,
-    "healthRed": 60,
-    "healthYellow": 80,
+    "healthRed": 0.6,
+    "healthYellow": 0.8,
     "rulGreen": 0.6,
     "rulYellow": 0.25
   },
@@ -56,11 +56,30 @@
   },
 
   "layout": {
-    "_doc": "Panel geometry (px / flex). Synced with CSS variables in monitor.css.",
-    "headerHeight": 60,
-    "leftPanelWidth": 240,
-    "rightPanelWidth": 340,
+    "_doc": "Panel geometry (px / flex). Synced with CSS variables in monitor.css. M2 rewrites to 4-zone layout (header + carousel + main[left|center|right]).",
+    "headerHeight": 50,
+    "carouselBarHeight": 28,
+    "leftPanelWidth": 220,
+    "rightPanelWidth": 320,
     "bottomPanelFlex": 1.4
+  },
+
+  "chart412": {
+    "_doc": "M2 center-chart internal 4:1:2 sub-region height ratios (telemetry : anomaly-score : all-channel-alert-scatter). gapWidthPx is the folded width of a real backend gap. predOnlyMinPoints is the minimum consecutive pred-only points to mark 'data not arrived' rectangles.",
+    "topRatio": 4,
+    "midRatio": 1,
+    "bottomRatio": 2,
+    "gapWidthPx": 40,
+    "predOnlyMinPoints": 5,
+    "defaultYMin": -1,
+    "defaultYMax": 1,
+    "padding": { "top": 16, "right": 50, "bottom": 24, "left": 60 }
+  },
+
+  "carousel": {
+    "_doc": "M4 channel-carousel behaviour. intervalMs switches channels automatically; manualInteractionPauseMs pauses the carousel after any user click (device tree / alert list / chart).",
+    "intervalMs": 15000,
+    "manualInteractionPauseMs": 30000
   },
 
   "network": {

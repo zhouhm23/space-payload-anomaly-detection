@@ -1,4 +1,12 @@
-"""Django settings for PHM ground system (Django + SimpleUI)."""
+"""Django settings for PHM ground system (Django + DRF + SimpleUI).
+
+工程结构（v1.1 重写）：
+- 前台监控大屏：Vue3 SPA，build 后产物落到 django_phm/static/phm_site/dist/
+- 后台管理：SimpleUI 主体 + 自定义 Django 模板（extends admin/base_site.html）
+- API：Django REST Framework（/api/v2/* 新规范）+ 保留旧视图过渡（/api/*）
+
+业务逻辑层（src/ground/phm/）零改动，通过 services_bridge 桥接 Container。
+"""
 
 from __future__ import annotations
 
@@ -11,11 +19,11 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent  # src/ground
 SRC_DIR = BASE_DIR.parent  # src/
 
-# Ensure src/ground/ is on sys.path so `import phm` / `import comm` works
+# 把 src/ground/ 加入 sys.path，使 `import phm` / `import comm` 可用
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-# ── .env loading (ported from server.py) ────────────────────────────────────
+# ── .env 加载（从 server.py 迁移） ──────────────────────────────────────────
 def _load_dotenv() -> None:
     env_path = SRC_DIR / ".env"
     if not env_path.exists():
@@ -33,15 +41,12 @@ def _load_dotenv() -> None:
     except Exception:
         pass
 
+
 _load_dotenv()
 
-# ── HuggingFace cache + offline mode (ported from deleted server.py) ────────
-# IMPORTANT: this must run BEFORE any `from_pretrained` call.  Without it the
-# TSPulse/TTM-R3 loaders default to ~/.cache/huggingface (empty) and re-download
-# on every startup, which (a) makes startup slow and (b) when the download hits
-# an SSL error triggers a meta-tensor fallback that corrupts subsequent model
-# construction (the RUL NotImplementedError root cause).  HF_HUB_OFFLINE=1
-# forces use of the local cache and never hits the network.
+# ── HuggingFace 离线缓存（必须在 from_pretrained 之前设置） ────────────────
+# 历史教训（Day18）：不设 HF_HUB_OFFLINE 会联网确认 revision，触发 meta-tensor
+# 损坏后续模型构造。必须强制离线 + 本地快照。
 _HF_CACHE = SRC_DIR / ".hf_cache"
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HOME", str(_HF_CACHE))
@@ -50,7 +55,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 
-# ── Django core ─────────────────────────────────────────────────────────────
+# ── Django 核心 ─────────────────────────────────────────────────────────────
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'dev-insecure-key-change-in-prod')
 DEBUG = True
 ALLOWED_HOSTS = ['*']
@@ -63,10 +68,16 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    # 第三方
+    'rest_framework',
+    'django_filters',
+    'corsheaders',
+    # 本项目
     'phm_site',
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',  # 必须在 CommonMiddleware 之前
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -98,13 +109,13 @@ TEMPLATES = [
 WSGI_APPLICATION = 'django_phm.wsgi.application'
 ASGI_APPLICATION = 'django_phm.asgi.application'
 
-# ── Localization (SimpleUI admin in Simplified Chinese) ─────────────────────
+# ── 本地化（SimpleUI 后台简体中文） ────────────────────────────────────────
 LANGUAGE_CODE = 'zh-hans'
 TIME_ZONE = 'Asia/Shanghai'
 USE_I18N = True
 USE_TZ = False
 
-# ── Database (share existing phm.db) ────────────────────────────────────────
+# ── 数据库（共用 phm.db） ───────────────────────────────────────────────────
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
@@ -112,37 +123,118 @@ DATABASES = {
     }
 }
 
-# ── Static files ────────────────────────────────────────────────────────────
+# ── 静态文件 ────────────────────────────────────────────────────────────────
 STATIC_URL = '/static/'
-STATICFILES_DIRS = [BASE_DIR / 'django_phm' / 'static']
+STATICFILES_DIRS = [
+    BASE_DIR / 'django_phm' / 'static',  # 自定义页静态资源
+]
 
-# ── SimpleUI config ─────────────────────────────────────────────────────────
+# 生产部署：collectstatic 收集到此目录
+STATIC_ROOT = BASE_DIR / 'django_phm' / 'staticfiles'
+
+# Vue3 前台大屏 build 产物（生产环境直接 serve）
+# 开发环境通过 vite dev server (:5173) 代理，不走这里
+FRONTEND_DIST = BASE_DIR / 'django_phm' / 'static' / 'phm_site' / 'dist'
+if FRONTEND_DIST.exists():
+    STATICFILES_DIRS.append(FRONTEND_DIST)
+
+# ── DRF 配置 ────────────────────────────────────────────────────────────────
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.SessionAuthentication',  # 后台同源
+        'rest_framework.authentication.BasicAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.AllowAny',  # 前台大屏匿名访问，细粒度在视图层
+    ],
+    'DEFAULT_FILTER_BACKENDS': [
+        'django_filters.rest_framework.DjangoFilterBackend',
+        'rest_framework.filters.SearchFilter',
+        'rest_framework.filters.OrderingFilter',
+    ],
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 20,
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
+        'rest_framework.renderers.BrowsableAPIRenderer',
+    ],
+    'DATETIME_FORMAT': None,  # 返回原始 ISO 字符串
+    'DEFAULT_TIME_ZONE': 'UTC',
+}
+
+# ── CORS（Vue3 dev server :5173 → Django :8501） ────────────────────────────
+CORS_ORIGIN_ALLOW_ALL = True  # 开发期允许所有源（生产环境应配白名单）
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_ALL_METHODS = True
+CORS_ALLOW_ALL_HEADERS = True
+
+# ── SimpleUI 配置 ───────────────────────────────────────────────────────────
 SIMPLEUI_HOME_INFO = False
 SIMPLEUI_ANALYSIS = False
-# 登录后台默认跳转全屏监控页（保持原有行为）。
-SIMPLEUI_INDEX = '/monitor/'
-# 自定义菜单：把监控工作台（iframe 嵌入版）作为第一项，紧跟业务数据管理。
-# 这落地了「工作台纳入后台首页」的方向——后台成为操作中枢，工作台从菜单直达。
+# 登录后台默认跳转仪表盘（v1.1 新增）
+SIMPLEUI_INDEX = '/admin/phm_site/dashboard/'
+# 自定义菜单：监控工作台 + 业务管理分组
 SIMPLEUI_CONFIG = {
     'system_keep': False,
     'menus': [
         {
             'name': '监控工作台',
             'icon': 'dashboard',
-            'url': '/monitor-embed/',
+            'url': '/monitor/',
             'models': [],
         },
         {
+            'name': '运营管理',
+            'icon': 'fas fa-chart-line',
+            'models': [
+                {'name': '仪表盘', 'icon': 'fas fa-tachometer-alt', 'url': '/admin/phm_site/dashboard/'},
+                {'name': '告警与预警', 'icon': 'fas fa-bell', 'url': '/admin/phm_site/alert/'},
+                {'name': '回收站', 'icon': 'fas fa-trash', 'url': '/admin/phm_site/recycle/'},
+            ],
+        },
+        {
+            'name': '配置管理',
+            'icon': 'fas fa-cog',
+            'models': [
+                {'name': '设备树', 'icon': 'fas fa-sitemap', 'url': '/admin/phm_site/device-tree/'},
+                {'name': '系统设置', 'icon': 'fas fa-sliders-h', 'url': '/admin/phm_site/settings/'},
+                {'name': '模型管理', 'icon': 'fas fa-cubes', 'url': '/admin/phm_site/models/'},
+            ],
+        },
+        {
             'app': 'phm_site',
-            'name': '业务数据',
+            'name': '数据浏览',
             'icon': 'database',
         },
     ],
 }
 
-# ── PHM runtime config ──────────────────────────────────────────────────────
+# ── PHM 运行时配置 ──────────────────────────────────────────────────────────
 SPACE_HOST = os.environ.get("SPACE_HOST", "127.0.0.1")
 SPACE_PORT = int(os.environ.get("SPACE_PORT", "9876"))
 PHM_CONFIG_PATH = str(BASE_DIR / "device_config.json")
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# ── 日志 ────────────────────────────────────────────────────────────────────
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '[{asctime}] {levelname} {name} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'loggers': {
+        'phm_site': {'level': 'INFO', 'handlers': ['console'], 'propagate': False},
+        'phm': {'level': 'WARNING', 'handlers': ['console'], 'propagate': False},
+    },
+    'root': {'level': 'WARNING', 'handlers': ['console']},
+}

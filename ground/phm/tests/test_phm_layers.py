@@ -26,25 +26,34 @@ from phm.database.alert_store import AlertStore
 
 
 # ---------------------------------------------------------------------------
-# Health formula
+# Health formula (v1.0 spec: 1 - 异常点数/总点数, range [0, 1])
 # ---------------------------------------------------------------------------
 class TestChannelHealth:
     def test_all_normal(self):
-        assert channel_health([0.1, 0.2, 0.3, 0.4]) == 100.0
+        # 0 anomalous out of 4 → 1 - 0/4 = 1.0
+        assert channel_health([0.1, 0.2, 0.3, 0.4]) == 1.0
 
     def test_all_anomalous(self):
+        # 3 anomalous out of 3 → 1 - 3/3 = 0.0
         assert channel_health([0.8, 0.9, 1.0]) == 0.0
 
     def test_half_half(self):
-        # threshold 0.5 → 2 of 4 normal
-        assert channel_health([0.1, 0.2, 0.8, 0.9]) == 50.0
+        # threshold 0.5 → 2 of 4 anomalous → 1 - 2/4 = 0.5
+        assert channel_health([0.1, 0.2, 0.8, 0.9]) == 0.5
 
-    def test_empty_returns_100(self):
-        assert channel_health([]) == 100.0
+    def test_empty_returns_1(self):
+        # No evidence of anomaly = fully healthy
+        assert channel_health([]) == 1.0
 
     def test_boundary_exactly_threshold_is_normal(self):
-        # score == threshold is considered normal (≤)
-        assert channel_health([0.5, 0.5]) == 100.0
+        # score == threshold is NOT anomalous (strict >)
+        assert channel_health([0.5, 0.5]) == 1.0
+
+    def test_range_in_unit_interval(self):
+        # Sanity: any mix stays in [0, 1]
+        for scores in ([], [0.0], [1.0], [0.5, 0.6, 0.7, 0.1, 0.2]):
+            h = channel_health(scores)
+            assert 0.0 <= h <= 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +269,8 @@ class TestHealthServiceFolderAggregation:
         return rb
 
     def test_min_strategy_worst_sensor_wins(self):
-        # C-1 = 100% normal, C-2 = 0% normal → folder min should be 0.0
+        # C-1 = all normal (health 1.0), C-2 = all anomalous (health 0.0)
+        # → folder min (木桶效应) = 0.0
         rb = self._ring_with_healths([0.1, 0.2], [0.8, 0.9], [0.5, 0.5])
         cfg = _FakeConfigService({"device_tree": self._tree(), "aggregation_strategy": "min"})
         from phm.services.health_service import HealthService
@@ -272,13 +282,13 @@ class TestHealthServiceFolderAggregation:
         assert set(result["folders"]["folder_A"]["channels"]) == {"C-1", "C-2"}
 
     def test_mean_strategy_averages(self):
-        # C-1 = 100% normal, C-2 = 0% normal → folder mean = 50.0
+        # C-1 = health 1.0, C-2 = health 0.0 → folder mean = 0.5
         rb = self._ring_with_healths([0.1, 0.2], [0.8, 0.9], [0.5, 0.5])
         cfg = _FakeConfigService({"device_tree": self._tree(), "aggregation_strategy": "mean"})
         from phm.services.health_service import HealthService
 
         result = HealthService(rb, cfg).system_health()
-        assert result["folders"]["folder_A"]["health"] == 50.0
+        assert result["folders"]["folder_A"]["health"] == 0.5
         assert result["folders"]["folder_A"]["strategy"] == "mean"
 
     def test_orphan_sensor_excluded_from_folders(self):

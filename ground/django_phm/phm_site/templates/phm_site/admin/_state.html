@@ -1,0 +1,27 @@
+{% extends "phm_site/admin/admin_base.html" %}
+
+{% block content %}
+<div class="phm-admin-shell">
+  <div class="phm-page-header">
+    <h1 class="phm-page-title">{{ page_title }}</h1>
+  </div>
+  <div class="phm-page-body">
+    <div class="phm-card" style="text-align:center; padding: 60px 20px;">
+      <div style="font-size: 48px; margin-bottom: 16px;">
+        {% if state == 'initializing' %}⏳
+        {% elif state == 'failed' %}❌
+        {% else %}⏸️{% endif %}
+      </div>
+      <h3 style="color: var(--phm-text-pri); margin: 0 0 8px;">{{ state_text }}</h3>
+      {% if error %}
+      <p style="color: var(--phm-red); font-family: monospace; font-size: 12px; margin-top: 12px;">
+        {{ error }}
+      </p>
+      {% endif %}
+      <p class="phm-text-dim" style="margin-top: 16px; font-size: 13px;">
+        服务就绪后请 <a href="javascript:location.reload()" style="color: var(--phm-blue);">刷新页面</a>
+      </p>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>空间有效载荷天地协同健康管理系统</title>
+    {# v1.1 第一轮占位：生产环境由 Vue3 dist 产物接管 #}
+    {# 开发环境直接跳转到 vite dev server :5173 #}
+    <script>
+        // 兜底：如果 DEBUG=False 但 dist 未构建，提示构建命令
+        if (location.pathname === '/monitor/' && !document.querySelector('div#app')) {
+            document.addEventListener('DOMContentLoaded', function() {
+                document.body.innerHTML = '<div style="padding:40px;font-family:sans-serif;">'
+                    + '<h2>前台监控大屏未构建</h2>'
+                    + '<p>请先构建 Vue3 工程：</p>'
+                    + '<pre>cd src/ground/frontend && npm install && npm run build</pre>'
+                    + '<p>开发模式请使用 <code>npm run dev</code>，访问 http://127.0.0.1:5173/</p>'
+                    + '</div>';
+            });
+        }
+    </script>
+</head>
+<body>
+    <div id="app"></div>
+</body>
+</html>

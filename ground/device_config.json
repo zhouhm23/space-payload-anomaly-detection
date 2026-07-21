@@ -12,6 +12,10 @@
           "sourceId": "file:NASA-MSL/C-1",
           "channelName": "C-1",
           "blockSize": 512,
+          "yMin": -1,
+          "yMax": 1,
+          "unit": "A (归一化)",
+          "threshold": 0.5,
           "description": "载荷电子箱主控电流监测通道。实时采集主控模块供电电流，经归一化处理。正常工作时呈周期性波动（受温控循环影响），异常表现为持续偏高或波形畸变。"
         },
         {
@@ -21,6 +25,10 @@
           "sourceId": "file:NASA-MSL/D-14",
           "channelName": "D-14",
           "blockSize": 512,
+          "yMin": -1,
+          "yMax": 1,
+          "unit": "mm (归一化)",
+          "threshold": 0.5,
           "description": "载荷驱动机构位移反馈通道。监测驱动电机位置传感器输出，归一化值。正常时随机构动作产生阶梯式变化，异常表现为卡滞（信号不动）或抖动（高频噪声）。"
         },
         {
@@ -30,7 +38,12 @@
           "sourceId": "cmapss:FD001:1",
           "channelName": "CMAPSS_FD001_1",
           "blockSize": 30,
-          "description": "C-MAPSS 涡扇发动机退化基准（1 号机）。14 传感器随运行周期单调漂移，体现物理退化趋势。@rul:fd001 启用 RUL 退化预测（基准演示）。"
+          "yMin": 0,
+          "yMax": 1,
+          "unit": "退化指数",
+          "threshold": 0.5,
+          "isSpecial": true,
+          "description": "C-MAPSS 涡扇发动机退化基准（1 号机，非一维特殊传感器）。14 传感器随运行周期单调漂移，体现物理退化趋势。@rul:fd001 启用 RUL 退化预测（基准演示）。"
         }
       ]
     },
@@ -46,7 +59,24 @@
           "sourceId": "virtual:sine",
           "channelName": "VS-sine",
           "blockSize": 512,
+          "yMin": -1,
+          "yMax": 1,
+          "unit": "V (归一化)",
+          "threshold": 0.5,
           "description": "电源总线电压监测传感器。采集二次电源输出电压，归一化值。正常时随负载变化呈周期性波动，异常表现为缓变漂移（热效应）或尖峰干扰（切换瞬态）。"
+        },
+        {
+          "id": "t2",
+          "name": "S2",
+          "type": "sensor",
+          "sourceId": "virtual:multi_sine",
+          "channelName": "VS-multi_sine",
+          "blockSize": 512,
+          "yMin": -1,
+          "yMax": 1,
+          "unit": "V (归一化)",
+          "threshold": 0.5,
+          "description": "多模式振动监测传感器。融合多频段振动信号，归一化值。正常时呈复杂周期波形，异常表现为谱畸变或冲击峰。"
         }
       ]
     }

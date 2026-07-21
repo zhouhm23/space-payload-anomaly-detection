@@ -1,0 +1,17 @@
+# Node 依赖
+node_modules/
+
+# 构建产物（落到 ../django_phm/static/phm_site/dist/，不入库）
+dist/
+
+# 编辑器
+.vscode/
+.idea/
+
+# 日志
+*.log
+npm-debug.log*
+
+# 系统文件
+.DS_Store
+Thumbs.db

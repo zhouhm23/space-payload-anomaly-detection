@@ -1,0 +1,22 @@
+{% extends "admin/base_site.html" %}
+{# 后台自定义页公共基座（extends SimpleUI base_site）。
+   注入 window.THEME（context_processor 已就绪），加载公共暗色 CSS/JS。 #}
+{% load static %}
+
+{% block extrastyle %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'phm_site/css/admin.css' %}">
+{% endblock %}
+
+{% block extrahead %}
+{{ block.super }}
+<script>
+  window.THEME = {{ PHM_THEME_JSON|safe }};
+  window.CSRF_TOKEN = "{{ csrf_token }}";
+</script>
+{% endblock %}
+
+{% block footer %}
+{{ block.super }}
+<script src="{% static 'phm_site/js/admin_common.js' %}"></script>
+{% endblock %}

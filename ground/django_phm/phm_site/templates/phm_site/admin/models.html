@@ -1,0 +1,142 @@
+{% extends "phm_site/admin/admin_base.html" %}
+
+{% block content %}
+<div class="phm-admin-shell">
+  <div class="phm-page-header">
+    <h1 class="phm-page-title">模型管理</h1>
+    <div class="phm-page-actions">
+      <a href="{% url 'admin:index' %}" class="phm-btn phm-btn-sm">← 返回首页</a>
+    </div>
+  </div>
+  <div class="phm-page-body">
+
+<div class="phm-card" style="background: rgba(64,158,255,0.06); border-color: var(--phm-blue);">
+  <div class="phm-flex" style="gap: 8px;">
+    <span style="font-size: 16px;">ℹ️</span>
+    <div>
+      <strong style="color: var(--phm-text-pri);">模型说明</strong>
+      <p class="phm-text-sec" style="margin: 4px 0 0; font-size: 13px;">
+        {{ is_readonly_note }}。下方卡片展示系统已注册的基座模型（异常检测 / 趋势预测 / RUL 退化预测）
+        及其本地资产状态与被传感器引用情况。
+      </p>
+    </div>
+  </div>
+</div>
+
+<div class="phm-card-grid">
+  {% for card in cards %}
+  <div class="phm-card">
+    <div class="phm-flex-between" style="margin-bottom: 12px;">
+      <div class="phm-flex" style="gap: 8px;">
+        {% if card.kind == 'detector' %}
+        <span style="font-size: 22px;">🔍</span>
+        {% elif card.kind == 'forecaster' %}
+        <span style="font-size: 22px;">📈</span>
+        {% elif card.kind == 'rul' %}
+        <span style="font-size: 22px;">🔋</span>
+        {% else %}
+        <span style="font-size: 22px;">📦</span>
+        {% endif %}
+        <div>
+          <div style="font-size: 16px; font-weight: 600; color: var(--phm-text-pri);">
+            {{ card.key }}
+          </div>
+          <span class="phm-badge
+            {% if card.kind == 'detector' %}phm-badge-red
+            {% elif card.kind == 'forecaster' %}phm-badge-blue
+            {% elif card.kind == 'rul' %}phm-badge-yellow
+            {% else %}phm-badge-gray{% endif %}">
+            {{ card.kind_label }}
+          </span>
+        </div>
+      </div>
+      {% if card.assets_available %}
+      <span class="phm-badge phm-badge-green">✓ 资产就绪</span>
+      {% else %}
+      <span class="phm-badge phm-badge-gray">⚠ 资产缺失</span>
+      {% endif %}
+    </div>
+
+    <dl class="phm-meta">
+      <dt>Hub ID</dt>
+      <dd class="phm-mono phm-text-sec" style="font-size: 12px; word-break: break-all;">
+        {{ card.hub_id }}
+      </dd>
+
+      <dt>输入窗口</dt>
+      <dd class="phm-mono">{{ card.context_length }} 点</dd>
+
+      {% if card.prediction_length > 0 %}
+      <dt>输出步长</dt>
+      <dd class="phm-mono">{{ card.prediction_length }} 点</dd>
+      {% else %}
+      <dt>输出</dt>
+      <dd class="phm-text-sec">{% if card.kind == 'detector' %}异常分数序列{% else %}—{% endif %}</dd>
+      {% endif %}
+
+      <dt>本地路径</dt>
+      <dd class="phm-mono phm-text-dim" style="font-size: 11px; word-break: break-all;">
+        {{ card.assets_path|default:'—' }}
+      </dd>
+    </dl>
+
+    {% if card.notes %}
+    <p class="phm-text-sec" style="font-size: 12px; margin: 10px 0 0; line-height: 1.6; border-top: 1px dashed var(--phm-border); padding-top: 10px;">
+      {{ card.notes }}
+    </p>
+    {% endif %}
+
+    <div style="margin-top: 12px; border-top: 1px solid var(--phm-border); padding-top: 10px;">
+      <div class="phm-flex-between" style="margin-bottom: 6px;">
+        <span class="phm-text-sec" style="font-size: 12px;">
+          📡 引用此模型的传感器（{{ card.sensor_count }}）
+        </span>
+      </div>
+      {% if card.sensors %}
+      <div class="phm-flex" style="flex-wrap: wrap; gap: 4px;">
+        {% for s in card.sensors %}
+        <span class="phm-badge phm-badge-cyan">{{ s }}</span>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="phm-text-dim" style="font-size: 12px; margin: 4px 0;">暂无传感器引用</p>
+      {% endif %}
+      <p class="phm-text-dim" style="font-size: 11px; margin: 8px 0 0;">
+        资产备注：{{ card.assets_note }}
+      </p>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="phm-card phm-mt-16">
+  <h3 class="phm-card-title">📋 模型配置说明</h3>
+  <dl class="phm-meta" style="grid-template-columns: 140px 1fr;">
+    <dt>异常检测模型</dt>
+    <dd class="phm-text-sec">
+      L2 层默认使用 <strong>TSPulse</strong>（零样本）。传感器可在描述中用
+      <code class="phm-mono phm-badge phm-badge-gray">@异常检测模型</code> 或
+      <code class="phm-mono phm-badge phm-badge-gray">@tspulse</code> 显式指定。
+    </dd>
+    <dt>预测模型</dt>
+    <dd class="phm-text-sec">
+      地基趋势预测默认使用 <strong>TTM-R3</strong>（512→96）。传感器可用
+      <code class="phm-mono phm-badge phm-badge-gray">@预测模型</code> 指定。
+    </dd>
+    <dt>RUL 模型</dt>
+    <dd class="phm-text-sec">
+      特殊传感器（非一维数据源）走 <strong>LSTM+Attention</strong>（C-MAPSS 基准）。
+      描述中用 <code class="phm-mono phm-badge phm-badge-gray">@rul:fd001</code> 标记子集。
+    </dd>
+    <dt>修改方式</dt>
+    <dd class="phm-text-sec">
+      模型注册表位于 <code class="phm-mono">src/ground/phm/algorithm/_registry.py</code>，
+      权重文件位于 <code class="phm-mono">src/ground/models/</code> 与 HF 本地缓存。
+      新增/切换模型需修改配置文件并重启服务。
+    </dd>
+  </dl>
+</div>
+
+  </div>{% comment %}close phm-page-body{% endcomment %}
+</div>{% comment %}close phm-admin-shell{% endcomment %}
+{% endblock %}

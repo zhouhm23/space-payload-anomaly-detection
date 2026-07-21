@@ -370,13 +370,17 @@ class SyntheticConfig:
     anomaly_every: int = 0            # inject a spike every N samples (0=off)
     anomaly_magnitude: float = 3.0
     # Random anomaly injection: each read() call has ``anomaly_prob`` chance
-    # of injecting a realistic degradation pattern (drift or spike burst)
-    # into the block.  This makes the synthetic source produce a MIX of
-    # normal and anomalous data — essential for testing false-alarm
-    # filtering, because a source that is always normal only generates
-    # false positives (TSPulse misfires) but never true positives.
+    # of injecting a realistic degradation pattern into the block.
+    # Types:
+    # - "drift": gradual baseline offset (thermal drift, sensor aging)
+    # - "spike": short burst of high-amplitude noise (switching transient)
+    # - "zero_drop": random values become 0 (sensor open-circuit / signal loss)
+    # This makes the synthetic source produce a MIX of normal and anomalous
+    # data — essential for testing false-alarm filtering, because a source
+    # that is always normal only generates false positives (TSPulse misfires)
+    # but never true positives.
     anomaly_prob: float = 0.0         # 0=off, 0.15≈every 6-7 blocks
-    anomaly_type: str = "drift"       # "drift" (gradual offset) or "spike" (burst)
+    anomaly_type: str = "drift"       # "drift" | "spike" | "zero_drop"
     random_seed: int | None = None
 
 
@@ -385,16 +389,18 @@ class SyntheticConfig:
 # ---------------------------------------------------------------------------
 
 # Preset virtual sensors registered in the global list
+# 异常注入策略：用 zero_drop（随机值变 0，模拟传感器失联），不会超量程
+# signal 在 return 前会 clip 到 [-amplitude, amplitude]，保证不超量程
 _VIRTUAL_PRESETS: dict[str, SyntheticConfig] = {
     "sine": SyntheticConfig(
         signal_type="sine", frequency=0.02, amplitude=1.0,
-        anomaly_prob=0.12, anomaly_type="drift", anomaly_magnitude=1.5,
+        anomaly_prob=0.12, anomaly_type="zero_drop", anomaly_magnitude=1.0,
         random_seed=42,
     ),
     "square": SyntheticConfig(signal_type="square", frequency=0.02, amplitude=1.0),
     "multi_sine": SyntheticConfig(
         signal_type="multi_sine", frequency=0.02, amplitude=1.0,
-        anomaly_prob=0.15, anomaly_type="spike", anomaly_magnitude=2.5,
+        anomaly_prob=0.15, anomaly_type="zero_drop", anomaly_magnitude=1.0,
         random_seed=99,
     ),
     "chirp": SyntheticConfig(signal_type="chirp", frequency=0.01, amplitude=1.0),
@@ -483,15 +489,27 @@ class VirtualSensorSource(SensorSource):
                     # drift, sensor aging).  Harder to detect than a spike.
                     ramp = np.linspace(0, cfg.anomaly_magnitude, n)
                     signal += ramp
+                elif cfg.anomaly_type == "zero_drop":
+                    # Zero-drop: random points in the block become 0,
+                    # simulating sensor open-circuit / signal loss / ADC dropout.
+                    # ~15-25% of the block affected, scattered (not contiguous).
+                    drop_rate = 0.15 + rng.random() * 0.10  # 15%~25%
+                    drop_mask = rng.random(n) < drop_rate
+                    signal[drop_mask] = 0.0
                 else:
-                    # Spike burst: a short segment of high-amplitude noise,
-                    # simulating a sudden transient (e.g. switching event,
+                    # Spike burst (default): a short segment of high-amplitude
+                    # noise, simulating a sudden transient (e.g. switching event,
                     # particle hit).  ~15% of the block affected.
                     burst_start = int(rng.integers(0, max(1, n // 2)))
                     burst_len = max(1, n // 8)
                     burst = rng.normal(0, cfg.anomaly_magnitude, burst_len)
                     end = min(burst_start + burst_len, n)
                     signal[burst_start:end] += burst[:end - burst_start]
+
+        # 超量程截断：所有异常注入后，clip 到 [-amplitude, +amplitude]
+        # 模拟真实 ADC 饱和特性，避免 drift/spike 让信号超出传感器量程
+        if cfg.amplitude > 0:
+            signal = np.clip(signal, -cfg.amplitude, cfg.amplitude)
 
         self._t += n
 
