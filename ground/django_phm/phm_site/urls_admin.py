@@ -20,9 +20,9 @@ urlpatterns = [
     # 会吞掉 /admin/ 下所有未匹配路径返回自己的 404，不会回退到后续 pattern。
     # 自定义页用 /admin/phm_site/<page>/ 前缀，与 admin 内置 URL 不冲突。
     path('phm_site/models/', views_admin.models_view, name='phm_admin_models'),
+    path('phm_site/dashboard/', views_admin.dashboard_view, name='phm_admin_dashboard'),
 
     # 以下页面尚未实现，暂占位（菜单可点击不 404）
-    path('phm_site/dashboard/',   views_admin.models_view, name='phm_admin_dashboard'),
     path('phm_site/alert/',       views_admin.models_view, name='phm_admin_alert'),
     path('phm_site/recycle/',     views_admin.models_view, name='phm_admin_recycle'),
     path('phm_site/device-tree/', views_admin.models_view, name='phm_admin_device_tree'),

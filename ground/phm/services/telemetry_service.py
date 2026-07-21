@@ -100,7 +100,20 @@ class TelemetryService:
         sample_rate: float = 50.0,
     ) -> tuple[dict[str, list], list[dict], bool]:
         """Connect to space TCP, drain buffered packets, reshape into
-        per-channel entry lists.  Identical to the legacy ``poll_space``."""
+        per-channel entry lists.  Identical to the legacy ``poll_space``.
+
+        Raises ``ConnectionError`` when the space TCP server is unreachable
+        (port not listening / SYN timeout).  This lets callers distinguish
+        "连接失败" from "连接成功但本周期无数据"——前者应被 ``_poll_one``
+        记为链路失败，后者是合法空 poll（不影响链路状态）。
+
+        历史教训（Day20）：``GroundClient.poll()`` 内部吞掉所有 socket
+        异常返回空 list，导致 ``_poll_one`` 把连接超时（~2s）误判为
+        "链路 RTT=2000ms 且 success=True"，``link_status`` 恒显示 online。
+        修复：``_poll_space`` 调 ``GroundClient.poll()`` 后检查
+        ``client.connected`` 标志（``GroundClient.poll()`` 内部维护，
+        True=连上，False=socket 异常），False 时抛 ``ConnectionError``。
+        """
         exhausted = False
         try:
             client = GroundClient(host=self.space_host, port=self.space_port, timeout=2)
@@ -111,6 +124,15 @@ class TelemetryService:
             })
         except Exception:
             return {}, [], False
+
+        # 连接失败冒泡：GroundClient.poll() 吞了 socket 异常返回空 list，
+        # 但 client.connected 标志会暴露真实状态。连不上时抛 ConnectionError
+        # 让 _poll_one 走 except → success=False（修复 Day20 link_status bug）。
+        # 兼容老版 GroundClient（无 connected 属性）：默认 True 不影响。
+        if getattr(client, 'connected', True) is False:
+            raise ConnectionError(
+                f"space TCP {self.space_host}:{self.space_port} unreachable"
+            )
 
         channel_entries: dict[str, list] = {}
         alerts_list: list[dict] = []

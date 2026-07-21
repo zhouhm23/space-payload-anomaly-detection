@@ -1,0 +1,445 @@
+{% extends "phm_site/admin/admin_base.html" %}
+
+{% block content %}
+<div class="phm-admin-shell">
+  <div class="phm-page-header">
+    <h1 class="phm-page-title">仪表盘</h1>
+  </div>
+  <div class="phm-page-body">
+
+{# ── banner：系统整体健康度 ──────────────────────────────────────── #}
+<div class="phm-card phm-dash-banner phm-dash-banner-{{ banner.tier }}">
+  <div class="phm-dash-banner-row">
+    <div class="phm-dash-banner-left">
+      <div class="phm-dash-banner-label">系统整体健康度</div>
+      <div class="phm-dash-banner-value">
+        <span class="phm-dash-banner-pct">{{ banner.system_pct }}</span>
+        <span class="phm-dash-banner-unit">%</span>
+      </div>
+      <div class="phm-dash-banner-tier">{{ banner.tier_text }}</div>
+    </div>
+    <div class="phm-dash-banner-right">
+      <div class="phm-dash-meter">
+        <div class="phm-dash-meter-fill phm-dash-meter-fill-{{ banner.tier }}"
+             style="width: {{ banner.system_pct }}%;"></div>
+      </div>
+      <div class="phm-dash-banner-meta">
+        <span>活跃通道 <strong>{{ banner.channel_count }}</strong></span>
+        <span class="phm-dash-sep">·</span>
+        <span>天地延迟
+          <strong>{% if banner.link_latency_ms is not None %}{{ banner.link_latency_ms }} ms{% else %}—{% endif %}</strong>
+        </span>
+        <span class="phm-dash-sep">·</span>
+        <span class="phm-dash-link phm-dash-link-{{ banner.link_status }}">{{ banner.link_status }}</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── 时间窗 tabs + 自动刷新开关 ──────────────────────────────────── #}
+<div class="phm-dash-tabs">
+  {% for tab in tabs %}
+    {% if tab.active %}
+    <span class="phm-dash-tab active">{{ tab.label }}</span>
+    {% else %}
+    <a class="phm-dash-tab phm-dash-tab-window"
+       href="{% url 'phm_admin_dashboard' %}?window={{ tab.key }}"
+       data-window="{{ tab.key }}">{{ tab.label }}</a>
+    {% endif %}
+  {% endfor %}
+  <span class="phm-dash-tabs-right">
+    <label class="phm-dash-autorefresh">
+      <input type="checkbox" id="phm-auto-refresh-toggle"{% if auto_refresh %} checked{% endif %}>
+      <span>每 {{ refresh_seconds }}s 自动刷新</span>
+    </label>
+    <span class="phm-text-dim phm-dash-countdown" id="phm-countdown"></span>
+  </span>
+</div>
+
+{# ── 三张统计卡片：人工/LLM/未诊断（含 verdict 细分，可点击切换趋势图来源） ── #}
+<div class="phm-card-grid phm-dash-stats">
+  <div class="phm-card phm-dash-stat" data-source="human"
+       id="phm-stat-human" role="button" tabindex="0">
+    <div class="phm-dash-stat-head">
+      <span class="phm-dash-stat-icon">👤</span>
+      <div class="phm-dash-stat-body">
+        <div class="phm-dash-stat-num">{{ metrics.counts.human }}</div>
+        <div class="phm-dash-stat-label">已人工诊断</div>
+      </div>
+    </div>
+    <div class="phm-dash-stat-breakdown">
+      <span class="phm-bd-real">实警 {{ metrics.breakdown.human.real }}</span>
+      <span class="phm-bd-false">虚警 {{ metrics.breakdown.human.false_alarm }}</span>
+      <span class="phm-bd-uncertain">待定 {{ metrics.breakdown.human.uncertain }}</span>
+    </div>
+    <div class="phm-dash-stat-hint phm-text-dim">点击筛选趋势图</div>
+  </div>
+
+  <div class="phm-card phm-dash-stat" data-source="llm"
+       id="phm-stat-llm" role="button" tabindex="0">
+    <div class="phm-dash-stat-head">
+      <span class="phm-dash-stat-icon">🤖</span>
+      <div class="phm-dash-stat-body">
+        <div class="phm-dash-stat-num">{{ metrics.counts.llm }}</div>
+        <div class="phm-dash-stat-label">LLM 诊断</div>
+      </div>
+    </div>
+    <div class="phm-dash-stat-breakdown">
+      <span class="phm-bd-real">实警 {{ metrics.breakdown.llm.real }}</span>
+      <span class="phm-bd-false">虚警 {{ metrics.breakdown.llm.false_alarm }}</span>
+      <span class="phm-bd-uncertain">待定 {{ metrics.breakdown.llm.uncertain }}</span>
+    </div>
+    <div class="phm-dash-stat-hint phm-text-dim">点击筛选趋势图</div>
+  </div>
+
+  <div class="phm-card phm-dash-stat" data-source="undiagnosed"
+       id="phm-stat-undiagnosed" role="button" tabindex="0">
+    <div class="phm-dash-stat-head">
+      <span class="phm-dash-stat-icon">⏳</span>
+      <div class="phm-dash-stat-body">
+        <div class="phm-dash-stat-num">{{ metrics.counts.undiagnosed }}</div>
+        <div class="phm-dash-stat-label">未诊断</div>
+      </div>
+    </div>
+    <div class="phm-dash-stat-breakdown phm-text-dim">
+      未经人工或 LLM 标注
+    </div>
+    <div class="phm-dash-stat-hint phm-text-dim">点击筛选趋势图</div>
+  </div>
+</div>
+
+{# ── 告警趋势柱状图（stacked bar，柱内按 verdict 分段） ─────────── #}
+<div class="phm-card">
+  <div class="phm-flex-between phm-mb-12">
+    <h3 class="phm-card-title">📊 告警趋势</h3>
+    <span class="phm-text-sec phm-dash-chart-mode" id="phm-chart-mode" style="font-size: 12px;">
+      全部来源 · 窗口内 {{ metrics.counts.total }} 条
+    </span>
+  </div>
+  {% if max_bucket > 0 %}
+  <div class="phm-dash-chart" id="phm-chart">
+    {# bars 容器：高度由 JS 渲染每桶的 stacked 段 #}
+    <div class="phm-dash-chart-bars" id="phm-chart-bars">
+      {# SSR 占位（避免 JS 失败时白屏）；JS 就绪后会重渲染 #}
+      {% for b in metrics.buckets %}
+      <div class="phm-dash-bar-col" title="{{ b.title }}: {{ b.count }} 条">
+        {% if b.count > 0 %}
+        <div class="phm-dash-bar-count">{{ b.count }}</div>
+        <div class="phm-dash-bar phm-dash-bar-fallback"
+             style="height: {% widthratio b.count max_bucket 100 %}%;"></div>
+        {% else %}
+        <div class="phm-dash-bar" style="height: 0%;"></div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    <div class="phm-dash-chart-labels">
+      {% for b in metrics.buckets %}
+      <div class="phm-dash-bar-label" title="{{ b.title }}">{{ b.label }}</div>
+      {% endfor %}
+    </div>
+  </div>
+  {# stacked 图例：由 JS renderLegend 完全管理（按当前 source 渲染对应段） #}
+  <div class="phm-dash-chart-legend" id="phm-chart-legend"></div>
+  {% else %}
+  <div class="phm-empty">
+    当前时间窗内暂无告警记录
+  </div>
+  {% endif %}
+</div>
+
+  </div>{% comment %}close phm-page-body{% endcomment %}
+</div>{% comment %}close phm-admin-shell{% endcomment %}
+
+{# 数据载体：把 buckets parts 矩阵 SSR 输出给 JS #}
+<script id="phm-buckets-data" type="application/json">{{ buckets_json|safe }}</script>
+<script id="phm-max-bucket" type="application/json">{{ max_bucket }}</script>
+
+<script>
+// ── 仪表盘交互脚本 ──────────────────────────────────────────────────
+// 1. 趋势图 stacked bar 渲染（柱内按 verdict 或来源分段）
+// 2. 三卡片点击切换"来源"（持久化到 URL hash，reload 后恢复）
+// 3. 自动刷新倒计时（URL 带 ?auto=1 时启用）
+(function () {
+  var MAX_BUCKET = 100;
+  try {
+    var maxEl = document.getElementById('phm-max-bucket');
+    if (maxEl) MAX_BUCKET = JSON.parse(maxEl.textContent);
+  } catch (e) {}
+
+  var buckets = [];
+  try {
+    var dataEl = document.getElementById('phm-buckets-data');
+    if (dataEl) buckets = JSON.parse(dataEl.textContent);
+  } catch (e) {
+    return;  // 数据解析失败，保持 SSR 占位（单色柱）
+  }
+
+  // verdict 段配置（选中某来源时柱内分段的色序）
+  // 注意：segClass/dotClass 必须与 admin.css 定义一致。
+  // class 名用简短形式（real/false/uncertain），不带 _alarm 后缀——
+  // bug 教训（Day20）：JS 用 false_alarm 但 CSS 用 false → 色块无颜色。
+  var VERDICT_SEGS = [
+    {key: 'real',        label: '实警', dotClass: 'phm-dash-dot-real',      segClass: 'phm-dash-bar-seg-real'},
+    {key: 'false_alarm', label: '虚警', dotClass: 'phm-dash-dot-false',     segClass: 'phm-dash-bar-seg-false'},
+    {key: 'uncertain',   label: '待定', dotClass: 'phm-dash-dot-uncertain', segClass: 'phm-dash-bar-seg-uncertain'},
+  ];
+  // 来源段配置（默认全部来源时柱内按来源分段）
+  var SOURCE_SEGS = [
+    {key: 'human',       label: '人工', dotClass: 'phm-dash-dot-human',       segClass: 'phm-dash-bar-seg-human'},
+    {key: 'llm',         label: 'LLM',  dotClass: 'phm-dash-dot-llm',         segClass: 'phm-dash-bar-seg-llm'},
+    {key: 'undiagnosed', label: '未诊断',dotClass: 'phm-dash-dot-undiagnosed',segClass: 'phm-dash-bar-seg-undiagnosed'},
+  ];
+
+  var modeEl = document.getElementById('phm-chart-mode');
+  var legendEl = document.getElementById('phm-chart-legend');
+  var barsEl = document.getElementById('phm-chart-bars');
+  var labelsContainer = barsEl ? barsEl.parentElement.querySelector('.phm-dash-chart-labels') : null;
+
+  function clearBars() {
+    if (!barsEl) return;
+    barsEl.innerHTML = '';
+  }
+
+  function renderBarCol(bucket, segments, total, maxForView) {
+    // segments: [{count, segClass}] 按从下到上的堆叠顺序
+    // maxForView: 当前视图（按 source 过滤后）所有桶的最大值，作为柱高 100% 基准
+    var col = document.createElement('div');
+    col.className = 'phm-dash-bar-col';
+    var titleParts = [];
+    segments.forEach(function (s) { if (s.count > 0) titleParts.push(s.label + ':' + s.count); });
+    col.title = bucket.title + (titleParts.length ? ' (' + titleParts.join(' / ') + ')' : ': 0 条');
+
+    // 顶部数字（总数）
+    var count = document.createElement('div');
+    count.className = 'phm-dash-bar-count';
+    count.textContent = total > 0 ? total : '';
+    col.appendChild(count);
+
+    // 柱体容器（从底向上堆叠各段）
+    var bar = document.createElement('div');
+    bar.className = 'phm-dash-bar';
+    if (total === 0 || maxForView === 0) {
+      bar.style.height = '0%';
+    } else {
+      // 柱高 = 该桶 total / 当前视图最大值 * 100%（不同 source 切换时基准重新计算）
+      bar.style.height = (total / maxForView * 100) + '%';
+    }
+    // 内层各段（column-reverse 让第一段在最底）
+    segments.forEach(function (s) {
+      var seg = document.createElement('div');
+      seg.className = 'phm-dash-bar-seg ' + s.segClass;
+      if (total === 0 || s.count === 0) {
+        seg.style.height = '0%';
+      } else {
+        // 段高 = 该段计数 / 总数 * 100%（占柱内的比例）
+        seg.style.height = (s.count / total * 100) + '%';
+      }
+      bar.appendChild(seg);
+    });
+    col.appendChild(bar);
+    return col;
+  }
+
+  function renderChart(source) {
+    if (!barsEl) return;
+    clearBars();
+    var segs, modeText, legendItems;
+    if (source === 'human' || source === 'llm') {
+      // 选中某来源：柱内按该来源的 verdict 3 段堆叠
+      segs = VERDICT_SEGS;
+      var sourceLabel = source === 'human' ? '人工诊断' : 'LLM 诊断';
+      modeText = sourceLabel + '（按裁决细分）';
+      legendItems = VERDICT_SEGS;
+    } else if (source === 'undiagnosed') {
+      // 未诊断来源无 verdict 细分，统一灰色
+      segs = [{key: 'undiagnosed', label: '未诊断', dotClass: 'phm-dash-dot-undiagnosed', segClass: 'phm-dash-bar-seg-undiagnosed'}];
+      modeText = '未诊断告警';
+      legendItems = segs;
+    } else {
+      // 默认全部来源：柱内按来源 3 段堆叠
+      segs = SOURCE_SEGS;
+      modeText = '全部来源（按诊断来源堆叠）';
+      legendItems = SOURCE_SEGS;
+    }
+
+    // 按当前 source 计算每桶的 total（柱高基准）
+    function bucketTotal(b) {
+      var parts = b.parts;
+      if (source === 'human' || source === 'llm') {
+        var cat = parts[source];
+        return cat.real + cat.false_alarm + cat.uncertain;
+      } else if (source === 'undiagnosed') {
+        return parts.undiagnosed;
+      } else {
+        return b.count;
+      }
+    }
+    // 当前视图最大值（不同 source 用不同基准，避免小数量被压扁）
+    var maxForView = 0;
+    buckets.forEach(function (b) {
+      var t = bucketTotal(b);
+      if (t > maxForView) maxForView = t;
+    });
+
+    var windowTotal = 0;
+    buckets.forEach(function (b) { windowTotal += bucketTotal(b); });
+    if (modeEl) modeEl.textContent = modeText + ' · 窗口内 ' + windowTotal + ' 条';
+    renderLegend(legendItems);
+
+    // 全空视图：显示提示而不是空图
+    if (maxForView === 0) {
+      var empty = document.createElement('div');
+      empty.className = 'phm-empty';
+      empty.textContent = '当前来源在该时间窗内暂无告警记录';
+      barsEl.appendChild(empty);
+      return;
+    }
+
+    buckets.forEach(function (b) {
+      var parts = b.parts;
+      var segments, total;
+      if (source === 'human' || source === 'llm') {
+        var cat = parts[source];
+        segments = VERDICT_SEGS.map(function (v) {
+          return {count: cat[v.key], segClass: v.segClass, label: v.label};
+        });
+        total = cat.real + cat.false_alarm + cat.uncertain;
+        barsEl.appendChild(renderBarCol(b, segments, total, maxForView));
+      } else if (source === 'undiagnosed') {
+        var count = parts.undiagnosed;
+        barsEl.appendChild(renderBarCol(b, [{count: count, segClass: 'phm-dash-bar-seg-undiagnosed', label: '未诊断'}], count, maxForView));
+      } else {
+        var hSum = parts.human.real + parts.human.false_alarm + parts.human.uncertain;
+        var lSum = parts.llm.real + parts.llm.false_alarm + parts.llm.uncertain;
+        segments = [
+          {count: hSum,            segClass: 'phm-dash-bar-seg-human',       label: '人工'},
+          {count: lSum,            segClass: 'phm-dash-bar-seg-llm',         label: 'LLM'},
+          {count: parts.undiagnosed, segClass: 'phm-dash-bar-seg-undiagnosed', label: '未诊断'},
+        ];
+        barsEl.appendChild(renderBarCol(b, segments, b.count, maxForView));
+      }
+    });
+  }
+
+  function totalAll() {
+    var t = 0;
+    buckets.forEach(function (b) { t += b.count; });
+    return t;
+  }
+
+  function renderLegend(items) {
+    if (!legendEl) return;
+    legendEl.innerHTML = '';
+    items.forEach(function (it) {
+      var span = document.createElement('span');
+      span.className = 'phm-dash-legend-item';
+      var dot = document.createElement('i');
+      dot.className = 'phm-dash-legend-dot ' + it.dotClass;
+      span.appendChild(dot);
+      span.appendChild(document.createTextNode(it.label));
+      legendEl.appendChild(span);
+    });
+  }
+
+  // ── 卡片点击切换来源 ───────────────────────────────────────────
+  var SOURCES = ['human', 'llm', 'undiagnosed'];
+  var selectedSource = null;  // null = 全部
+
+  function setSelectedSource(source) {
+    // null 切换：再次点已选中的卡 → 取消选中
+    if (selectedSource === source) source = null;
+    selectedSource = source;
+    // 更新卡片选中态
+    SOURCES.forEach(function (s) {
+      var el = document.getElementById('phm-stat-' + s);
+      if (el) el.classList.toggle('phm-dash-stat-selected', s === selectedSource);
+    });
+    // URL hash 持久化
+    if (selectedSource) {
+      window.history.replaceState({}, '', '#source=' + selectedSource);
+    } else {
+      // 清掉 hash（保留 query 参数）
+      var cleanUrl = window.location.pathname + window.location.search;
+      window.history.replaceState({}, '', cleanUrl);
+    }
+    renderChart(selectedSource);
+  }
+
+  SOURCES.forEach(function (s) {
+    var el = document.getElementById('phm-stat-' + s);
+    if (!el) return;
+    el.addEventListener('click', function () { setSelectedSource(s); });
+    el.addEventListener('keydown', function (e) {
+      // 键盘可达：Enter / Space 触发
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedSource(s); }
+    });
+  });
+
+  // 从 URL hash 恢复选中态
+  function restoreFromHash() {
+    var m = /source=(\w+)/.exec(window.location.hash);
+    if (m && SOURCES.indexOf(m[1]) !== -1) {
+      selectedSource = m[1];
+      var el = document.getElementById('phm-stat-' + m[1]);
+      if (el) el.classList.add('phm-dash-stat-selected');
+    }
+  }
+
+  // 首次渲染
+  restoreFromHash();
+  renderChart(selectedSource);
+
+  // 时间窗 tab 拦截：点 tab 时拼 URL（保留 auto + source hash）
+  // 必须运行时拼，因为 checkbox 勾选状态只有前端知道，SSR 时不知。
+  var windowTabs = document.querySelectorAll('.phm-dash-tab-window');
+  windowTabs.forEach(function (tab) {
+    tab.addEventListener('click', function (e) {
+      e.preventDefault();
+      var url = new URL(tab.href, window.location.href);
+      // 运行时读 checkbox 状态决定是否带 auto=1
+      var toggle = document.getElementById('phm-auto-refresh-toggle');
+      if (toggle && toggle.checked) {
+        url.searchParams.set('auto', '1');
+      } else {
+        url.searchParams.delete('auto');
+      }
+      // 保留 source hash（卡片选中态）
+      if (selectedSource) {
+        url.hash = 'source=' + selectedSource;
+      } else {
+        url.hash = '';
+      }
+      window.location.href = url.toString();
+    });
+  });
+
+  // ── 自动刷新（沿用上次实现） ───────────────────────────────────
+  var SECONDS = {{ refresh_seconds }};
+  var toggle = document.getElementById('phm-auto-refresh-toggle');
+  var countdown = document.getElementById('phm-countdown');
+  if (toggle) {
+    toggle.addEventListener('change', function () {
+      var url = new URL(window.location.href);
+      if (toggle.checked) url.searchParams.set('auto', '1');
+      else url.searchParams.delete('auto');
+      window.history.replaceState({}, '', url.toString());
+      remaining = toggle.checked ? SECONDS : -1;
+      updateCountdown();
+    });
+    var remaining = toggle.checked ? SECONDS : -1;
+    function updateCountdown() {
+      if (!countdown) return;
+      countdown.textContent = remaining > 0 ? remaining + 's 后刷新' : '';
+    }
+    setInterval(function () {
+      if (!toggle.checked) { remaining = -1; updateCountdown(); return; }
+      remaining--;
+      updateCountdown();
+      if (remaining <= 0) window.location.reload();
+    }, 1000);
+    updateCountdown();
+  }
+})();
+</script>
+{% endblock %}

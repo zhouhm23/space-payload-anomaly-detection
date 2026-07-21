@@ -281,7 +281,9 @@ body.phm-theme-dark {
 .phm-text-yellow { color: var(--phm-yellow); }
 .phm-text-blue { color: var(--phm-blue); }
 .phm-mt-8 { margin-top: 8px; }
+.phm-mt-12 { margin-top: 12px; }
 .phm-mt-16 { margin-top: 16px; }
+.phm-mb-12 { margin-bottom: 12px; }
 .phm-flex { display: flex; gap: 8px; align-items: center; }
 .phm-flex-col { display: flex; flex-direction: column; gap: 8px; }
 .phm-flex-between { display: flex; justify-content: space-between; align-items: center; }
@@ -295,3 +297,350 @@ body.phm-theme-dark {
   animation: phm-spin 0.8s linear infinite;
 }
 @keyframes phm-spin { to { transform: rotate(360deg); } }
+
+/* ── 仪表盘：banner 健康度 ──────────────────────────────────────── */
+.phm-dash-banner {
+  padding: 20px 24px;
+  border-left-width: 4px;
+}
+.phm-dash-banner-normal  { border-left-color: var(--phm-green); }
+.phm-dash-banner-warning { border-left-color: var(--phm-yellow); }
+.phm-dash-banner-danger  { border-left-color: var(--phm-red); }
+
+.phm-dash-banner-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.phm-dash-banner-left { display: flex; flex-direction: column; gap: 4px; }
+.phm-dash-banner-label {
+  font-size: 13px;
+  color: var(--phm-text-sec);
+}
+.phm-dash-banner-value {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  color: var(--phm-text-pri);
+}
+.phm-dash-banner-pct {
+  font-size: 36px;
+  font-weight: 700;
+  font-family: 'Consolas', 'Monaco', monospace;
+  line-height: 1;
+}
+.phm-dash-banner-unit {
+  font-size: 16px;
+  color: var(--phm-text-sec);
+}
+.phm-dash-banner-tier {
+  font-size: 13px;
+  color: var(--phm-text-sec);
+  margin-top: 2px;
+}
+.phm-dash-banner-normal  .phm-dash-banner-tier { color: var(--phm-green); }
+.phm-dash-banner-warning .phm-dash-banner-tier { color: var(--phm-yellow); }
+.phm-dash-banner-danger  .phm-dash-banner-tier { color: var(--phm-red); }
+
+.phm-dash-banner-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  min-width: 260px;
+  flex: 1;
+  max-width: 520px;
+}
+.phm-dash-meter {
+  width: 100%;
+  height: 8px;
+  background: var(--phm-bg-secondary);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.phm-dash-meter-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.4s ease;
+}
+.phm-dash-meter-fill-normal  { background: var(--phm-green); }
+.phm-dash-meter-fill-warning { background: var(--phm-yellow); }
+.phm-dash-meter-fill-danger  { background: var(--phm-red); }
+.phm-dash-banner-meta {
+  font-size: 12px;
+  color: var(--phm-text-dim);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.phm-dash-banner-meta strong {
+  color: var(--phm-text-pri);
+  font-weight: 600;
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+.phm-dash-sep { color: var(--phm-text-dim); opacity: 0.6; }
+
+/* 链路状态徽章（online/degraded/offline/waiting/unknown） */
+.phm-dash-link {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.phm-dash-link-online    { background: rgba(103,194,58,0.15); color: var(--phm-green); }
+.phm-dash-link-degraded  { background: rgba(230,162,60,0.15); color: var(--phm-yellow); }
+.phm-dash-link-offline,
+.phm-dash-link-waiting,
+.phm-dash-link-unknown   { background: rgba(245,108,108,0.15); color: var(--phm-red); }
+
+/* ── 仪表盘：时间窗 tabs ────────────────────────────────────────── */
+.phm-dash-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.phm-dash-tab {
+  display: inline-block;
+  padding: 5px 14px;
+  border: 1px solid var(--phm-border);
+  border-radius: var(--phm-radius);
+  background: var(--phm-bg-card);
+  color: var(--phm-text-sec);
+  font-size: 13px;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.phm-dash-tab:hover { color: var(--phm-blue); border-color: var(--phm-blue); }
+.phm-dash-tab.active {
+  background: var(--phm-blue);
+  border-color: var(--phm-blue);
+  color: #fff;
+  cursor: default;
+}
+.phm-dash-tabs-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.phm-dash-autorefresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--phm-text-sec);
+  cursor: pointer;
+  user-select: none;
+}
+.phm-dash-autorefresh input { cursor: pointer; }
+.phm-dash-countdown {
+  font-size: 11px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  color: var(--phm-blue);
+  min-width: 60px;
+}
+
+/* ── 仪表盘：三张统计卡片 ───────────────────────────────────────── */
+.phm-dash-stats {
+  grid-template-columns: repeat(3, 1fr);
+}
+@media (max-width: 720px) {
+  .phm-dash-stats { grid-template-columns: 1fr; }
+}
+.phm-dash-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px;
+}
+.phm-dash-stat-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.phm-dash-stat-icon {
+  font-size: 28px;
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--phm-bg-secondary);
+  border-radius: var(--phm-radius);
+}
+.phm-dash-stat-body { display: flex; flex-direction: column; gap: 2px; }
+.phm-dash-stat-num {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--phm-text-pri);
+  font-family: 'Consolas', 'Monaco', monospace;
+  line-height: 1.1;
+}
+.phm-dash-stat-label {
+  font-size: 13px;
+  color: var(--phm-text-sec);
+}
+.phm-dash-stat-breakdown {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--phm-border);
+  flex-wrap: wrap;
+}
+.phm-dash-stat-breakdown > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.phm-dash-stat-breakdown > span::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--phm-text-dim);
+}
+.phm-bd-real::before      { background: var(--phm-red); }
+.phm-bd-false::before     { background: var(--phm-green); }
+.phm-bd-uncertain::before { background: var(--phm-yellow); }
+
+/* 卡片点击筛选：选中态高亮 + 可点击 cursor + hint 文字 */
+.phm-dash-stat {
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.phm-dash-stat:hover {
+  border-color: var(--phm-blue);
+}
+.phm-dash-stat:focus {
+  outline: 2px solid var(--phm-blue);
+  outline-offset: 2px;
+}
+.phm-dash-stat-selected {
+  border-color: var(--phm-blue) !important;
+  box-shadow: 0 0 0 2px rgba(64,158,255,0.2), var(--phm-shadow) !important;
+}
+.phm-dash-stat-hint {
+  font-size: 11px;
+  text-align: right;
+  margin-top: 2px;
+}
+
+/* ── 仪表盘：柱状图 stacked 段（verdict / 来源） ──────────────── */
+.phm-dash-bar {
+  display: flex;
+  flex-direction: column-reverse;  /* 第一段在最底，依次往上堆 */
+  width: 70%;
+  max-width: 24px;
+  min-height: 0;
+  border-radius: 3px 3px 0 0;
+  overflow: hidden;
+  transition: height 0.3s ease;
+}
+/* SSR 占位柱（JS 失败时兜底，单色蓝） */
+.phm-dash-bar-fallback {
+  background: var(--phm-blue);
+}
+
+.phm-dash-bar-seg {
+  width: 100%;
+  min-height: 0;
+  transition: height 0.3s ease;
+}
+/* verdict 段色（选中某来源时柱内分段，与三卡片 breakdown 圆点同色）
+   注意：class 名用简短形式（real/false/uncertain），与 .phm-dash-dot-* 同源，
+   不带 _alarm 后缀，避免 JS 拼接和 CSS 定义因命名规则不一致而失配。 */
+.phm-dash-bar-seg-real       { background: var(--phm-red); }
+.phm-dash-bar-seg-false      { background: var(--phm-green); }
+.phm-dash-bar-seg-uncertain  { background: var(--phm-yellow); }
+
+/* 来源段色（默认全部来源时柱内分段） */
+.phm-dash-bar-seg-human       { background: var(--phm-blue); }
+.phm-dash-bar-seg-llm         { background: var(--phm-cyan); }
+.phm-dash-bar-seg-undiagnosed { background: var(--phm-text-dim); }
+
+/* stacked 图例 */
+.phm-dash-chart-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--phm-text-sec);
+  flex-wrap: wrap;
+}
+.phm-dash-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.phm-dash-legend-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--phm-text-dim);
+}
+.phm-dash-dot-real       { background: var(--phm-red); }
+.phm-dash-dot-false      { background: var(--phm-green); }
+.phm-dash-dot-uncertain  { background: var(--phm-yellow); }
+.phm-dash-dot-human      { background: var(--phm-blue); }
+.phm-dash-dot-llm        { background: var(--phm-cyan); }
+.phm-dash-dot-undiagnosed{ background: var(--phm-text-dim); }
+
+/* ── 仪表盘：告警趋势柱状图（纯 CSS bar） ─────────────────────── */
+.phm-dash-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.phm-dash-chart-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 180px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--phm-border);
+}
+.phm-dash-bar-col {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  position: relative;
+}
+.phm-dash-bar-count {
+  font-size: 10px;
+  color: var(--phm-text-dim);
+  margin-bottom: 2px;
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+.phm-dash-bar-count:empty { display: none; }
+
+.phm-dash-chart-labels {
+  display: flex;
+  gap: 2px;
+}
+.phm-dash-bar-label {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--phm-text-dim);
+  font-family: 'Consolas', 'Monaco', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

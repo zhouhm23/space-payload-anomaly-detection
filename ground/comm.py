@@ -206,14 +206,22 @@ class GroundClient:
         self.host = host
         self.port = port
         self.timeout = timeout
+        # 上一次 poll 是否成功建立 socket 连接（Day20 link_status bug 修复用）。
+        # 初始 False；poll() 内部连接成功后置 True，socket 异常时保持 False。
+        # 调用方（TelemetryService._poll_space）据此区分"连接失败"与"空 poll"。
+        self.connected = False
 
     def poll(self, config: dict | None = None) -> list[TelemetryPacket | AlertPacket]:
         packets: list[TelemetryPacket | AlertPacket] = []
         sock = None
+        # 重置：本次 poll 尚未连上，后续 socket.connect 成功才置 True
+        self.connected = False
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(self.timeout)
             sock.connect((self.host, self.port))
+            # socket 连接已建立——后续 socket 异常（recv 超时等）不算"连接失败"
+            self.connected = True
             # Send config to space segment first
             if config:
                 sock.sendall(
