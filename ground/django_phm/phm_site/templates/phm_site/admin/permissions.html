@@ -1,0 +1,97 @@
+{% extends "phm_site/admin/admin_base.html" %}
+
+{% block content %}
+<div class="phm-admin-shell">
+  <div class="phm-page-header">
+    <h1 class="phm-page-title">权限说明</h1>
+    <span class="phm-text-dim" style="font-size: 13px;">各角色在各页面的权限矩阵</span>
+  </div>
+  <div class="phm-page-body">
+
+{# ── 三大角色卡片 ───────────────────────────────────────────────── #}
+<div class="phm-card-grid">
+  {% for role in roles %}
+  <div class="phm-card"{% if role.key == current_role %}
+      style="border-color: var(--phm-blue); box-shadow: 0 0 0 2px rgba(64,158,255,0.15);"{% endif %}>
+    <div class="phm-flex-between" style="margin-bottom: 8px;">
+      <div class="phm-flex" style="gap: 8px; align-items: center;">
+        {% if role.key == 'anonymous' %}<span style="font-size: 20px;">👤</span>
+        {% elif role.key == 'staff' %}<span style="font-size: 20px;">🛡️</span>
+        {% else %}<span style="font-size: 20px;">👑</span>{% endif %}
+        <strong style="color: var(--phm-text-pri);">{{ role.name }}</strong>
+      </div>
+      {% if role.key == current_role %}
+      <span class="phm-badge phm-badge-blue">当前角色</span>
+      {% endif %}
+    </div>
+    <p class="phm-text-sec" style="margin: 0; font-size: 13px; line-height: 1.6;">
+      {{ role.desc }}
+    </p>
+  </div>
+  {% endfor %}
+</div>
+
+{# ── 权限矩阵表 ─────────────────────────────────────────────────── #}
+<div class="phm-card phm-mt-16">
+  <h3 class="phm-card-title">📋 页面权限矩阵</h3>
+  <div class="phm-table-wrap">
+    <table class="phm-table">
+      <thead>
+        <tr>
+          <th>页面</th>
+          <th>匿名</th>
+          <th>普通管理员（staff）</th>
+          <th>超级管理员（superuser）</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in matrix %}
+        <tr>
+          <td>
+            <a href="{{ row.url }}" style="color: var(--phm-blue); text-decoration: none;">
+              {{ row.page }}
+            </a>
+          </td>
+          <td class="phm-text-dim">{{ row.anonymous }}</td>
+          <td class="phm-text-sec">{{ row.staff|safe }}</td>
+          <td class="phm-text-sec">{{ row.superuser|safe }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="phm-text-dim" style="margin-top: 12px; font-size: 12px;">
+    说明：「✓ 读」表示可访问页面查看数据；「✓ 只读」表示仅可查看，看不到写操作按钮；
+    其他具体权限（标注/诊断/导出/恢复/删除等）按业务语义区分。
+  </p>
+</div>
+
+{# ── 审计日志范围说明 ───────────────────────────────────────────── #}
+<div class="phm-card phm-mt-16">
+  <h3 class="phm-card-title">📜 审计日志范围</h3>
+  <p class="phm-text-sec" style="font-size: 13px; margin: 0 0 10px;">
+    审计日志走 SimpleUI 默认（Django 内置 <code class="phm-mono">admin.LogEntry</code>）。
+    下表说明其覆盖范围与边界：
+  </p>
+  <ul style="margin: 0; padding-left: 20px;">
+    {% for note in audit_notes %}
+    <li class="phm-text-sec" style="font-size: 13px; line-height: 1.7; margin-bottom: 4px;">
+      {{ note|safe }}
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+
+{# ── 用户管理入口提示 ───────────────────────────────────────────── #}
+<div class="phm-card phm-mt-16">
+  <h3 class="phm-card-title">👥 用户与组管理</h3>
+  <p class="phm-text-sec" style="font-size: 13px; margin: 0;">
+    用户与组管理走 SimpleUI 默认（<code class="phm-mono">django.contrib.auth</code>），
+    入口在左侧菜单的<strong>「数据浏览」</strong>组下（User / Group）。
+    仅超级管理员可访问（SimpleUI 默认权限）。
+  </p>
+</div>
+
+  </div>{% comment %}close phm-page-body{% endcomment %}
+</div>{% comment %}close phm-admin-shell{% endcomment %}
+{% endblock %}

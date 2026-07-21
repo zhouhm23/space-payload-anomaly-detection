@@ -173,16 +173,18 @@ SIMPLEUI_HOME_INFO = False
 SIMPLEUI_ANALYSIS = False
 # 登录后台默认跳转仪表盘（v1.1 新增）
 SIMPLEUI_INDEX = '/admin/phm_site/dashboard/'
-# 自定义菜单：监控工作台 + 业务管理分组
+# 自定义菜单（对齐需求书 §后台 9 项）：首页/用户管理/审计日志走 SimpleUI 默认，
+# 仪表盘/告警与预警/回收站/设备树/系统设置/模型管理为本系统自定义页。
+# system_keep=True 让 SimpleUI 自动列出 django.contrib.auth (User/Group →「认证和授权」)
+# 与 django.contrib.admin (LogEntry →「管理」/审计日志) 的默认菜单组。
+# menu_display 是白名单 + 排序：精确控制只显示需求书要求的 4 个组，
+# 隐藏 SimpleUI 默认会列出的 PHM数据管理（业务表的 ModelAdmin 列表，开发用不上面向用户）。
+# 「权限说明」是用户管理页上的按钮（需求书原文："用户管理...加个说明按钮，
+# 打开显示权限说明面板"），URL 保留但不挂菜单——按钮嵌入待用户管理页改造时完成。
 SIMPLEUI_CONFIG = {
-    'system_keep': False,
+    'system_keep': True,
+    'menu_display': ['运营管理', '配置管理', '认证和授权', '管理'],
     'menus': [
-        {
-            'name': '监控工作台',
-            'icon': 'dashboard',
-            'url': '/monitor/',
-            'models': [],
-        },
         {
             'name': '运营管理',
             'icon': 'fas fa-chart-line',
@@ -200,11 +202,6 @@ SIMPLEUI_CONFIG = {
                 {'name': '系统设置', 'icon': 'fas fa-sliders-h', 'url': '/admin/phm_site/settings/'},
                 {'name': '模型管理', 'icon': 'fas fa-cubes', 'url': '/admin/phm_site/models/'},
             ],
-        },
-        {
-            'app': 'phm_site',
-            'name': '数据浏览',
-            'icon': 'database',
         },
     ],
 }

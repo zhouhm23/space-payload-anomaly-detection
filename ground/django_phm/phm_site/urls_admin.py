@@ -27,6 +27,9 @@ urlpatterns = [
     path('phm_site/recycle/api/restore/',    views_admin.recycle_restore_api,  name='phm_admin_recycle_restore'),
     path('phm_site/recycle/api/purge/',      views_admin.recycle_purge_api,    name='phm_admin_recycle_purge'),
 
+    # 第 9 页：权限说明（用户管理+审计日志走 SimpleUI 默认，仅本页为新增静态页）
+    path('phm_site/permissions/',            views_admin.permissions_view,     name='phm_admin_permissions'),
+
     # 以下页面尚未实现，暂占位（菜单可点击不 404）
     path('phm_site/alert/',       views_admin.models_view, name='phm_admin_alert'),
     path('phm_site/device-tree/', views_admin.models_view, name='phm_admin_device_tree'),

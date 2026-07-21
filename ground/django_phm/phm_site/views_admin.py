@@ -841,3 +841,117 @@ def recycle_purge_api(request):
         logger.warning("recycle purge failed: %s", e)
         return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
     return JsonResponse({'status': 'ok', 'purged': n, 'table': table_key})
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 第 9 页：用户管理 + 审计日志（SimpleUI 默认 + 权限说明静态页）
+# ════════════════════════════════════════════════════════════════════════════
+# 需求书 §后台：
+#   - 「用户管理（simpleui默认），加个说明按钮，打开显示权限说明面板」
+#   - 「审计日志（simpleui默认）」
+#
+# 实现策略：
+#   - 用户管理（User/Group CRUD）：完全走 SimpleUI 默认（django.contrib.auth 已注册）
+#   - 审计日志（LogEntry 浏览）：完全走 SimpleUI 默认（django.contrib.admin 已注册）
+#     范围已确认：Django LogEntry 仅记录 admin 站内 ModelAdmin 增删改，
+#     不覆盖自定义页 AJAX 操作（用户已确认这是接受的边界）
+#   - 唯一新增：权限说明静态页 /admin/phm_site/permissions/
+
+# 角色清单（与 _require_superuser / @staff_member_required 的判定对齐）
+_PERMISSION_ROLES = [
+    {
+        'key': 'anonymous',
+        'name': '匿名用户',
+        'desc': '未登录的访客。仅能看到登录页，无法访问任何后台功能。',
+        'badge': 'phm-badge-gray',
+    },
+    {
+        'key': 'staff',
+        'name': '普通管理员（staff）',
+        'desc': '已登录但非超级管理员。可读所有页面，可执行只读/可逆操作。',
+        'badge': 'phm-badge-blue',
+    },
+    {
+        'key': 'superuser',
+        'name': '超级管理员（superuser）',
+        'desc': '拥有全部权限，包括所有写操作、用户管理、系统配置。',
+        'badge': 'phm-badge-red',
+    },
+]
+
+# 各功能页的权限矩阵：{操作: {role: '✓' / '只读' / '—'}}
+# 与 _require_superuser helper + @staff_member_required 的实际判定对齐
+_PERMISSION_MATRIX = [
+    {
+        'page': '仪表盘',
+        'url': '/admin/phm_site/dashboard/',
+        'anonymous': '—', 'staff': '✓ 读', 'superuser': '✓ 读',
+    },
+    {
+        'page': '告警与预警管理',
+        'url': '/admin/phm_site/alert/',
+        'anonymous': '—', 'staff': '✓ 读 + 标注 + LLM 诊断 + 导出', 'superuser': '✓ 全部 + 新增 + 移到回收站',
+    },
+    {
+        'page': '回收站',
+        'url': '/admin/phm_site/recycle/',
+        'anonymous': '—', 'staff': '✓ 只读列表', 'superuser': '✓ 恢复 + 永久删除',
+    },
+    {
+        'page': '设备树管理',
+        'url': '/admin/phm_site/device-tree/',
+        'anonymous': '—', 'staff': '✓ 只读', 'superuser': '✓ 新建 + 编辑 + 拖拽 + 删除',
+    },
+    {
+        'page': '系统设置',
+        'url': '/admin/phm_site/settings/',
+        'anonymous': '—', 'staff': '✓ 只读', 'superuser': '✓ 修改系统配置 + 前台主题（通道校准只读）',
+    },
+    {
+        'page': '模型管理',
+        'url': '/admin/phm_site/models/',
+        'anonymous': '—', 'staff': '✓ 只读', 'superuser': '✓ 只读（修改需改配置文件 + 重启）',
+    },
+    {
+        'page': '用户与组管理',
+        'url': '/admin/auth/user/',
+        'anonymous': '—', 'staff': '—', 'superuser': '✓ 全部（SimpleUI 默认）',
+    },
+    {
+        'page': '审计日志',
+        'url': '/admin/admin/logentry/',
+        'anonymous': '—', 'staff': '✓ 只读', 'superuser': '✓ 只读',
+    },
+]
+
+# 审计日志范围说明（用户已确认接受的边界）
+_AUDIT_SCOPE_NOTES = [
+    'Django LogEntry 默认仅记录 admin 站内 ModelAdmin 的增删改操作（用户/组/业务模型列表页）。',
+    '自定义页的 AJAX 写操作（如回收站恢复/永久删除、告警标注、系统设置保存、设备树保存）当前<strong>不</strong>写入 LogEntry。',
+    'CLI 命令（manage.py phm_*）与 API 调用（/api/v2/*）也<strong>不</strong>计入 LogEntry。',
+    '如需扩展到自定义页操作，需在各自定义页 view 里手动 log_action()（未来工作）。',
+]
+
+
+@staff_member_required
+def permissions_view(request):
+    """权限说明静态页（GET）。
+
+    纯 SSR，不依赖 Container。展示三大角色（匿名/staff/superuser）的权限矩阵，
+    帮助管理员快速了解各角色能做什么、各页面需要什么权限。
+    """
+    # 当前用户角色（高亮当前行）
+    if not request.user.is_authenticated:
+        current_role = 'anonymous'
+    elif request.user.is_superuser:
+        current_role = 'superuser'
+    else:
+        current_role = 'staff'
+
+    return render(request, 'phm_site/admin/permissions.html', {
+        'page_title': '权限说明',
+        'roles': _PERMISSION_ROLES,
+        'matrix': _PERMISSION_MATRIX,
+        'audit_notes': _AUDIT_SCOPE_NOTES,
+        'current_role': current_role,
+    })
