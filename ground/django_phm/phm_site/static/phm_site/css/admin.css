@@ -644,3 +644,44 @@ body.phm-theme-dark {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ── 第 3 页 回收站（recycle） ─────────────────────────────────── */
+/* 顶部工具栏：紧贴 tab 下方，第一屏可见（200 行表格若放底部用户会看不到） */
+.phm-recycle-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  margin: 0 0 12px;
+  background: var(--phm-bg-card);
+  border: 1px solid var(--phm-border);
+  border-radius: var(--phm-radius);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+/* 二次确认对话框（永久删除专用）—— 居中 modal 风格，
+   复用 .phm-drawer-mask 做半透明蒙层（display 由 JS 切换） */
+.phm-recycle-confirm-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--phm-bg-card);
+  border: 1px solid var(--phm-red);
+  border-radius: var(--phm-radius-lg);
+  padding: 20px 24px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+  max-width: 440px;
+  width: calc(100% - 32px);
+  z-index: 10001;
+}
+
+/* tab 切换链接：与仪表盘 .phm-dash-tab 共享基础样式，
+   这里只补 hover 友好态（鼠标手型已由 <a> 天然提供） */
+a.phm-recycle-tab-switch {
+  cursor: pointer;
+  text-decoration: none;
+}

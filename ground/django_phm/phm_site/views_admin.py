@@ -558,3 +558,286 @@ def dashboard_view(request):
         'auto_refresh': auto_refresh,
         'refresh_seconds': _DASHBOARD_REFRESH_SECONDS,
     })
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 第 3 页：回收站（仅超管可改）
+# ════════════════════════════════════════════════════════════════════════════
+# 需求书 §后台「回收站（仅管理员可修改）」：
+#   和告警管理列表形态一致，但功能栏只有「永久删除」+「恢复」两个按钮。
+#
+# 数据源：SQLiteStore 三张业务表的 is_deleted=1 行（detection_results /
+#   alert_records / diagnosis_records）。第 1 节公共前置已加 query_deleted /
+#   restore / purge_by_ids 三个方法，本 view 是薄壳。
+
+# URL ?table= 白名单（key → (SQLiteStore 表名, 中文标签)）
+_RECYCLE_TABLE_MAP = {
+    'alerts':     ('alert_records',     '告警记录'),
+    'detections': ('detection_results', '检测明细'),
+    'diagnoses':  ('diagnosis_records', '诊断记录'),
+}
+_RECYCLE_TABLE_DEFAULT = 'alerts'
+_RECYCLE_LIMIT_DEFAULT = 200
+_RECYCLE_LIMIT_MAX = 1000
+
+
+def _parse_recycle_table(key):
+    """解析 ?table= 参数，返回 (table_key, sql_table, label)。
+
+    非法值兜底为 alerts（默认 tab）。返回三元组供 view 与模板共用。
+    """
+    if key not in _RECYCLE_TABLE_MAP:
+        key = _RECYCLE_TABLE_DEFAULT
+    sql_table, label = _RECYCLE_TABLE_MAP[key]
+    return key, sql_table, label
+
+
+def _parse_recycle_limit(raw):
+    """解析 ?limit= 参数，限幅 [1, 1000]，非法值兜底默认。"""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return _RECYCLE_LIMIT_DEFAULT
+    return max(1, min(n, _RECYCLE_LIMIT_MAX))
+
+
+def _parse_id_list(raw):
+    """把请求里的 ids（list 或逗号串）规整成 list[int]。
+
+    支持 JSON 数组 / 逗号分隔字符串 / 单个 id。
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        out = []
+        for v in raw:
+            try:
+                iv = int(v)
+                if iv > 0:
+                    out.append(iv)
+            except (TypeError, ValueError):
+                continue
+        return out
+    if isinstance(raw, int):
+        return [raw] if raw > 0 else []
+    if isinstance(raw, str):
+        out = []
+        for part in raw.split(','):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                iv = int(part)
+                if iv > 0:
+                    out.append(iv)
+            except ValueError:
+                continue
+        return out
+    return []
+
+
+def _verdict_badge(verdict):
+    """verdict → CSS 徽章类（与仪表盘色序一致：实警红/虚警绿/待定黄）。"""
+    return {
+        'real':        'phm-badge-red',
+        'false_alarm': 'phm-badge-green',
+        'uncertain':   'phm-badge-yellow',
+    }.get(verdict, 'phm-badge-gray')
+
+
+def _alert_type_badge(alert_type):
+    """alert_type → CSS 徽章类（实测红/预测黄/联合紫）。"""
+    # 注：联合告警 (joint) 用 cyan 便于与双色彩区分
+    return {
+        'measured':  'phm-badge-red',
+        'predicted': 'phm-badge-yellow',
+        'joint':     'phm-badge-cyan',
+    }.get(alert_type, 'phm-badge-gray')
+
+
+def _build_sensor_meta(config_service):
+    """从 device_tree 构造 {channelName: {sensor_name, unit}} 映射。
+
+    需求书「告警和预警管理」要求列里有「传感器名称」（区别于通道名 channelName，
+    在 device_tree 中是 sensor.name 字段，通常与 channelName 相同但可独立配置）
+    和「遥测值+单位」展示。回收站列表复用告警管理的列定义，所以也要这两个字段。
+    """
+    mapping = {}
+    if config_service is None:
+        return mapping
+    try:
+        body = config_service.load()
+        tree = body.get('device_tree') or []
+    except Exception as e:
+        logger.warning("recycle: load device_tree failed: %s", e)
+        return mapping
+
+    def walk(nodes):
+        for n in nodes or []:
+            if not isinstance(n, dict):
+                continue
+            if n.get('type') == 'sensor':
+                ch = n.get('channelName') or n.get('sourceId') or n.get('name')
+                if ch and ch not in mapping:
+                    mapping[ch] = {
+                        'sensor_name': n.get('name') or ch,
+                        'unit': n.get('unit') or '',
+                    }
+            walk(n.get('children'))
+    walk(tree)
+    return mapping
+
+
+def _final_status_badge(final_status):
+    """综合状态 final_status → CSS 徽章类。
+
+    final_status 优先级 human > llm > 核验（active/pending/confirmed/false）。
+    real→红 / false_alarm→绿 / uncertain→黄 / confirmed→蓝 / false→绿 /
+    pending→黄 / active→灰。
+    """
+    return {
+        'real':        'phm-badge-red',
+        'false_alarm': 'phm-badge-green',
+        'uncertain':   'phm-badge-yellow',
+        'confirmed':   'phm-badge-blue',
+        'false':       'phm-badge-green',
+        'pending':     'phm-badge-yellow',
+        'active':      'phm-badge-gray',
+    }.get(final_status, 'phm-badge-gray')
+
+
+@staff_member_required
+def recycle_view(request):
+    """回收站页（GET）。
+
+    GET ?table=alerts|detections|diagnoses 切换三张资源（默认 alerts）。
+    GET ?limit=N 控制单页条数（1-1000，默认 200）。
+    Container 未就绪时渲染占位页（_state.html），不 500。
+
+    列定义对齐需求书 §后台「告警和预警管理」（10 列）减去「操作」列
+    （回收站无抽屉操作，功能栏统一为「恢复」+「永久删除」），加上「删除时间」
+    （回收站特有）。即：复选框 / id / 类型 / 传感器名 / 遥测值 / 异常分数 /
+    告警时间 / LLM 状态 / 人工状态 / 综合状态 / 删除时间。
+    """
+    table_key, sql_table, label = _parse_recycle_table(request.GET.get('table'))
+    limit = _parse_recycle_limit(request.GET.get('limit'))
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return _render_state_page(request, err, '回收站')
+
+    # 调 SQLiteStore.query_deleted（按 deleted_at DESC 排序）
+    try:
+        rows = c.sqlite.query_deleted(sql_table, limit=limit)
+    except Exception as e:
+        logger.warning("recycle query_deleted(%s) failed: %s", sql_table, e)
+        rows = []
+
+    # 传感器元信息（告警列表用：传感器名 + 单位）
+    sensor_meta = _build_sensor_meta(getattr(c, 'config', None))
+
+    # 给每行加徽章类（模板直接用）
+    decorated = []
+    for r in rows:
+        item = dict(r)
+        item['alert_type_badge'] = _alert_type_badge(r.get('alert_type'))
+        item['llm_verdict_badge'] = _verdict_badge(r.get('llm_verdict'))
+        item['human_verdict_badge'] = _verdict_badge(r.get('human_verdict'))
+        item['final_status_badge'] = _final_status_badge(r.get('final_status'))
+        # 传感器名 + 单位（告警列表列用）
+        meta = sensor_meta.get(r.get('channel'))
+        item['sensor_name'] = meta['sensor_name'] if meta else (r.get('channel') or '—')
+        item['unit'] = meta['unit'] if meta else ''
+        decorated.append(item)
+
+    # 三个 tab（active 标记当前选中）
+    tabs = [
+        {'key': k, 'label': lbl[1], 'active': (k == table_key)}
+        for k, lbl in _RECYCLE_TABLE_MAP.items()
+    ]
+
+    # 是否超管（模板依据此显示/隐藏批量操作按钮）
+    is_superuser = request.user.is_authenticated and request.user.is_superuser
+
+    return render(request, 'phm_site/admin/recycle.html', {
+        'page_title': '回收站',
+        'table_key': table_key,
+        'table_label': label,
+        'rows': decorated,
+        'tabs': tabs,
+        'limit': limit,
+        'is_superuser': is_superuser,
+        'csrf_token_str': request.META.get('CSRF_COOKIE', ''),
+    })
+
+
+@staff_member_required
+@require_http_methods(['POST'])
+def recycle_restore_api(request):
+    """恢复软删记录（POST，仅超管）。
+
+    入参 JSON: {table: 'alerts|detections|diagnoses', ids: [int,...]}
+    出参 JSON: {status: 'ok', restored: N} 或 {status: 'error', message}
+    """
+    ok, err_resp = _require_superuser(request)
+    if not ok:
+        return err_resp
+    try:
+        body = json.loads(request.body or b'{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'status': 'error', 'message': '请求体不是合法 JSON'},
+                            status=400)
+    table_key, sql_table, _label = _parse_recycle_table(body.get('table'))
+    ids = _parse_id_list(body.get('ids'))
+    if not ids:
+        return JsonResponse({'status': 'error', 'message': '未提供有效 id'},
+                            status=400)
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'PHM 服务未就绪：{}'.format(
+                                 err.get('phm_state'))}, status=503)
+    try:
+        n = c.sqlite.restore(sql_table, ids)
+    except Exception as e:
+        logger.warning("recycle restore failed: %s", e)
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+    return JsonResponse({'status': 'ok', 'restored': n, 'table': table_key})
+
+
+@staff_member_required
+@require_http_methods(['POST'])
+def recycle_purge_api(request):
+    """永久删除（物理清除）软删记录（POST，仅超管）。
+
+    入参 JSON: {table: 'alerts|detections|diagnoses', ids: [int,...]}
+    出参 JSON: {status: 'ok', purged: N} 或 {status: 'error', message}
+
+    安全约束：purge_by_ids 只删 is_deleted=1 的行，活跃数据不受影响。
+    """
+    ok, err_resp = _require_superuser(request)
+    if not ok:
+        return err_resp
+    try:
+        body = json.loads(request.body or b'{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'status': 'error', 'message': '请求体不是合法 JSON'},
+                            status=400)
+    table_key, sql_table, _label = _parse_recycle_table(body.get('table'))
+    ids = _parse_id_list(body.get('ids'))
+    if not ids:
+        return JsonResponse({'status': 'error', 'message': '未提供有效 id'},
+                            status=400)
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'PHM 服务未就绪：{}'.format(
+                                 err.get('phm_state'))}, status=503)
+    try:
+        n = c.sqlite.purge_by_ids(sql_table, ids)
+    except Exception as e:
+        logger.warning("recycle purge failed: %s", e)
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+    return JsonResponse({'status': 'ok', 'purged': n, 'table': table_key})

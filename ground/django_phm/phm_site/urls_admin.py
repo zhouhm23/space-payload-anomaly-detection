@@ -22,9 +22,13 @@ urlpatterns = [
     path('phm_site/models/', views_admin.models_view, name='phm_admin_models'),
     path('phm_site/dashboard/', views_admin.dashboard_view, name='phm_admin_dashboard'),
 
+    # 第 3 页：回收站（仅超管可改）。AJAX 端点用 api/<action>/ 子路径。
+    path('phm_site/recycle/',                views_admin.recycle_view,         name='phm_admin_recycle'),
+    path('phm_site/recycle/api/restore/',    views_admin.recycle_restore_api,  name='phm_admin_recycle_restore'),
+    path('phm_site/recycle/api/purge/',      views_admin.recycle_purge_api,    name='phm_admin_recycle_purge'),
+
     # 以下页面尚未实现，暂占位（菜单可点击不 404）
     path('phm_site/alert/',       views_admin.models_view, name='phm_admin_alert'),
-    path('phm_site/recycle/',     views_admin.models_view, name='phm_admin_recycle'),
     path('phm_site/device-tree/', views_admin.models_view, name='phm_admin_device_tree'),
     path('phm_site/settings/',    views_admin.models_view, name='phm_admin_settings'),
 

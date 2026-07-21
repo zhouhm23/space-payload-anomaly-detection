@@ -1171,6 +1171,349 @@ class SQLiteStore:
             logger.warning("update_alert_verdict failed", exc_info=True)
             return False
 
+    # ───────────────────────────────────────────────────────────────────
+    # 后台管理扩展（Day21 第 3/4 页共用前置）
+    # ───────────────────────────────────────────────────────────────────
+    # 设计要点：
+    #   - table 白名单（防 SQL 注入，所有 table 列均来自硬编码 frozenset）
+    #   - ids 空列表短路返回 0（避免空 IN (...) 报错）
+    #   - 全部复用 _write_lock，try/except 降级，绝不向上抛
+    #   - 零行为变化：现有 delete_*/purge_deleted/update_alert_verdict 不动
+    _ADMIN_TABLES = frozenset({"detection_results", "alert_records", "diagnosis_records"})
+
+    def _sanitize_ids(self, ids: list[int]) -> list[int]:
+        """把外部传入的 id 列表规整成「去重 + 正整数」安全形式。"""
+        seen: set[int] = set()
+        out: list[int] = []
+        for v in ids or []:
+            try:
+                iv = int(v)
+            except (TypeError, ValueError):
+                continue
+            if iv > 0 and iv not in seen:
+                seen.add(iv)
+                out.append(iv)
+        return out
+
+    def _placeholders(self, n: int) -> str:
+        """生成 ``?,?,?`` 形式的占位符串（sqlite3 不接受列表直接展开）。"""
+        return ",".join(["?"] * max(n, 1))
+
+    def query_deleted(self, table: str, limit: int = 200) -> list[dict]:
+        """返回某张表的**已软删**记录（回收站列表用）。
+
+        Args:
+            table: 必须是 ``_ADMIN_TABLES`` 之一。
+            limit: 返回上限，按 ``deleted_at DESC`` 排序。
+
+        返回字段尽量与 ``query_alerts`` / ``query_detection`` 对齐，
+        便于前端表格复用列定义。失败返回 ``[]``。
+        """
+        if not self.enabled or self._conn is None:
+            return []
+        if table not in self._ADMIN_TABLES:
+            return []
+        try:
+            limit = max(1, min(int(limit), 1000))
+        except (TypeError, ValueError):
+            limit = 200
+        try:
+            if table == "alert_records":
+                cur = self._conn.execute(
+                    "SELECT id, channel, alert_type, score, message, created_at, status, "
+                    "       verified_at, llm_verdict, human_verdict, raw_snapshot, deleted_at "
+                    f"FROM {table} WHERE is_deleted = 1 "
+                    "ORDER BY deleted_at DESC LIMIT ?",
+                    [limit],
+                )
+                rows = cur.fetchall()
+                out = []
+                for r in rows:
+                    # raw_snapshot 末点 = 告警时刻的遥测值（需求书 §后台「遥测值」列）
+                    raw_snap = None
+                    raw_value = None
+                    if r[10]:
+                        try:
+                            raw_snap = json.loads(r[10])
+                            if isinstance(raw_snap, list) and raw_snap:
+                                last = raw_snap[-1]
+                                if isinstance(last, (int, float)):
+                                    raw_value = float(last)
+                        except (json.JSONDecodeError, TypeError):
+                            raw_snap = None
+                    out.append({
+                        "id": r[0], "channel": r[1], "alert_type": r[2], "score": r[3],
+                        "message": r[4], "created_at": r[5], "status": r[6],
+                        "verified_at": r[7], "llm_verdict": r[8], "human_verdict": r[9],
+                        "raw_snapshot": raw_snap, "raw_value": raw_value,
+                        "deleted_at": r[11],
+                        "final_status": compute_final_status(r[6], r[8], r[9]),
+                    })
+                return out
+            if table == "detection_results":
+                cur = self._conn.execute(
+                    "SELECT id, channel, timestamp, l1_score, l2_score, l3_score, "
+                    "       final_score, deleted_at "
+                    f"FROM {table} WHERE is_deleted = 1 "
+                    "ORDER BY deleted_at DESC LIMIT ?",
+                    [limit],
+                )
+                rows = cur.fetchall()
+                return [
+                    {
+                        "id": r[0], "channel": r[1], "timestamp": r[2],
+                        "l1_score": r[3], "l2_score": r[4], "l3_score": r[5],
+                        "final_score": r[6], "deleted_at": r[7],
+                    }
+                    for r in rows
+                ]
+            # diagnosis_records
+            cur = self._conn.execute(
+                "SELECT id, channel, alert_type, alert_ts, llm_verdict, error, created_at, deleted_at "
+                f"FROM {table} WHERE is_deleted = 1 "
+                "ORDER BY deleted_at DESC LIMIT ?",
+                [limit],
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "id": r[0], "channel": r[1], "alert_type": r[2], "alert_ts": r[3],
+                    "llm_verdict": r[4], "error": r[5], "created_at": r[6],
+                    "deleted_at": r[7],
+                }
+                for r in rows
+            ]
+        except Exception:
+            logger.warning("query_deleted(%s) failed", table, exc_info=True)
+            return []
+
+    def delete_by_ids(self, table: str, ids: list[int]) -> int:
+        """按 id 列表**软删**（移到回收站）。
+
+        ``UPDATE ... SET is_deleted=1, deleted_at=unixepoch()
+           WHERE id IN (...) AND is_deleted=0``。
+        返回实际命中的行数（已在回收站的不会重复计）。
+        """
+        if not self.enabled or self._conn is None:
+            return 0
+        if table not in self._ADMIN_TABLES:
+            return 0
+        clean = self._sanitize_ids(ids)
+        if not clean:
+            return 0
+        try:
+            with self._write_lock:
+                cur = self._conn.execute(
+                    f"UPDATE {table} SET is_deleted = 1, deleted_at = unixepoch() "
+                    f"WHERE id IN ({self._placeholders(len(clean))}) AND is_deleted = 0",
+                    clean,
+                )
+                return cur.rowcount if cur.rowcount is not None else 0
+        except Exception:
+            logger.warning("delete_by_ids(%s) failed", table, exc_info=True)
+            return 0
+
+    def restore(self, table: str, ids: list[int]) -> int:
+        """按 id 列表**恢复**软删（回收站「恢复」按钮）。
+
+        ``UPDATE ... SET is_deleted=0, deleted_at=NULL
+           WHERE id IN (...) AND is_deleted=1``。
+        返回实际恢复的行数。
+        """
+        if not self.enabled or self._conn is None:
+            return 0
+        if table not in self._ADMIN_TABLES:
+            return 0
+        clean = self._sanitize_ids(ids)
+        if not clean:
+            return 0
+        try:
+            with self._write_lock:
+                cur = self._conn.execute(
+                    f"UPDATE {table} SET is_deleted = 0, deleted_at = NULL "
+                    f"WHERE id IN ({self._placeholders(len(clean))}) AND is_deleted = 1",
+                    clean,
+                )
+                return cur.rowcount if cur.rowcount is not None else 0
+        except Exception:
+            logger.warning("restore(%s) failed", table, exc_info=True)
+            return 0
+
+    def purge_by_ids(self, table: str, ids: list[int]) -> int:
+        """按 id 列表**物理删除**（回收站「永久删除」按钮）。
+
+        与 ``purge_deleted(table, older_than)`` 不同——后者是按时间窗批量清，
+        本方法是按精确 id 列表删。仅对**已软删**行生效，避免误删活跃数据。
+        返回实际物理删除的行数。
+        """
+        if not self.enabled or self._conn is None:
+            return 0
+        if table not in self._ADMIN_TABLES:
+            return 0
+        clean = self._sanitize_ids(ids)
+        if not clean:
+            return 0
+        try:
+            with self._write_lock:
+                cur = self._conn.execute(
+                    f"DELETE FROM {table} "
+                    f"WHERE id IN ({self._placeholders(len(clean))}) AND is_deleted = 1",
+                    clean,
+                )
+                return cur.rowcount if cur.rowcount is not None else 0
+        except Exception:
+            logger.warning("purge_by_ids(%s) failed", table, exc_info=True)
+            return 0
+
+    def update_alert_verdict_by_ids(self, ids: list[int], verdict: str,
+                                    *, is_llm: bool = False) -> int:
+        """按 id 列表批量写 verdict（告警管理页「批量标注」用）。
+
+        ``UPDATE alert_records SET <col>=? WHERE id IN (...) AND is_deleted=0``。
+        不会动已软删的行。返回实际更新行数。
+        """
+        if not self.enabled or self._conn is None:
+            return 0
+        if verdict not in self._VALID_VERDICTS:
+            return 0
+        clean = self._sanitize_ids(ids)
+        if not clean:
+            return 0
+        col = "llm_verdict" if is_llm else "human_verdict"
+        try:
+            with self._write_lock:
+                cur = self._conn.execute(
+                    f"UPDATE alert_records SET {col} = ? "
+                    f"WHERE id IN ({self._placeholders(len(clean))}) AND is_deleted = 0",
+                    [verdict] + clean,
+                )
+                return cur.rowcount if cur.rowcount is not None else 0
+        except Exception:
+            logger.warning("update_alert_verdict_by_ids failed", exc_info=True)
+            return 0
+
+    def query_alerts_filtered(
+        self,
+        *,
+        channel: str | None = None,
+        alert_type: str | None = None,
+        status: str | None = None,
+        verdict: str | None = None,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """筛选查询 alert_records（告警管理页列表用）。
+
+        所有参数可选，None 表示不过滤。``verdict`` 同时匹配 llm_verdict
+        或 human_verdict（任一相等即命中，对齐仪表盘三分类语义）。
+        返回字段与 ``query_alerts`` 一致，外加 ``ingested_at``。
+        失败返回 ``[]``。
+        """
+        if not self.enabled or self._conn is None:
+            return []
+        try:
+            limit = max(1, min(int(limit), 1000))
+        except (TypeError, ValueError):
+            limit = 50
+        sql = (
+            "SELECT id, channel, alert_type, score, message, created_at, status, "
+            "       verified_at, llm_verdict, human_verdict, raw_snapshot, "
+            "       score_snapshot, ingested_at "
+            "FROM alert_records WHERE is_deleted = 0"
+        )
+        params: list = []
+        if channel:
+            sql += " AND channel = ?"
+            params.append(channel)
+        if alert_type:
+            sql += " AND alert_type = ?"
+            params.append(alert_type)
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        if verdict:
+            sql += " AND (llm_verdict = ? OR human_verdict = ?)"
+            params.extend([verdict, verdict])
+        if start_ts is not None:
+            sql += " AND created_at >= ?"
+            params.append(start_ts)
+        if end_ts is not None:
+            sql += " AND created_at <= ?"
+            params.append(end_ts)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        try:
+            cur = self._conn.execute(sql, params)
+            rows = cur.fetchall()
+        except Exception:
+            logger.warning("query_alerts_filtered failed", exc_info=True)
+            return []
+        results = []
+        for r in reversed(rows):  # chronological
+            llm_v = r[8]
+            human_v = r[9]
+            try:
+                raw_snap = json.loads(r[10]) if r[10] else None
+            except (json.JSONDecodeError, TypeError):
+                raw_snap = None
+            try:
+                score_snap = json.loads(r[11]) if r[11] else None
+            except (json.JSONDecodeError, TypeError):
+                score_snap = None
+            results.append({
+                "id": r[0], "channel": r[1], "alert_type": r[2], "score": r[3],
+                "message": r[4], "created_at": r[5], "status": r[6],
+                "verified_at": r[7], "llm_verdict": llm_v, "human_verdict": human_v,
+                "raw_snapshot": raw_snap, "score_snapshot": score_snap,
+                "ingested_at": r[12],
+                "final_status": compute_final_status(r[6], llm_v, human_v),
+            })
+        return results
+
+    def insert_alert_manual(
+        self,
+        channel: str,
+        score: float,
+        message: str = "",
+        *,
+        created_at: float | None = None,
+        raw_snapshot: list | None = None,
+        score_snapshot: list | None = None,
+        status: str = "active",
+    ) -> int | None:
+        """人工补录一条告警记录（告警管理页「新增」按钮用）。
+
+        默认 ``alert_type='measured'``、``status='active'``（后续可在页内 PATCH）。
+        同步插入 + 立即 commit（不入后台队列，保证返回 id 可用）。
+        返回新行 id；失败返回 None。
+        """
+        if not self.enabled or self._conn is None:
+            return None
+        if not channel or not isinstance(channel, str):
+            return None
+        try:
+            score_f = float(score) if score is not None else None
+        except (TypeError, ValueError):
+            score_f = None
+        ts = float(created_at) if created_at is not None else time.time()
+        raw_json = json.dumps(raw_snapshot) if raw_snapshot is not None else None
+        score_json = json.dumps(score_snapshot) if score_snapshot is not None else None
+        try:
+            with self._write_lock:
+                cur = self._conn.execute(
+                    "INSERT INTO alert_records "
+                    "(channel, alert_type, score, message, created_at, status, "
+                    " raw_snapshot, score_snapshot, ingested_at, is_deleted) "
+                    "VALUES (?, 'measured', ?, ?, ?, ?, ?, ?, unixepoch(), 0)",
+                    [channel, score_f, message or "", ts, status, raw_json, score_json],
+                )
+                self._conn.commit()
+                return cur.lastrowid if cur.lastrowid is not None else None
+        except Exception:
+            logger.warning("insert_alert_manual failed", exc_info=True)
+            return None
+
     def stats(self) -> dict:
         """Return row counts for each table (for monitoring)."""
         if not self.enabled or self._conn is None:

@@ -1,0 +1,317 @@
+{% extends "phm_site/admin/admin_base.html" %}
+
+{% block content %}
+<div class="phm-admin-shell">
+  <div class="phm-page-header">
+    <h1 class="phm-page-title">回收站</h1>
+    <span class="phm-text-dim" style="font-size: 13px;">已软删的{{ table_label }}，可恢复或永久删除</span>
+  </div>
+  <div class="phm-page-body">
+
+{# ── 资源 tab：告警 / 检测 / 诊断 ──────────────────────────────────── #}
+<div class="phm-dash-tabs">
+  {% for tab in tabs %}
+    {% if tab.active %}
+    <span class="phm-dash-tab active">{{ tab.label }}</span>
+    {% else %}
+    <a class="phm-dash-tab phm-recycle-tab-switch"
+       href="{% url 'phm_admin_recycle' %}?table={{ tab.key }}{% if limit != 200 %}&limit={{ limit }}{% endif %}"
+       data-table="{{ tab.key }}">{{ tab.label }}</a>
+    {% endif %}
+  {% endfor %}
+</div>
+
+{# ── 非超管提示（普通 staff 可读，但看不到批量按钮） ────────────── #}
+{% if not is_superuser %}
+<div class="phm-card" style="background: rgba(230,162,60,0.06); border-color: var(--phm-yellow);">
+  <div class="phm-flex" style="gap: 8px;">
+    <span style="font-size: 14px;">⚠️</span>
+    <p class="phm-text-sec" style="margin: 0; font-size: 13px;">
+      当前角色为<strong>普通管理员</strong>，仅可查看回收站内容。<strong>恢复</strong>与<strong>永久删除</strong>需超级管理员权限。
+    </p>
+  </div>
+</div>
+{% endif %}
+
+{# ── 顶部工具栏（紧贴 tab，第一屏可见；超管可写，普通 staff 只读） ── #}
+{% if is_superuser and rows %}
+<div class="phm-recycle-toolbar">
+  <span class="phm-text-sec" style="font-size: 13px;">
+    已选 <strong id="phm-recycle-selected-count">0</strong> 项 · 共 {{ rows|length }} 条
+  </span>
+  <span class="phm-flex" style="gap: 8px;">
+    <button class="phm-btn phm-btn-primary phm-btn-sm" id="phm-recycle-restore-btn" disabled>
+      ↩ 恢复选中
+    </button>
+    <button class="phm-btn phm-btn-danger phm-btn-sm" id="phm-recycle-purge-btn" disabled>
+      ✕ 永久删除选中
+    </button>
+  </span>
+</div>
+{% endif %}
+
+{# ── 表格主体 ─────────────────────────────────────────────────────── #}
+<div class="phm-card">
+  {% if rows %}
+  <div class="phm-table-wrap">
+    <table class="phm-table">
+      <thead>
+        <tr>
+          <th style="width: 36px;">
+            {% if is_superuser %}<input type="checkbox" id="phm-recycle-select-all" title="全选">{% else %}—{% endif %}
+          </th>
+          <th style="width: 60px;">ID</th>
+          {% if table_key == 'alerts' %}
+            {# 需求书 §后台「告警和预警管理」列对齐（去掉操作列，加删除时间） #}
+            <th>类型</th>
+            <th>传感器名称</th>
+            <th>遥测值</th>
+            <th>异常分数</th>
+            <th>告警时间(UTC)</th>
+            <th>LLM 诊断状态</th>
+            <th>人工诊断状态</th>
+            <th>综合状态</th>
+            <th>删除时间(UTC)</th>
+          {% elif table_key == 'detections' %}
+            <th>通道</th>
+            <th>L1</th>
+            <th>L2</th>
+            <th>L3</th>
+            <th>综合分</th>
+            <th>检测时间(UTC)</th>
+            <th>删除时间(UTC)</th>
+          {% else %}{# diagnoses #}
+            <th>通道</th>
+            <th>类型</th>
+            <th>LLM verdict</th>
+            <th>诊断时间(UTC)</th>
+            <th>错误</th>
+            <th>删除时间(UTC)</th>
+          {% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr data-id="{{ r.id }}">
+          <td>{% if is_superuser %}<input type="checkbox" class="phm-recycle-row" value="{{ r.id }}">{% else %}—{% endif %}</td>
+          <td class="col-mono">{{ r.id }}</td>
+          {% if table_key == 'alerts' %}
+            <td><span class="phm-badge {{ r.alert_type_badge }}">{{ r.alert_type|default:"—" }}</span></td>
+            <td>{{ r.sensor_name }}</td>
+            <td class="col-num">
+              {% if r.raw_value is not None %}
+                {{ r.raw_value|floatformat:3 }}{% if r.unit %}<span class="phm-text-dim" style="margin-left:2px; font-size:11px;">{{ r.unit }}</span>{% endif %}
+              {% else %}—{% endif %}
+            </td>
+            <td class="col-num">{% if r.score is not None %}{{ r.score|floatformat:3 }}{% else %}—{% endif %}</td>
+            <td class="col-mono phm-text-sec" data-ts="{{ r.created_at }}">—</td>
+            <td>
+              {% if r.llm_verdict %}
+                <span class="phm-badge {{ r.llm_verdict_badge }}">{{ r.llm_verdict }}</span>
+              {% else %}<span class="phm-text-dim">未诊断</span>{% endif %}
+            </td>
+            <td>
+              {% if r.human_verdict %}
+                <span class="phm-badge {{ r.human_verdict_badge }}">{{ r.human_verdict }}</span>
+              {% else %}<span class="phm-text-dim">未标注</span>{% endif %}
+            </td>
+            <td><span class="phm-badge {{ r.final_status_badge }}">{{ r.final_status|default:"—" }}</span></td>
+            <td class="col-mono phm-text-dim" data-ts="{{ r.deleted_at }}">—</td>
+          {% elif table_key == 'detections' %}
+            <td class="col-mono">{{ r.channel }}</td>
+            <td class="col-num">{% if r.l1_score is not None %}{{ r.l1_score|floatformat:3 }}{% endif %}</td>
+            <td class="col-num">{% if r.l2_score is not None %}{{ r.l2_score|floatformat:3 }}{% endif %}</td>
+            <td class="col-num">{% if r.l3_score is not None %}{{ r.l3_score|floatformat:3 }}{% endif %}</td>
+            <td class="col-num"><strong>{% if r.final_score is not None %}{{ r.final_score|floatformat:3 }}{% endif %}</strong></td>
+            <td class="col-mono phm-text-sec" data-ts="{{ r.timestamp }}">—</td>
+            <td class="col-mono phm-text-dim" data-ts="{{ r.deleted_at }}">—</td>
+          {% else %}{# diagnoses #}
+            <td class="col-mono">{{ r.channel }}</td>
+            <td><span class="phm-badge {{ r.alert_type_badge }}">{{ r.alert_type|default:"—" }}</span></td>
+            <td>
+              {% if r.llm_verdict %}
+                <span class="phm-badge {{ r.llm_verdict_badge }}">{{ r.llm_verdict }}</span>
+              {% else %}<span class="phm-text-dim">未解析</span>{% endif %}
+            </td>
+            <td class="col-mono phm-text-sec" data-ts="{{ r.created_at }}">—</td>
+            <td class="phm-text-sec" title="{{ r.error|default:'' }}">
+              {{ r.error|default:"—"|truncatechars:40 }}
+            </td>
+            <td class="col-mono phm-text-dim" data-ts="{{ r.deleted_at }}">—</td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% else %}{# rows empty #}
+  <div class="phm-empty">
+    <div style="font-size: 36px; margin-bottom: 8px;">🗑️</div>
+    <p class="phm-text-sec">回收站为空，没有已删除的{{ table_label }}。</p>
+  </div>
+  {% endif %}
+</div>
+
+  </div>{% comment %}close phm-page-body{% endcomment %}
+</div>{% comment %}close phm-admin-shell{% endcomment %}
+
+{# ── 二次确认对话框（永久删除专用） ──────────────────────────────── #}
+<div class="phm-drawer-mask" id="phm-recycle-confirm-mask" style="display: none;">
+  <div class="phm-recycle-confirm-dialog">
+    <h3 style="color: var(--phm-red); margin: 0 0 12px;">⚠️ 确认永久删除？</h3>
+    <p class="phm-text-sec" style="margin: 0 0 16px; font-size: 13px; line-height: 1.6;">
+      将对选中的 <strong id="phm-recycle-confirm-count" style="color: var(--phm-red);">0</strong> 条{{ table_label }}
+      执行<strong style="color: var(--phm-red);">物理删除</strong>。此操作<strong>不可恢复</strong>，数据将从数据库彻底消失。
+    </p>
+    <div class="phm-flex-between">
+      <button class="phm-btn phm-btn-sm" id="phm-recycle-confirm-cancel">取消</button>
+      <button class="phm-btn phm-btn-danger phm-btn-sm" id="phm-recycle-confirm-ok">确认永久删除</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  function init() {
+    // 时间戳格式化（优先 PHM.fmtTimestamp，不可用时内联兜底）
+    function fmtTs(ts) {
+      if (window.PHM && PHM.fmtTimestamp) return PHM.fmtTimestamp(ts);
+      var d = new Date(ts * 1000);
+      if (isNaN(d.getTime())) return '—';
+      var pad = function (n) { return n < 10 ? '0' + n : n; };
+      return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()) +
+             ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds()) + ' UTC';
+    }
+    Array.prototype.forEach.call(
+      document.querySelectorAll('td[data-ts]'),
+      function (el) {
+        var ts = el.getAttribute('data-ts');
+        if (!ts) { el.textContent = '—'; return; }
+        el.textContent = fmtTs(parseFloat(ts));
+      }
+    );
+
+    {% if not is_superuser %}
+    // 普通管理员无写权限，不绑定批量按钮
+    return;
+    {% endif %}
+
+    var TABLE_KEY = "{{ table_key|escapejs }}";
+    var RESTORE_URL = "{% url 'phm_admin_recycle_restore' %}";
+    var PURGE_URL = "{% url 'phm_admin_recycle_purge' %}";
+
+    var selectAll = document.getElementById('phm-recycle-select-all');
+    var rowChecks = Array.prototype.slice.call(document.querySelectorAll('.phm-recycle-row'));
+    var restoreBtn = document.getElementById('phm-recycle-restore-btn');
+    var purgeBtn = document.getElementById('phm-recycle-purge-btn');
+    var countEl = document.getElementById('phm-recycle-selected-count');
+
+    // 没有数据行时按钮可能未渲染（顶部工具栏 is_superuser and rows 条件）
+    if (!restoreBtn || !purgeBtn) return;
+
+    function selectedIds() {
+      return rowChecks.filter(function (c) { return c.checked; })
+                       .map(function (c) { return parseInt(c.value, 10); });
+    }
+    function syncButtonState() {
+      var ids = selectedIds();
+      var n = ids.length;
+      if (countEl) countEl.textContent = String(n);
+      if (restoreBtn) restoreBtn.disabled = (n === 0);
+      if (purgeBtn) purgeBtn.disabled = (n === 0);
+      if (selectAll) selectAll.checked = (n > 0 && n === rowChecks.length);
+    }
+
+    if (selectAll) {
+      selectAll.addEventListener('change', function () {
+        rowChecks.forEach(function (c) { c.checked = selectAll.checked; });
+        syncButtonState();
+      });
+    }
+    rowChecks.forEach(function (c) { c.addEventListener('change', syncButtonState); });
+    syncButtonState();
+
+    // 恢复：直接 AJAX，无需二次确认（可逆操作）
+    restoreBtn.addEventListener('click', function () {
+      var ids = selectedIds();
+      if (ids.length === 0) return;
+      restoreBtn.disabled = true;
+      PHM.fetchJSON(RESTORE_URL, {
+        method: 'POST',
+        body: { table: TABLE_KEY, ids: ids }
+      }).then(function (data) {
+        if (data && data.status === 'ok') {
+          PHM.toast('已恢复 ' + data.restored + ' 条' + (data.restored === ids.length ? '' : '（部分命中）'), 'success');
+          setTimeout(function () { window.location.reload(); }, 600);
+        } else {
+          throw new Error((data && data.message) || '恢复失败');
+        }
+      }).catch(function (e) {
+        PHM.toast('恢复失败：' + e.message, 'error', 5000);
+        restoreBtn.disabled = false;
+      });
+    });
+
+    // 永久删除：必须走二次确认对话框
+    var confirmMask = document.getElementById('phm-recycle-confirm-mask');
+    var confirmCount = document.getElementById('phm-recycle-confirm-count');
+    var confirmOk = document.getElementById('phm-recycle-confirm-ok');
+    var confirmCancel = document.getElementById('phm-recycle-confirm-cancel');
+    var pendingIds = [];
+
+    purgeBtn.addEventListener('click', function () {
+      var ids = selectedIds();
+      if (ids.length === 0) return;
+      pendingIds = ids;
+      if (confirmCount) confirmCount.textContent = String(ids.length);
+      confirmMask.style.display = '';
+    });
+    if (confirmCancel) {
+      confirmCancel.addEventListener('click', function () {
+        confirmMask.style.display = 'none';
+        pendingIds = [];
+      });
+    }
+    if (confirmMask) {
+      confirmMask.addEventListener('click', function (e) {
+        if (e.target === confirmMask) {
+          confirmMask.style.display = 'none';
+          pendingIds = [];
+        }
+      });
+    }
+    if (confirmOk) {
+      confirmOk.addEventListener('click', function () {
+        if (pendingIds.length === 0) return;
+        confirmOk.disabled = true;
+        PHM.fetchJSON(PURGE_URL, {
+          method: 'POST',
+          body: { table: TABLE_KEY, ids: pendingIds }
+        }).then(function (data) {
+          if (data && data.status === 'ok') {
+            PHM.toast('已永久删除 ' + data.purged + ' 条', 'success');
+            setTimeout(function () { window.location.reload(); }, 600);
+          } else {
+            throw new Error((data && data.message) || '删除失败');
+          }
+        }).catch(function (e) {
+          PHM.toast('删除失败：' + e.message, 'error', 5000);
+          confirmOk.disabled = false;
+          confirmMask.style.display = 'none';
+        }).finally(function () {
+          pendingIds = [];
+        });
+      });
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
+{% endblock %}
