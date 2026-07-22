@@ -397,12 +397,12 @@
     tab.addEventListener('click', function (e) {
       e.preventDefault();
       var url = new URL(tab.href, window.location.href);
-      // 运行时读 checkbox 状态决定是否带 auto=1
+      // 默认开启：勾选 → auto=1，不勾选 → auto=0（不删参数，否则下次进入又默认开启）
       var toggle = document.getElementById('phm-auto-refresh-toggle');
-      if (toggle && toggle.checked) {
-        url.searchParams.set('auto', '1');
+      if (toggle && !toggle.checked) {
+        url.searchParams.set('auto', '0');
       } else {
-        url.searchParams.delete('auto');
+        url.searchParams.set('auto', '1');
       }
       // 保留 source hash（卡片选中态）
       if (selectedSource) {
@@ -414,7 +414,7 @@
     });
   });
 
-  // ── 自动刷新（沿用上次实现） ───────────────────────────────────
+  // ── 自动刷新（默认开启，?auto=0 才关闭） ────────────────────────
   var SECONDS = {{ refresh_seconds }};
   var toggle = document.getElementById('phm-auto-refresh-toggle');
   var countdown = document.getElementById('phm-countdown');
@@ -422,7 +422,7 @@
     toggle.addEventListener('change', function () {
       var url = new URL(window.location.href);
       if (toggle.checked) url.searchParams.set('auto', '1');
-      else url.searchParams.delete('auto');
+      else url.searchParams.set('auto', '0');
       window.history.replaceState({}, '', url.toString());
       remaining = toggle.checked ? SECONDS : -1;
       updateCountdown();

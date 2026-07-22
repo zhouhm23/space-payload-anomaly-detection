@@ -1,0 +1,262 @@
+{% extends "phm_site/admin/admin_base.html" %}
+
+{% block content %}
+<div class="phm-admin-shell">
+  <div class="phm-page-header">
+    <h1 class="phm-page-title">系统设置</h1>
+    <span class="phm-text-dim" style="font-size: 13px;">
+      系统配置 / 前台主题 / 通道校准
+      {% if not is_superuser %}（仅查看，修改需超级管理员）{% endif %}
+    </span>
+  </div>
+  <div class="phm-page-body">
+
+{# ── 三类 tab：系统配置 / 前台主题 / 通道校准 ───────────────────────── #}
+<div class="phm-dash-tabs">
+  {% for tab in tabs %}
+    {% if tab.active %}
+    <span class="phm-dash-tab active">{{ tab.label }}</span>
+    {% else %}
+    <a class="phm-dash-tab" href="{% url 'phm_admin_settings' %}?category={{ tab.key }}">{{ tab.label }}</a>
+    {% endif %}
+  {% endfor %}
+</div>
+
+{% if error_msg %}
+<div class="phm-card" style="background: rgba(237,63,20,0.06); border-color: var(--phm-red);">
+  <div class="phm-flex" style="gap: 8px;">
+    <span style="font-size: 14px;">⚠️</span>
+    <p class="phm-text-sec" style="margin: 0; font-size: 13px;">
+      读取配置失败：{{ error_msg }}
+    </p>
+  </div>
+</div>
+{% endif %}
+
+{% if category == 'calibration' %}
+{# ── 通道校准只读提示条 ─────────────────────────────────────────────── #}
+<div class="phm-card" style="background: rgba(245,166,35,0.06); border-color: var(--phm-yellow);">
+  <div class="phm-flex" style="gap: 8px;">
+    <span style="font-size: 14px;">⚠️</span>
+    <p class="phm-text-sec" style="margin: 0; font-size: 13px; line-height: 1.6;">
+      通道校准是 <strong>Day15 离线 LOO 标定</strong>的产物（<code class="phm-mono">build_channel_calibration.py</code> 生成）。
+      网页<strong>只读</strong>——修改口径请重跑标定脚本，不要手动编辑 JSON。
+    </p>
+  </div>
+</div>
+{% endif %}
+
+{% if not is_superuser and category != 'calibration' %}
+<div class="phm-card" style="background: rgba(230,162,60,0.06); border-color: var(--phm-yellow);">
+  <div class="phm-flex" style="gap: 8px;">
+    <span style="font-size: 14px;">⚠️</span>
+    <p class="phm-text-sec" style="margin: 0; font-size: 13px;">
+      当前角色为<strong>普通管理员</strong>，仅可查看配置。修改需超级管理员权限。
+    </p>
+  </div>
+</div>
+{% endif %}
+
+{# ── 配置项分组卡片 ─────────────────────────────────────────────────── #}
+{% for grp in groups %}
+<div class="phm-card phm-mt-16">
+  <h3 class="phm-card-title" {% if grp.doc %}title="{{ grp.doc }}"{% endif %}>
+    {{ grp.label }}
+    {% if grp.readonly_hint %}
+      <span class="phm-badge phm-badge-gray" style="margin-left: 8px; font-size: 11px;">只读</span>
+    {% endif %}
+  </h3>
+  {% if grp.doc %}
+  <p class="phm-text-dim" style="margin: -4px 0 12px; font-size: 12px; line-height: 1.5;">{{ grp.doc }}</p>
+  {% endif %}
+
+  {% if grp.items %}
+  <div class="phm-table-wrap">
+    <table class="phm-table phm-settings-table">
+      <thead>
+        <tr>
+          <th style="width: 24%;">配置项</th>
+          <th style="width: 26%;">变量名</th>
+          <th style="width: 26%;">当前值</th>
+          <th style="width: 12%;">类型</th>
+          <th style="width: 12%;">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for it in grp.items %}
+        <tr data-section="{{ it.section }}" data-key="{{ it.key }}"
+            data-editable="{{ it.editable|yesno:'true,false' }}"
+            data-kind="{{ it.value_kind }}">
+          <td>
+            <span>{{ it.name }}</span>
+            {% if it.doc %}<span class="phm-text-dim" style="margin-left: 4px;" title="{{ it.doc }}">ⓘ</span>{% endif %}
+          </td>
+          <td class="col-mono phm-text-sec">{{ it.section }}.{{ it.key }}</td>
+          <td class="phm-settings-value-cell">
+            {% if it.editable and is_superuser %}
+              {% if it.value_kind == 'bool' %}
+                <label class="phm-switch">
+                  <input type="checkbox" class="phm-settings-input"
+                         data-original="{{ it.value|yesno:'true,false' }}"
+                         {% if it.value %}checked{% endif %}>
+                  <span class="phm-switch-slider"></span>
+                </label>
+              {% else %}
+                <input type="text" class="phm-settings-input phm-input"
+                       value="{{ it.value }}"
+                       data-original="{{ it.value }}"
+                       data-kind="{{ it.value_kind }}">
+              {% endif %}
+            {% else %}
+              <span class="phm-settings-value-static
+                           {% if it.value_kind == 'object' or it.value_kind == 'array' %}col-mono{% endif %}">
+                {% if it.value_kind == 'bool' %}
+                  {{ it.value|yesno:'true,false' }}
+                {% elif it.value_kind == 'float' %}
+                  {{ it.value }}
+                {% elif it.value_kind == 'object' or it.value_kind == 'array' %}
+                  {{ it.value }}
+                {% elif it.value %}
+                  {{ it.value }}
+                {% else %}
+                  <span class="phm-text-dim">—</span>
+                {% endif %}
+              </span>
+            {% endif %}
+          </td>
+          <td>
+            <span class="phm-badge phm-badge-gray phm-badge-sm">{{ it.value_kind }}</span>
+          </td>
+          <td>
+            {% if it.editable and is_superuser %}
+              <button class="phm-btn phm-btn-sm phm-btn-primary phm-settings-save-btn" disabled
+                      data-url="{% url 'phm_admin_settings_save' %}">
+                保存
+              </button>
+            {% else %}
+              <span class="phm-text-dim" style="font-size: 12px;">
+                {% if not it.editable %}
+                  {% if it.value_kind == 'object' or it.value_kind == 'array' %}嵌套对象{% else %}只读{% endif %}
+                {% else %}
+                  需超管
+                {% endif %}
+              </span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="phm-empty" style="padding: 20px;">
+    <p class="phm-text-sec" style="margin: 0;">（无配置项）</p>
+  </div>
+  {% endif %}
+</div>
+{% empty %}
+<div class="phm-empty">
+  <div style="font-size: 36px; margin-bottom: 8px;">📭</div>
+  <p class="phm-text-sec">没有可显示的配置项。</p>
+</div>
+{% endfor %}
+
+  </div>{% comment %}close phm-page-body{% endcomment %}
+</div>{% comment %}close phm-admin-shell{% endcomment %}
+
+<script>
+(function () {
+  'use strict';
+  function init() {
+    if (!window.PHM || !PHM.fetchJSON) return;
+
+    var editableRows = Array.prototype.slice.call(
+      document.querySelectorAll('tr[data-editable="true"]')
+    );
+    if (editableRows.length === 0) return;
+
+    // 监听每个 input 的 input/change，启用对应行的保存按钮
+    editableRows.forEach(function (row) {
+      var input = row.querySelector('.phm-settings-input');
+      var btn = row.querySelector('.phm-settings-save-btn');
+      if (!input || !btn) return;
+
+      function changed() {
+        var original = input.getAttribute('data-original');
+        var current;
+        if (input.type === 'checkbox') {
+          current = input.checked ? 'true' : 'false';
+        } else {
+          current = input.value;
+        }
+        btn.disabled = (current === original);
+      }
+      input.addEventListener('input', changed);
+      input.addEventListener('change', changed);
+
+      btn.addEventListener('click', function () {
+        var section = row.getAttribute('data-section');
+        var key = row.getAttribute('data-key');
+        var kind = row.getAttribute('data-kind');
+        var value;
+        if (input.type === 'checkbox') {
+          value = input.checked;
+        } else if (kind === 'int') {
+          value = parseInt(input.value, 10);
+          if (isNaN(value)) {
+            PHM.toast('请输入整数', 'error');
+            return;
+          }
+        } else if (kind === 'float') {
+          value = parseFloat(input.value);
+          if (isNaN(value)) {
+            PHM.toast('请输入数字', 'error');
+            return;
+          }
+        } else {
+          value = input.value;
+        }
+
+        var originalBtnText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = '保存中…';
+        PHM.fetchJSON(btn.getAttribute('data-url'), {
+          method: 'POST',
+          body: {
+            category: "{{ category|escapejs }}",
+            section: section,
+            key: key,
+            value: value
+          }
+        }).then(function (data) {
+          if (data && data.status === 'ok') {
+            PHM.toast('已保存 ' + section + '.' + key, 'success');
+            // 更新 original 锚点（避免 reload 又被识别为「未改」）
+            if (input.type === 'checkbox') {
+              input.setAttribute('data-original', input.checked ? 'true' : 'false');
+            } else {
+              input.setAttribute('data-original', input.value);
+            }
+            btn.disabled = true;
+            btn.textContent = '已保存';
+            setTimeout(function () { btn.textContent = originalBtnText; }, 1500);
+          } else {
+            throw new Error((data && data.message) || '保存失败');
+          }
+        }).catch(function (e) {
+          PHM.toast('保存失败：' + e.message, 'error', 5000);
+          btn.disabled = false;
+          btn.textContent = originalBtnText;
+        });
+      });
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
+{% endblock %}

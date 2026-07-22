@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import sys
 import math
+from pathlib import Path
 import numpy as np
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
@@ -569,6 +570,204 @@ class VirtualSensorSource(SensorSource):
 
 
 # ---------------------------------------------------------------------------
+# C-MAPSS engine degradation source
+# ---------------------------------------------------------------------------
+# 需求：CMAPSS-1（RUL 退化演示）也走信号发生器 → IPC → 采集卡 → TCP → Django，
+# 与 C-1/D-14 同链路。本类把 C-MAPSS test_FD00X.txt 中某台 engine 的退化曲线
+# 按 cycle 顺序展开为 1D float 流（每 cycle 一个点），让 ring_buffer/SQLite/异常
+# 检测全套链路都看得见它。RUL 精确预测仍由 RulService 直接读全 14 维做（研究
+# 用途，对真实场景也合理——RUL 模型需要完整 14 维特征）。
+#
+# 派生 1D 信号的选择：用 14 维传感器的 z-score 归一化均值（按整个 engine 序列
+# 计算均值/方差）。这个标量随 cycle 单调变化，能直观反映「退化趋势」。
+
+CMAPSS_PREFIX = "cmapss:"
+
+# C-MAPSS 数据集根目录（与 RulService 同源）。
+# 路径推演：__file__ = 生产实习/src/space/sensor_source.py
+#   parent                  = 生产实习/src/space
+#   parent.parent           = 生产实习/src
+#   parent.parent.parent    = 生产实习/  ← datasets/ 同级
+_CMAPSS_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "datasets" / "CMAPSSData"
+
+# 14 个携带退化信息的传感器列（与 RulService.CMAPSSDataSource.SENSORS 一致）
+_CMAPSS_DEGRADATION_SENSORS = (2, 3, 4, 7, 8, 9, 11, 12, 13, 14, 15, 17, 20, 21)
+
+# C-MAPSS test_FD00X.txt 的 26 列（unit + cycle + 3 op + 21 sensors）
+_CMAPSS_COLUMNS = (
+    ["unit", "cycle"]
+    + [f"op_setting_{i}" for i in range(1, 4)]
+    + [f"sensor_{i}" for i in range(1, 22)]
+)
+
+
+def _make_cmapss_id(subset: str, unit_id: int) -> str:
+    return f"{CMAPSS_PREFIX}{subset}:{unit_id}"
+
+
+def _parse_cmapss_id(source_id: str) -> tuple[str, int]:
+    """Parse ``cmapss:FD001:1`` → (subset, unit_id)。"""
+    body = source_id[len(CMAPSS_PREFIX):]
+    parts = body.split(":", 1)
+    if len(parts) != 2:
+        raise ValueError(f"Invalid cmapss source ID: {source_id}（应为 cmapss:FD001:1）")
+    subset = parts[0].upper()
+    try:
+        unit = int(parts[1])
+    except ValueError:
+        raise ValueError(f"Invalid cmapss unit id: {parts[1]!r}")
+    return subset, unit
+
+
+def _load_cmapss_engine(subset: str, unit_id: int) -> np.ndarray:
+    """加载某台 engine 的退化传感器曲线（n_cycles, 14）。
+
+    数据集路径默认 src/datasets/CMAPSSData/test_FD00X.txt。
+    若文件不存在或 engine 不存在，抛 FileNotFoundError。
+    """
+    test_path = _CMAPSS_DATA_DIR / f"test_{subset}.txt"
+    if not test_path.exists():
+        raise FileNotFoundError(
+            f"C-MAPSS test file not found: {test_path}\n"
+            f"数据集需放在 datasets/CMAPSSData/ 下（手动备份）"
+        )
+    try:
+        import pandas as pd
+    except ImportError as e:
+        raise RuntimeError("CMapssSource 需要 pandas，请 pip install pandas") from e
+    df = pd.read_csv(test_path, sep=r"\s+", header=None, names=_CMAPSS_COLUMNS)
+    mask = df["unit"] == unit_id
+    if not mask.any():
+        raise ValueError(
+            f"engine unit={unit_id} 不在 {subset}（可用 unit: "
+            f"{sorted(df['unit'].unique())[:10]}...）"
+        )
+    sensor_cols = [f"sensor_{i}" for i in _CMAPSS_DEGRADATION_SENSORS]
+    return df.loc[mask, sensor_cols].to_numpy(dtype=np.float32)
+
+
+@register_source(CMAPSS_PREFIX)
+class CMapssSource(SensorSource):
+    """把 C-MAPSS 单台 engine 的退化曲线作为 1D 标量流送出。
+
+    每次 ``read(n)`` 返回 n 个连续 cycle 的「退化指数」（14 维归一化均值），
+    按 cycle 顺序推进。到末尾时按 ``loop`` 配置决定回卷或停止。
+
+    与 FileSource 的区别：FileSource 重放真实 telemetry；CMapssSource 把研究
+    用退化数据集投影成单维信号，目的是让特殊 RUL 传感器在天地链路上可见。
+    """
+
+    def __init__(
+        self,
+        subset: str = "FD001",
+        unit_id: int = 1,
+        sample_rate: float = 1.0,
+        noise: SensorNoiseConfig | None = None,
+        loop: bool = True,
+    ):
+        subset = subset.upper()
+        if subset not in ("FD001", "FD002", "FD003", "FD004"):
+            raise ValueError(f"Unsupported C-MAPSS subset: {subset}")
+        self._subset = subset
+        self._unit_id = int(unit_id)
+        self._sample_rate = sample_rate
+        self._noise = noise or SensorNoiseConfig()
+        self._loop = loop
+        self._source_id = _make_cmapss_id(subset, self._unit_id)
+        self._channel = f"CMAPSS_{subset}_{self._unit_id}"
+
+        # 加载并预计算 1D 退化信号
+        raw_14d = _load_cmapss_engine(subset, self._unit_id)  # (T, 14)
+        if raw_14d.shape[0] < 2:
+            raise ValueError(f"engine {unit_id} 数据太少（{raw_14d.shape[0]} cycles）")
+        # Z-score 归一化（用整条序列的均值/方差）
+        mean = raw_14d.mean(axis=0, keepdims=True)
+        std = raw_14d.std(axis=0, keepdims=True)
+        std_safe = np.where(std > 1e-8, std, 1.0)
+        z = (raw_14d - mean) / std_safe  # (T, 14)
+        # 14 维均值 → 1D 退化曲线
+        signal = z.mean(axis=1).astype(np.float32)
+        # 进一步线性归一化到 [-1, 1]，便于与 C-1 / D-14 同图表显示
+        s_max = float(np.abs(signal).max()) or 1.0
+        self._signal = (signal / s_max).astype(np.float32)
+        self._pos = 0
+        self._exhausted = False
+
+    def read(self, n: int) -> np.ndarray:
+        if self._exhausted and not self._loop:
+            return np.empty(0, dtype=np.float32)
+
+        data_len = len(self._signal)
+        if not self._loop:
+            available = min(n, data_len - self._pos)
+            if available == 0:
+                self._exhausted = True
+                return np.empty(0, dtype=np.float32)
+            chunk = self._signal[self._pos:self._pos + available].copy()
+            self._pos += available
+            if self._pos >= data_len:
+                self._exhausted = True
+            if self._noise.missing_rate > 0 or self._noise.noise_std > 0:
+                chunk = _apply_noise(chunk, self._noise)
+            return chunk
+
+        # loop 模式
+        result = np.empty(n, dtype=np.float32)
+        filled = 0
+        while filled < n:
+            chunk_size = min(n - filled, data_len - self._pos)
+            result[filled:filled + chunk_size] = self._signal[self._pos:self._pos + chunk_size]
+            filled += chunk_size
+            self._pos += chunk_size
+            if self._pos >= data_len:
+                self._pos = 0
+        if self._noise.missing_rate > 0 or self._noise.noise_std > 0:
+            result = _apply_noise(result, self._noise)
+        return result
+
+    @property
+    def exhausted(self) -> bool:
+        return self._exhausted
+
+    @property
+    def channel_name(self) -> str:
+        return self._channel
+
+    @property
+    def sample_rate(self) -> float:
+        return self._sample_rate
+
+    @property
+    def source_id(self) -> str:
+        return self._source_id
+
+    @property
+    def label(self) -> str:
+        return f"🛰️ C-MAPSS · {self._subset} engine #{self._unit_id}"
+
+    @property
+    def is_virtual(self) -> bool:
+        return False
+
+    @classmethod
+    def from_source_id(
+        cls,
+        source_id: str,
+        *,
+        sample_rate: float = 1.0,
+        noise: SensorNoiseConfig | None = None,
+        loop: bool = True,
+        **_unused,
+    ) -> "CMapssSource":
+        """Parse ``cmapss:FD001:1`` and build a CMapssSource."""
+        subset, unit_id = _parse_cmapss_id(source_id)
+        return cls(
+            subset=subset, unit_id=unit_id,
+            sample_rate=sample_rate, noise=noise, loop=loop,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Global source registry
 # ---------------------------------------------------------------------------
 
@@ -613,6 +812,30 @@ def list_all_sources(dataset_dir: str | None = None) -> list[dict]:
             "is_virtual": True,
             "signal_type": sig_type,
         })
+
+    # ---- C-MAPSS engine sources（特殊 RUL 演示传感器） ----
+    # 列出每个 subset 的 unit=1 engine（演示用，不全列 100 台）。
+    # 数据集不存在时静默跳过（datasets/CMAPSSData 是手动备份的大文件）。
+    for subset in ("FD001", "FD002", "FD003", "FD004"):
+        test_path = _CMAPSS_DATA_DIR / f"test_{subset}.txt"
+        if not test_path.exists():
+            continue
+        try:
+            import pandas as pd
+            df = pd.read_csv(test_path, sep=r"\s+", header=None, names=_CMAPSS_COLUMNS)
+            # 只列 unit=1（演示用）；如需扩展可改这里
+            if (df["unit"] == 1).any():
+                sources.append({
+                    "id": _make_cmapss_id(subset, 1),
+                    "label": f"🛰️ C-MAPSS · {subset} engine #1（特殊·退化演示）",
+                    "is_virtual": False,
+                    "dataset": f"C-MAPSS-{subset}",
+                    "channel": f"CMAPSS_{subset}_1",
+                    "is_special": True,
+                })
+        except Exception:
+            # pandas 缺失或解析失败，跳过（不影响其他 source）
+            continue
 
     return sources
 

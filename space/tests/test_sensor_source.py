@@ -131,3 +131,79 @@ class TestSyntheticSource:
         src = SyntheticSource(config=cfg, noise=noise)
         chunk = src.read(256)
         assert len(chunk) == 256
+
+
+class TestCMapssSource:
+    """Tests for CMapssSource (C-MAPSS engine degradation replay).
+
+    需要本地 datasets/CMAPSSData/test_FD001.txt（手动备份）。若不存在则
+    skip——避免 CI 没数据时挂掉。
+    """
+
+    def _check_dataset(self):
+        from pathlib import Path
+        # __file__ = 生产实习/src/space/tests/test_sensor_source.py
+        # 上 4 次 parent → 生产实习/，然后 datasets/CMAPSSData
+        data_dir = Path(__file__).resolve().parent.parent.parent.parent / "datasets" / "CMAPSSData"
+        if not (data_dir / "test_FD001.txt").exists():
+            pytest.skip("C-MAPSS dataset not available (manual backup required)")
+
+    def test_create_and_read(self):
+        self._check_dataset()
+        from sensor_source import create_source
+        src = create_source("cmapss:FD001:1", sample_rate=1.0, loop=True)
+        assert src.channel_name == "CMAPSS_FD001_1"
+        assert src.source_id == "cmapss:FD001:1"
+        chunk = src.read(10)
+        assert chunk.dtype == np.float32
+        assert chunk.shape == (10,)
+        # 归一化到 [-1, 1]
+        assert chunk.min() >= -1.01 and chunk.max() <= 1.01
+
+    def test_loop_rewinds(self):
+        """loop=True 时读超过数据长度应该回卷（不返回空）。"""
+        self._check_dataset()
+        from sensor_source import create_source
+        src = create_source("cmapss:FD001:1", loop=True)
+        # engine 1 在 test_FD001 有 31 cycles，读 100 个点应自动回卷
+        chunk = src.read(100)
+        assert chunk.shape == (100,)
+        assert src.exhausted is False
+
+    def test_non_loop_exhausts(self):
+        """loop=False 时读超过数据长度后 exhausted=True。"""
+        self._check_dataset()
+        from sensor_source import create_source
+        src = create_source("cmapss:FD001:1", loop=False)
+        # 先读 1000 个（远超 31 cycles）
+        chunk = src.read(1000)
+        # 实际只返回 31 个，然后 exhausted
+        assert chunk.shape[0] <= 31
+        assert src.exhausted is True
+        # 再读返回空
+        chunk2 = src.read(10)
+        assert chunk2.shape == (0,)
+
+    def test_invalid_subset_raises(self):
+        from sensor_source import create_source
+        with pytest.raises(ValueError, match="Unsupported C-MAPSS subset|Invalid"):
+            create_source("cmapss:FD999:1", loop=True)
+
+    def test_invalid_unit_raises(self):
+        self._check_dataset()
+        from sensor_source import create_source
+        with pytest.raises(ValueError):
+            create_source("cmapss:FD001:99999", loop=True)
+
+    def test_invalid_id_format_raises(self):
+        from sensor_source import create_source
+        with pytest.raises(ValueError):
+            create_source("cmapss:FD001", loop=True)  # 缺 unit id
+
+    def test_list_all_sources_includes_cmapss(self):
+        """list_all_sources 应包含 cmapss sources。"""
+        self._check_dataset()
+        from sensor_source import list_all_sources
+        all_sources = list_all_sources()
+        cmapss_ids = [s['id'] for s in all_sources if s['id'].startswith('cmapss:')]
+        assert "cmapss:FD001:1" in cmapss_ids

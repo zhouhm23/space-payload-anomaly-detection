@@ -235,9 +235,13 @@ body.phm-theme-dark {
   background: rgba(0,0,0,0.45);
   z-index: 1000;
   opacity: 0;
+  pointer-events: none;  /* 默认不拦截点击，避免透明遮罩盖住整个页面 */
   transition: opacity 0.2s;
 }
-.phm-drawer-mask.active { opacity: 1; }
+.phm-drawer-mask.active {
+  opacity: 1;
+  pointer-events: auto;
+}
 
 .phm-drawer {
   position: fixed;
@@ -684,4 +688,308 @@ body.phm-theme-dark {
 a.phm-recycle-tab-switch {
   cursor: pointer;
   text-decoration: none;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   第 5 页：系统设置（settings.html）
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* 单元格内值展示容器 */
+.phm-settings-value-static {
+  display: inline-block;
+  max-width: 100%;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+/* 文本输入框：与 .phm-input 兼容但更紧凑（行内编辑用） */
+.phm-settings-table .phm-input {
+  width: 100%;
+  min-width: 120px;
+  padding: 4px 8px;
+  font-size: 13px;
+  font-family: var(--phm-font-mono, monospace);
+  background: var(--phm-bg-secondary);
+  border: 1px solid var(--phm-border);
+  border-radius: 4px;
+  color: var(--phm-text-pri);
+}
+.phm-settings-table .phm-input:focus {
+  outline: none;
+  border-color: var(--phm-blue);
+  background: var(--phm-bg-primary);
+}
+
+/* iOS 风格开关（bool 类型用） */
+.phm-switch {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.phm-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.phm-switch-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--phm-border);
+  border-radius: 20px;
+  transition: background 0.2s;
+}
+.phm-switch-slider::before {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  left: 3px;
+  top: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+.phm-switch input:checked + .phm-switch-slider {
+  background: var(--phm-green);
+}
+.phm-switch input:checked + .phm-switch-slider::before {
+  transform: translateX(16px);
+}
+
+/* 小徽章（类型标签） */
+.phm-badge-sm {
+  font-size: 11px;
+  padding: 1px 6px;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   第 4 页：告警和预警管理（alert.html）
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* 筛选栏：表单卡片紧凑布局 */
+.phm-alert-filter .phm-filter-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.phm-alert-filter .phm-filter-field > span {
+  white-space: nowrap;
+}
+.phm-alert-filter .phm-input {
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+/* 顶部工具栏：紧贴筛选栏，第一屏可见（不依赖 table 渲染） */
+.phm-alert-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--phm-bg-card);
+  border: 1px solid var(--phm-border);
+  border-radius: 6px;
+  padding: 8px 14px;
+  margin-bottom: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+}
+
+/* 抽屉内嵌的对话框（批量标注 / 新增） */
+.phm-alert-confirm-dialog {
+  background: var(--phm-bg-card);
+  border-radius: 6px;
+  padding: 20px;
+  width: 100%;
+  max-width: 360px;
+  margin: auto;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+}
+
+/* 抽屉内 LLM 诊断文本（pre 格式保留换行） */
+.phm-diagnosis-text {
+  background: var(--phm-bg-secondary);
+  border: 1px solid var(--phm-border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--phm-text-sec);
+  max-height: 280px;
+  overflow-y: auto;
+  margin: 8px 0 0;
+}
+
+/* 新增告警表单：双列网格 */
+.phm-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 14px;
+}
+.phm-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+.phm-form-field > span {
+  color: var(--phm-text-dim);
+}
+.phm-form-field .phm-input {
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   第 6 页：设备树管理（device_tree.html）
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* 主体布局：左 30% 树 + 右 70% 编辑面板 */
+.phm-device-tree-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 30%) 1fr;
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 800px) {
+  .phm-device-tree-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 左树面板 */
+.phm-tree-panel {
+  position: sticky;
+  top: 12px;
+}
+.phm-tree,
+.phm-tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.phm-tree {
+  max-height: 70vh;
+  overflow-y: auto;
+  font-size: 13px;
+}
+.phm-tree-node {
+  position: relative;
+}
+.phm-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+  border: 1px solid transparent;
+}
+.phm-tree-row:hover {
+  background: var(--phm-bg-secondary);
+}
+.phm-tree-row.active {
+  background: rgba(45,140,240,0.12);
+  border-color: var(--phm-blue);
+}
+.phm-tree-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.phm-tree-name {
+  flex: 1;
+  color: var(--phm-text-pri);
+  word-break: break-all;
+}
+.phm-tree-type {
+  font-size: 11px;
+  color: var(--phm-text-dim);
+  background: var(--phm-bg-secondary);
+  padding: 1px 6px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+.phm-tree-folder > .phm-tree-row .phm-tree-icon { color: var(--phm-yellow); }
+.phm-tree-sensor > .phm-tree-row .phm-tree-icon { color: var(--phm-cyan, #00c9db); }
+.phm-tree-drop-hover {
+  outline: 2px dashed var(--phm-blue);
+  outline-offset: -2px;
+  background: rgba(45,140,240,0.06);
+}
+
+/* 右编辑面板：复用 .phm-card 默认 padding */
+.phm-tree-editor .phm-form-grid {
+  margin-top: 10px;
+}
+
+/* ── 分页控件（告警管理页底部） ────────────────────────────────────────── */
+.phm-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding: 8px 4px;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.phm-pagination-info {
+  font-size: 13px;
+  color: var(--phm-text-dim, #909399);
+  white-space: nowrap;
+}
+.phm-pagination-pages {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.phm-page-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--phm-border, #e4e7ed);
+  border-radius: 4px;
+  background: var(--phm-bg-card, #fff);
+  color: var(--phm-text-pri, #303133);
+  font-size: 13px;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  user-select: none;
+}
+.phm-page-btn:hover:not(.active):not(.disabled) {
+  border-color: var(--phm-blue, #2d8cf0);
+  color: var(--phm-blue, #2d8cf0);
+}
+.phm-page-btn.active {
+  background: var(--phm-blue, #2d8cf0);
+  border-color: var(--phm-blue, #2d8cf0);
+  color: #fff;
+  cursor: default;
+}
+.phm-page-btn.disabled {
+  color: var(--phm-text-dim, #c0c4cc);
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.phm-page-ellipsis {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+  color: var(--phm-text-dim, #909399);
+  font-size: 13px;
 }

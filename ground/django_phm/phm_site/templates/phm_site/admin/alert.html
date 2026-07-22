@@ -1,0 +1,664 @@
+{% extends "phm_site/admin/admin_base.html" %}
+
+{% block content %}
+<div class="phm-admin-shell">
+  <div class="phm-page-header">
+    <h1 class="phm-page-title">告警和预警管理</h1>
+    <span class="phm-text-dim" style="font-size: 13px;">
+      已采集告警（measured）· 共 {{ row_count }} 条
+      {% if not is_superuser %}（仅查看，写操作需超级管理员）{% endif %}
+    </span>
+  </div>
+  <div class="phm-page-body">
+
+{# ── 筛选栏（GET 参数驱动，与列表页同步） ────────────────────────────── #}
+{# 对齐需求书 §后台 L97 列定义：类型 / 传感器名称 / LLM 诊断 / 人工诊断 / 综合状态 #}
+<form class="phm-card phm-alert-filter" method="get" action="{% url 'phm_admin_alert' %}">
+  <div class="phm-flex" style="flex-wrap: wrap; gap: 12px; align-items: center;">
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">类型</span>
+      <select name="alert_type" class="phm-input">
+        <option value="">全部</option>
+        <option value="measured" {% if current_filters.alert_type == 'measured' %}selected{% endif %}>实测告警</option>
+        <option value="predicted" {% if current_filters.alert_type == 'predicted' %}selected{% endif %}>预测预警</option>
+        <option value="joint" {% if current_filters.alert_type == 'joint' %}selected{% endif %}>联合告警</option>
+      </select>
+    </label>
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">传感器名称</span>
+      <input type="text" name="channel" value="{{ current_filters.channel }}"
+             placeholder="C-1" class="phm-input" style="width: 110px;">
+    </label>
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">LLM 诊断</span>
+      <select name="llm_verdict" class="phm-input">
+        <option value="">全部</option>
+        <option value="none" {% if current_filters.llm_verdict == 'none' %}selected{% endif %}>未诊断</option>
+        <option value="real" {% if current_filters.llm_verdict == 'real' %}selected{% endif %}>实警</option>
+        <option value="false_alarm" {% if current_filters.llm_verdict == 'false_alarm' %}selected{% endif %}>虚警</option>
+        <option value="uncertain" {% if current_filters.llm_verdict == 'uncertain' %}selected{% endif %}>待定</option>
+      </select>
+    </label>
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">人工诊断</span>
+      <select name="human_verdict" class="phm-input">
+        <option value="">全部</option>
+        <option value="none" {% if current_filters.human_verdict == 'none' %}selected{% endif %}>未诊断</option>
+        <option value="real" {% if current_filters.human_verdict == 'real' %}selected{% endif %}>实警</option>
+        <option value="false_alarm" {% if current_filters.human_verdict == 'false_alarm' %}selected{% endif %}>虚警</option>
+        <option value="uncertain" {% if current_filters.human_verdict == 'uncertain' %}selected{% endif %}>待定</option>
+      </select>
+    </label>
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">综合状态</span>
+      <select name="verdict" class="phm-input">
+        <option value="">全部</option>
+        <option value="real" {% if current_filters.verdict == 'real' %}selected{% endif %}>实警</option>
+        <option value="false_alarm" {% if current_filters.verdict == 'false_alarm' %}selected{% endif %}>虚警</option>
+        <option value="uncertain" {% if current_filters.verdict == 'uncertain' %}selected{% endif %}>待定</option>
+      </select>
+    </label>
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">起</span>
+      <input type="text" name="start_ts" value="{{ current_filters.start_ts }}"
+             placeholder="2026-07-01" class="phm-input" style="width: 130px;">
+    </label>
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">止</span>
+      <input type="text" name="end_ts" value="{{ current_filters.end_ts }}"
+             placeholder="2026-07-21" class="phm-input" style="width: 130px;">
+    </label>
+    <button type="submit" class="phm-btn phm-btn-primary phm-btn-sm">筛选</button>
+    <a href="{% url 'phm_admin_alert' %}" class="phm-btn phm-btn-sm">重置</a>
+  </div>
+</form>
+
+{# ── 顶部工具栏（紧贴筛选栏，第一屏可见） ────────────────────────────── #}
+<div class="phm-alert-toolbar">
+  <span class="phm-text-sec" style="font-size: 13px;">
+    已选 <strong id="phm-alert-selected-count">0</strong> 项 · 共 {{ row_count }} 条
+  </span>
+  <span class="phm-flex" style="gap: 6px; flex-wrap: wrap;">
+    {% if is_superuser %}
+    <button class="phm-btn phm-btn-primary phm-btn-sm" id="phm-alert-create-btn">
+      ＋ 新增
+    </button>
+    <button class="phm-btn phm-btn-sm" id="phm-alert-delete-btn" disabled>
+      🗑 移到回收站
+    </button>
+    {% endif %}
+    <button class="phm-btn phm-btn-sm" id="phm-alert-diagnose-btn" disabled>
+      🤖 LLM 诊断
+    </button>
+    <button class="phm-btn phm-btn-sm" id="phm-alert-annotate-btn" disabled>
+      🏷 批量标注
+    </button>
+    <button class="phm-btn phm-btn-sm" id="phm-alert-export-btn">
+      ⬇ 导出
+    </button>
+  </span>
+</div>
+
+{# ── 告警列表表格 ─────────────────────────────────────────────────────── #}
+<div class="phm-card">
+  {% if rows %}
+  <div class="phm-table-wrap">
+    <table class="phm-table">
+      <thead>
+        <tr>
+          <th style="width: 36px;">
+            <input type="checkbox" id="phm-alert-select-all" title="全选">
+          </th>
+          <th style="width: 50px;">ID</th>
+          <th style="width: 80px;">类型</th>
+          <th>传感器名称</th>
+          <th>遥测值</th>
+          <th>异常分数</th>
+          <th>告警时间(UTC)</th>
+          <th>LLM 诊断</th>
+          <th>人工诊断</th>
+          <th>综合状态</th>
+          <th style="width: 60px;">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr data-id="{{ r.id }}">
+          <td><input type="checkbox" class="phm-alert-row" value="{{ r.id }}"></td>
+          <td class="col-mono">{{ r.id }}</td>
+          <td><span class="phm-badge {{ r.alert_type_badge }}">{{ r.alert_type|default:"—" }}</span></td>
+          <td>{{ r.sensor_name }}</td>
+          <td class="col-num">
+            {% if r.raw_value is not None %}
+              {{ r.raw_value|floatformat:3 }}{% if r.unit %}<span class="phm-text-dim" style="margin-left:2px; font-size:11px;">{{ r.unit }}</span>{% endif %}
+            {% else %}—{% endif %}
+          </td>
+          <td class="col-num">{% if r.score is not None %}{{ r.score|floatformat:3 }}{% else %}—{% endif %}</td>
+          <td class="col-mono phm-text-sec" data-ts="{{ r.created_at }}">—</td>
+          <td>
+            {% if r.llm_verdict %}
+              <span class="phm-badge {{ r.llm_verdict_badge }}">{{ r.llm_verdict }}</span>
+            {% else %}<span class="phm-text-dim">未诊断</span>{% endif %}
+          </td>
+          <td>
+            {% if r.human_verdict %}
+              <span class="phm-badge {{ r.human_verdict_badge }}">{{ r.human_verdict }}</span>
+            {% else %}<span class="phm-text-dim">未标注</span>{% endif %}
+          </td>
+          <td><span class="phm-badge {{ r.final_status_badge }}">{{ r.final_status|default:"—" }}</span></td>
+          <td>
+            <button class="phm-btn phm-btn-sm phm-alert-detail-btn" data-id="{{ r.id }}">
+              详情
+            </button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% else %}
+  <div class="phm-empty">
+    <div style="font-size: 36px; margin-bottom: 8px;">📭</div>
+    <p class="phm-text-sec">没有符合条件的告警。调整筛选条件或刷新页面。</p>
+  </div>
+  {% endif %}
+
+  {% if total_pages and total_pages > 1 %}
+  <div class="phm-pagination">
+    <span class="phm-pagination-info">共 {{ total_count }} 条，第 {{ page }}/{{ total_pages }} 页</span>
+    <div class="phm-pagination-pages">
+      <a class="phm-page-btn{% if page == 1 %} disabled{% endif %}"
+         href="?page={{ page|add:'-1' }}{% for k, v in current_filters.items %}{% if v %}&{{ k }}={{ v }}{% endif %}{% endfor %}{% if limit != 50 %}&limit={{ limit }}{% endif %}">‹ 上一页</a>
+      {% for p in page_range %}
+        {% if p == '..' %}
+        <span class="phm-page-ellipsis">…</span>
+        {% elif p == page %}
+        <span class="phm-page-btn active">{{ p }}</span>
+        {% else %}
+        <a class="phm-page-btn"
+           href="?page={{ p }}{% for k, v in current_filters.items %}{% if v %}&{{ k }}={{ v }}{% endif %}{% endfor %}{% if limit != 50 %}&limit={{ limit }}{% endif %}">{{ p }}</a>
+        {% endif %}
+      {% endfor %}
+      <a class="phm-page-btn{% if page == total_pages %} disabled{% endif %}"
+         href="?page={{ page|add:'1' }}{% for k, v in current_filters.items %}{% if v %}&{{ k }}={{ v }}{% endif %}{% endfor %}{% if limit != 50 %}&limit={{ limit }}{% endif %}">下一页 ›</a>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+  </div>{% comment %}close phm-page-body{% endcomment %}
+</div>{% comment %}close phm-admin-shell{% endcomment %}
+
+{# ── 详情抽屉（用 .active 类切换，与 admin.css 的 transform 动画一致） ── #}
+<div class="phm-drawer-mask" id="phm-alert-drawer-mask">
+  <div class="phm-drawer" id="phm-alert-drawer-pane">
+    <div class="phm-drawer-header">
+      <h3 class="phm-drawer-title" id="phm-alert-drawer-title">告警详情</h3>
+      <button class="phm-btn phm-btn-sm phm-drawer-close" id="phm-alert-drawer-close">✕</button>
+    </div>
+    <div class="phm-drawer-body" id="phm-alert-drawer-body">
+      <p class="phm-text-sec">加载中…</p>
+    </div>
+  </div>
+</div>
+
+{# ── 批量标注弹框 ─────────────────────────────────────────────────────── #}
+<div class="phm-drawer-mask" id="phm-alert-annotate-mask">
+  <div class="phm-alert-confirm-dialog">
+    <h3 style="margin: 0 0 12px;">🏷 批量标注</h3>
+    <p class="phm-text-sec" style="margin: 0 0 16px; font-size: 13px;">
+      将对选中的 <strong id="phm-alert-annotate-count" style="color: var(--phm-blue);">0</strong> 条告警
+      统一应用一个人工诊断结论：
+    </p>
+    <select id="phm-alert-annotate-verdict" class="phm-input" style="width: 100%; margin-bottom: 16px;">
+      <option value="real">实警</option>
+      <option value="false_alarm">虚警</option>
+      <option value="uncertain">待定</option>
+    </select>
+    <div class="phm-flex-between">
+      <button class="phm-btn phm-btn-sm" id="phm-alert-annotate-cancel">取消</button>
+      <button class="phm-btn phm-btn-primary phm-btn-sm" id="phm-alert-annotate-ok">应用</button>
+    </div>
+  </div>
+</div>
+
+{# ── 新增告警弹框 ─────────────────────────────────────────────────────── #}
+<div class="phm-drawer-mask" id="phm-alert-create-mask">
+  <div class="phm-alert-confirm-dialog" style="max-width: 480px;">
+    <h3 style="margin: 0 0 12px;">＋ 人工补录告警</h3>
+    <p class="phm-text-sec" style="margin: 0 0 12px; font-size: 13px;">
+      用于系统漏检时人工补充。默认 status=active、type=measured。
+    </p>
+    <div class="phm-form-grid">
+      <label class="phm-form-field">
+        <span>通道 *</span>
+        <input type="text" id="phm-alert-create-channel" class="phm-input" placeholder="C-1">
+      </label>
+      <label class="phm-form-field">
+        <span>异常分数 *</span>
+        <input type="text" id="phm-alert-create-score" class="phm-input" placeholder="0.85">
+      </label>
+      <label class="phm-form-field" style="grid-column: 1 / -1;">
+        <span>描述（可选）</span>
+        <input type="text" id="phm-alert-create-message" class="phm-input">
+      </label>
+    </div>
+    <div class="phm-flex-between" style="margin-top: 12px;">
+      <button class="phm-btn phm-btn-sm" id="phm-alert-create-cancel">取消</button>
+      <button class="phm-btn phm-btn-primary phm-btn-sm" id="phm-alert-create-ok">提交</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  function init() {
+    if (!window.PHM || !PHM.fetchJSON) return;
+
+    // 时间戳格式化
+    function fmtTs(ts) {
+      if (!ts) return '—';
+      if (PHM.fmtTimestamp) return PHM.fmtTimestamp(ts);
+      var d = new Date(ts * 1000);
+      if (isNaN(d.getTime())) return '—';
+      var pad = function (n) { return n < 10 ? '0' + n : n; };
+      return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()) +
+             ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds()) + ' UTC';
+    }
+    Array.prototype.forEach.call(
+      document.querySelectorAll('td[data-ts]'),
+      function (el) {
+        var ts = el.getAttribute('data-ts');
+        el.textContent = ts ? fmtTs(parseFloat(ts)) : '—';
+      }
+    );
+
+    var DETAIL_API = "{{ api_detail_url|escapejs }}";  // 含 __ID__ 占位符
+    var ANNOTATE_API = "{{ api_annotate_url|escapejs }}";
+    var DELETE_API = "{{ api_delete_url|escapejs }}";
+    var DIAGNOSE_API = "{{ api_diagnose_url|escapejs }}";
+    var DIAGNOSE_STATUS_API = "{{ api_diagnose_status_url|escapejs }}";
+    var EXPORT_API = "{{ api_export_url|escapejs }}";
+    var CREATE_API = "{{ api_create_url|escapejs }}";
+
+    var rowChecks = Array.prototype.slice.call(document.querySelectorAll('.phm-alert-row'));
+    var selectAll = document.getElementById('phm-alert-select-all');
+    var deleteBtn = document.getElementById('phm-alert-delete-btn');
+    var diagnoseBtn = document.getElementById('phm-alert-diagnose-btn');
+    var annotateBtn = document.getElementById('phm-alert-annotate-btn');
+    var exportBtn = document.getElementById('phm-alert-export-btn');
+    var createBtn = document.getElementById('phm-alert-create-btn');
+    var countEl = document.getElementById('phm-alert-selected-count');
+
+    function selectedIds() {
+      return rowChecks.filter(function (c) { return c.checked; })
+                       .map(function (c) { return parseInt(c.value, 10); });
+    }
+    function syncButtonState() {
+      var ids = selectedIds();
+      var n = ids.length;
+      if (countEl) countEl.textContent = String(n);
+      if (deleteBtn) deleteBtn.disabled = (n === 0);
+      if (diagnoseBtn) diagnoseBtn.disabled = (n === 0);
+      if (annotateBtn) annotateBtn.disabled = (n === 0);
+      if (selectAll) selectAll.checked = (n > 0 && n === rowChecks.length);
+    }
+    if (selectAll) {
+      selectAll.addEventListener('change', function () {
+        rowChecks.forEach(function (c) { c.checked = selectAll.checked; });
+        syncButtonState();
+      });
+    }
+    rowChecks.forEach(function (c) { c.addEventListener('change', syncButtonState); });
+    syncButtonState();
+
+    // ── 详情抽屉 ──────────────────────────────────────────────
+    var drawerMask = document.getElementById('phm-alert-drawer-mask');
+    var drawerPane = document.getElementById('phm-alert-drawer-pane');
+    var drawerBody = document.getElementById('phm-alert-drawer-body');
+    var drawerTitle = document.getElementById('phm-alert-drawer-title');
+    var drawerClose = document.getElementById('phm-alert-drawer-close');
+
+    function closeDrawer() {
+      drawerMask.classList.remove('active');
+      if (drawerPane) drawerPane.classList.remove('active');
+    }
+    if (drawerClose) drawerClose.addEventListener('click', closeDrawer);
+    if (drawerMask) {
+      drawerMask.addEventListener('click', function (e) {
+        if (e.target === drawerMask) closeDrawer();
+      });
+    }
+
+    function renderWaveformSVG(rawSnap, scoreSnap) {
+      if (!rawSnap || !rawSnap.length) return '<p class="phm-text-dim">无波形数据</p>';
+      var W = 600, H = 120, pad = 8;
+      var rawMin = Math.min.apply(null, rawSnap);
+      var rawMax = Math.max.apply(null, rawSnap);
+      var rawRange = (rawMax - rawMin) || 1;
+      function toPath(data, min, range, h) {
+        var step = (W - pad * 2) / Math.max(data.length - 1, 1);
+        return data.map(function (v, i) {
+          var x = pad + i * step;
+          var y = pad + (1 - (v - min) / range) * (h - pad * 2);
+          return (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1);
+        }).join(' ');
+      }
+      var rawPath = toPath(rawSnap, rawMin, rawRange, H);
+      var svg = '<svg class="phm-alert-wave" viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:120px;">' +
+                 '<path d="' + rawPath + '" fill="none" stroke="var(--phm-blue)" stroke-width="1.5"/></svg>';
+      if (scoreSnap && scoreSnap.length) {
+        var sMin = Math.min.apply(null, scoreSnap);
+        var sMax = Math.max.apply(null, scoreSnap);
+        var sRange = (sMax - sMin) || 1;
+        var sPath = toPath(scoreSnap, sMin, sRange, H);
+        svg += '<svg class="phm-alert-wave" viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:120px;margin-top:6px;">' +
+               '<path d="' + sPath + '" fill="none" stroke="var(--phm-red)" stroke-width="1.5"/></svg>';
+      }
+      return svg;
+    }
+
+    function openDetail(aid) {
+      drawerMask.classList.add('active');
+      if (drawerPane) drawerPane.classList.add('active');
+      drawerTitle.textContent = '告警 #' + aid + ' 详情';
+      drawerBody.innerHTML = '<p class="phm-text-sec">加载中…</p>';
+      var url = DETAIL_API.replace('__ID__', String(aid));
+      PHM.fetchJSON(url, { method: 'GET' })
+        .then(function (data) {
+          if (data.status !== 'ok') throw new Error(data.message || '加载失败');
+          var a = data.alert;
+          var d = data.diagnosis;
+          var html = '';
+          // 基本信息卡片
+          html += '<div class="phm-card" style="margin-bottom:12px;">';
+          html += '<h4 class="phm-card-title">基本信息</h4>';
+          html += '<table class="phm-table"><tbody>' +
+                  '<tr><td class="phm-text-dim">通道</td><td>' + PHM.escapeHTML(a.channel) + '</td></tr>' +
+                  '<tr><td class="phm-text-dim">传感器</td><td>' + PHM.escapeHTML(a.sensor_name) + '</td></tr>' +
+                  '<tr><td class="phm-text-dim">告警时间</td><td>' + fmtTs(a.created_at) + '</td></tr>' +
+                  '<tr><td class="phm-text-dim">异常分数</td><td>' + (a.score !== null ? a.score.toFixed(3) : '—') + '</td></tr>' +
+                  '<tr><td class="phm-text-dim">状态</td><td>' + PHM.escapeHTML(a.status || '—') + '</td></tr>' +
+                  '<tr><td class="phm-text-dim">LLM verdict</td><td>' + PHM.escapeHTML(a.llm_verdict || '—') + '</td></tr>' +
+                  '<tr><td class="phm-text-dim">人工 verdict</td><td>' + PHM.escapeHTML(a.human_verdict || '—') + '</td></tr>' +
+                  '<tr><td class="phm-text-dim">综合状态</td><td>' + PHM.escapeHTML(a.final_status || '—') + '</td></tr>' +
+                  '</tbody></table>';
+          html += '</div>';
+
+          // 描述
+          if (a.message) {
+            html += '<div class="phm-card" style="margin-bottom:12px;">';
+            html += '<h4 class="phm-card-title">告警描述</h4>';
+            html += '<p class="phm-text-sec" style="font-size:13px;line-height:1.6;">' +
+                    PHM.escapeHTML(a.message) + '</p>';
+            html += '</div>';
+          }
+
+          // 波形
+          html += '<div class="phm-card" style="margin-bottom:12px;">';
+          html += '<h4 class="phm-card-title">波形快照</h4>';
+          html += renderWaveformSVG(a.raw_snapshot, a.score_snapshot);
+          if (a.raw_snapshot && a.raw_snapshot.length) {
+            var last = a.raw_snapshot[a.raw_snapshot.length - 1];
+            html += '<p class="phm-text-dim" style="font-size:12px;margin-top:4px;">' +
+                    '末点值：' + (typeof last === 'number' ? last.toFixed(3) : '—') +
+                    (a.unit ? ' ' + PHM.escapeHTML(a.unit) : '') +
+                    ' · 异常分数 ' + (a.score !== null ? a.score.toFixed(3) : '—') + '</p>';
+          }
+          html += '</div>';
+
+          // LLM 诊断文本
+          html += '<div class="phm-card" style="margin-bottom:12px;">';
+          html += '<div class="phm-flex-between"><h4 class="phm-card-title" style="margin:0;">LLM 诊断</h4>';
+          html += '<button class="phm-btn phm-btn-sm phm-btn-primary" id="phm-alert-drawer-rediagnose" data-id="' + aid + '">重新诊断</button></div>';
+          if (d && d.text) {
+            html += '<pre class="phm-diagnosis-text">' + PHM.escapeHTML(d.text) + '</pre>';
+          } else if (d && d.error) {
+            html += '<p class="phm-text-sec" style="color:var(--phm-red);font-size:13px;">错误：' + PHM.escapeHTML(d.error) + '</p>';
+          } else {
+            html += '<p class="phm-text-dim">尚未诊断。点「重新诊断」生成。</p>';
+          }
+          html += '</div>';
+
+          // 人工标注（超管可改）
+          html += '<div class="phm-card">';
+          html += '<h4 class="phm-card-title">人工诊断标注</h4>';
+          html += '<div class="phm-flex" style="gap:8px;align-items:center;">';
+          html += '<select id="phm-alert-drawer-verdict" class="phm-input" style="width:auto;">';
+          ['real', 'false_alarm', 'uncertain'].forEach(function (v) {
+            var label = { real: '实警', false_alarm: '虚警', uncertain: '待定' }[v];
+            html += '<option value="' + v + '"' + (a.human_verdict === v ? ' selected' : '') + '>' + label + '</option>';
+          });
+          html += '<option value=""' + (!a.human_verdict ? ' selected' : '') + '>（清除标注）</option>';
+          html += '</select>';
+          html += '<button class="phm-btn phm-btn-sm phm-btn-primary" id="phm-alert-drawer-save-verdict" data-id="' + aid + '">应用</button>';
+          html += '</div>';
+          html += '</div>';
+
+          drawerBody.innerHTML = html;
+
+          // 重新诊断按钮
+          var rediag = document.getElementById('phm-alert-drawer-rediagnose');
+          if (rediag) {
+            rediag.addEventListener('click', function () {
+              rediag.disabled = true;
+              rediag.textContent = '诊断中…';
+              PHM.fetchJSON(DIAGNOSE_API, {
+                method: 'POST',
+                body: { ids: [aid], force_refresh: true }
+              }).then(function (data) {
+                if (data.status === 'ok') {
+                  PHM.toast('诊断已触发，请稍后重新打开详情查看结果', 'success');
+                } else {
+                  throw new Error(data.message || '触发失败');
+                }
+              }).catch(function (e) {
+                PHM.toast('诊断失败：' + e.message, 'error', 5000);
+              }).finally(function () {
+                rediag.disabled = false;
+                rediag.textContent = '重新诊断';
+              });
+            });
+          }
+          // 保存 verdict
+          var saveVerdict = document.getElementById('phm-alert-drawer-save-verdict');
+          if (saveVerdict) {
+            saveVerdict.addEventListener('click', function () {
+              var v = document.getElementById('phm-alert-drawer-verdict').value;
+              saveVerdict.disabled = true;
+              PHM.fetchJSON(ANNOTATE_API, {
+                method: 'POST',
+                body: { ids: [parseInt(saveVerdict.getAttribute('data-id'), 10)], verdict: v || 'uncertain' }
+              }).then(function (data) {
+                if (data.status === 'ok') {
+                  PHM.toast('已应用：' + (v || '清除'), 'success');
+                } else {
+                  throw new Error(data.message || '应用失败');
+                }
+              }).catch(function (e) {
+                PHM.toast('应用失败：' + e.message, 'error', 5000);
+              }).finally(function () {
+                saveVerdict.disabled = false;
+              });
+            });
+          }
+        })
+        .catch(function (e) {
+          drawerBody.innerHTML = '<p class="phm-text-sec" style="color:var(--phm-red);">加载失败：' +
+                                 PHM.escapeHTML(e.message) + '</p>';
+        });
+    }
+
+    Array.prototype.slice.call(document.querySelectorAll('.phm-alert-detail-btn'))
+      .forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          openDetail(parseInt(btn.getAttribute('data-id'), 10));
+        });
+      });
+
+    // ── 批量标注 ──────────────────────────────────────────────
+    var annotateMask = document.getElementById('phm-alert-annotate-mask');
+    var annotateCount = document.getElementById('phm-alert-annotate-count');
+    var annotateOk = document.getElementById('phm-alert-annotate-ok');
+    var annotateCancel = document.getElementById('phm-alert-annotate-cancel');
+    var annotateVerdictSel = document.getElementById('phm-alert-annotate-verdict');
+
+    if (annotateBtn) {
+      annotateBtn.addEventListener('click', function () {
+        var ids = selectedIds();
+        if (ids.length === 0) return;
+        annotateCount.textContent = String(ids.length);
+        annotateMask.classList.add('active');
+      });
+    }
+    if (annotateCancel) annotateCancel.addEventListener('click', function () { annotateMask.classList.remove('active'); });
+    if (annotateMask) annotateMask.addEventListener('click', function (e) { if (e.target === annotateMask) annotateMask.classList.remove('active'); });
+    if (annotateOk) {
+      annotateOk.addEventListener('click', function () {
+        var ids = selectedIds();
+        if (ids.length === 0) return;
+        var v = annotateVerdictSel.value;
+        annotateOk.disabled = true;
+        PHM.fetchJSON(ANNOTATE_API, { method: 'POST', body: { ids: ids, verdict: v } })
+          .then(function (data) {
+            if (data.status === 'ok') {
+              PHM.toast('已标注 ' + data.updated + '/' + ids.length + ' 条为 ' + v, 'success');
+              setTimeout(function () { window.location.reload(); }, 800);
+            } else {
+              throw new Error(data.message || '标注失败');
+            }
+          })
+          .catch(function (e) {
+            PHM.toast('标注失败：' + e.message, 'error', 5000);
+            annotateOk.disabled = false;
+          });
+      });
+    }
+
+    // ── 移到回收站（软删） ───────────────────────────────────
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', function () {
+        var ids = selectedIds();
+        if (ids.length === 0) return;
+        if (!window.confirm('将选中的 ' + ids.length + ' 条告警移到回收站？')) return;
+        deleteBtn.disabled = true;
+        PHM.fetchJSON(DELETE_API, { method: 'POST', body: { ids: ids } })
+          .then(function (data) {
+            if (data.status === 'ok') {
+              PHM.toast('已移到回收站 ' + data.deleted + '/' + ids.length + ' 条', 'success');
+              setTimeout(function () { window.location.reload(); }, 800);
+            } else {
+              throw new Error(data.message || '删除失败');
+            }
+          })
+          .catch(function (e) {
+            PHM.toast('删除失败：' + e.message, 'error', 5000);
+            deleteBtn.disabled = false;
+          });
+      });
+    }
+
+    // ── LLM 诊断（异步，进度查询） ───────────────────────────
+    if (diagnoseBtn) {
+      diagnoseBtn.addEventListener('click', function () {
+        var ids = selectedIds();
+        if (ids.length === 0) return;
+        if (!window.confirm('对选中的 ' + ids.length + ' 条告警触发 LLM 诊断？\n（已在后台异步执行，不阻塞页面）')) return;
+        diagnoseBtn.disabled = true;
+        PHM.fetchJSON(DIAGNOSE_API, { method: 'POST', body: { ids: ids } })
+          .then(function (data) {
+            if (data.status === 'ok') {
+              PHM.toast('已触发诊断（共 ' + data.total + ' 条），进度可点工具栏「LLM 诊断」查询', 'success', 4000);
+              pollDiagnoseStatus();
+            } else {
+              throw new Error(data.message || '触发失败');
+            }
+          })
+          .catch(function (e) {
+            PHM.toast('触发失败：' + e.message, 'error', 5000);
+            diagnoseBtn.disabled = false;
+          });
+      });
+    }
+    var diagPollTimer = null;
+    function pollDiagnoseStatus() {
+      if (diagPollTimer) clearInterval(diagPollTimer);
+      diagPollTimer = setInterval(function () {
+        PHM.fetchJSON(DIAGNOSE_STATUS_API, { method: 'GET' })
+          .then(function (data) {
+            if (data.status !== 'ok') return;
+            var p = data.progress;
+            if (!p.running) {
+              clearInterval(diagPollTimer);
+              diagPollTimer = null;
+              if (diagnoseBtn) diagnoseBtn.disabled = false;
+              PHM.toast('诊断完成：成功 ' + (p.done - p.errors) + ' / 失败 ' + p.errors, 'success');
+              setTimeout(function () { window.location.reload(); }, 1500);
+            } else if (p.total > 0) {
+              if (diagnoseBtn) diagnoseBtn.textContent = '🤖 诊断中 ' + p.done + '/' + p.total;
+            }
+          })
+          .catch(function () { /* 静默 */ });
+      }, 2000);
+    }
+
+    // ── 导出（CSV/JSON） ──────────────────────────────────────
+    if (exportBtn) {
+      exportBtn.addEventListener('click', function () {
+        var ids = selectedIds();
+        var url = EXPORT_API + '?format=csv';
+        if (ids.length > 0) {
+          url += '&ids=' + ids.join(',');
+        } else {
+          // 没选 → 导出当前筛选
+          url += '&' + new URLSearchParams(window.location.search).toString();
+        }
+        window.location.href = url;
+      });
+    }
+
+    // ── 新增（超管） ──────────────────────────────────────────
+    var createMask = document.getElementById('phm-alert-create-mask');
+    var createOk = document.getElementById('phm-alert-create-ok');
+    var createCancel = document.getElementById('phm-alert-create-cancel');
+    if (createBtn) {
+      createBtn.addEventListener('click', function () { createMask.classList.add('active'); });
+    }
+    if (createCancel) createCancel.addEventListener('click', function () { createMask.classList.remove('active'); });
+    if (createMask) createMask.addEventListener('click', function (e) { if (e.target === createMask) createMask.classList.remove('active'); });
+    if (createOk) {
+      createOk.addEventListener('click', function () {
+        var channel = document.getElementById('phm-alert-create-channel').value.trim();
+        var score = parseFloat(document.getElementById('phm-alert-create-score').value);
+        var message = document.getElementById('phm-alert-create-message').value;
+        if (!channel) { PHM.toast('通道必填', 'error'); return; }
+        if (isNaN(score)) { PHM.toast('异常分数必须为数字', 'error'); return; }
+        createOk.disabled = true;
+        PHM.fetchJSON(CREATE_API, {
+          method: 'POST',
+          body: { channel: channel, score: score, message: message }
+        }).then(function (data) {
+          if (data.status === 'ok') {
+            PHM.toast('已补录告警 #' + data.id, 'success');
+            setTimeout(function () { window.location.reload(); }, 800);
+          } else {
+            throw new Error(data.message || '补录失败');
+          }
+        }).catch(function (e) {
+          PHM.toast('补录失败：' + e.message, 'error', 5000);
+          createOk.disabled = false;
+        });
+      });
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
+{% endblock %}

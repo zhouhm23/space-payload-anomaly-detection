@@ -16,12 +16,13 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import logging
+import math
 import os
 import time as _time
 from pathlib import Path
 
 from django.contrib.admin.views.decorators import staff_member_required
-from django.http import HttpResponse, JsonResponse
+from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import render
 from django.urls import reverse
 from django.views.decorators.http import require_http_methods
@@ -296,9 +297,8 @@ _HEALTH_TIERS = (
     (0.00, 'danger',  '健康度低'),
 )
 
-# 自动刷新间隔（秒）。用户在页面上勾选"每 Ns 自动刷新"后，URL 带 ?auto=1，
-# 前端 setInterval 倒计时 reload 页面。默认关闭（?auto=1 才启用）。
-# 间隔暂硬编码，后续可外置到 system_config.json。
+# 自动刷新间隔（秒）。dashboard 默认开启自动刷新（URL 不带 auto 也启用），
+# 用户可在页面勾选框关闭（写 ?auto=0）。前端 setInterval 倒计时 reload 页面。
 _DASHBOARD_REFRESH_SECONDS = 15
 
 
@@ -483,8 +483,8 @@ def dashboard_view(request):
     if window not in _WINDOW_CHOICES:
         window = _WINDOW_DEFAULT
 
-    # 自动刷新：URL 带 ?auto=1 启用（默认关闭，勾选 checkbox 激活）
-    auto_refresh = request.GET.get('auto') == '1'
+    # 自动刷新：默认开启（?auto=0 才关闭）。需求书反馈：dashboard 默认自动刷新。
+    auto_refresh = request.GET.get('auto', '1') != '0'
 
     # Container 三态守门
     c, err = _container_or_error(request)
@@ -955,3 +955,1164 @@ def permissions_view(request):
         'audit_notes': _AUDIT_SCOPE_NOTES,
         'current_role': current_role,
     })
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 第 5 页：系统设置（系统配置 / 前台主题 / 通道校准三类）
+# ════════════════════════════════════════════════════════════════════════════
+# 需求书 §后台「系统设置（仅管理员可修改）」：
+#   含系统配置、前台主题、通道校准三类。各种配置项，中文名称（有悬浮描述）、
+#   变量名、值。
+#
+# 数据源：
+#   - system：SystemConfigService.raw_with_docs() / save()
+#   - theme：ThemeService.raw_with_docs() / save()
+#   - calibration：直接读 channel_calibration.json（纯只读，离线标定产物）
+#
+# 设计要点：
+#   - 通道校准只读：Day15 离线 LOO 标定产物，在线编辑会破坏口径
+#   - llm.timeout_sec 等 .env 管理的 key 在 UI 灰显
+#   - save 通过原子写 + load() 热生效，无需重启
+
+# 三类 tab 配置（key → (label, service_kind)）
+_SETTINGS_CATEGORIES = (
+    ('system',      '系统配置'),
+    ('theme',       '前台主题'),
+    ('calibration', '通道校准（只读）'),
+)
+_SETTINGS_CATEGORY_DEFAULT = 'system'
+_SETTINGS_CATEGORY_KEYS = frozenset(k for k, _ in _SETTINGS_CATEGORIES)
+
+# 通道校准文件位置（与 CalibrationConfig.DEFAULT_CONFIG_PATH 同源，但直接读原文）。
+# __file__ = src/ground/django_phm/phm_site/views_admin.py
+# 上 3 级 → src/ground/，再拼 data/channel_calibration.json（与 SystemConfigService 同范式）。
+_CALIBRATION_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "data", "channel_calibration.json",
+)
+
+
+def _parse_settings_category(raw):
+    """解析 ?category= 参数，非法值兜底 system。"""
+    if raw not in _SETTINGS_CATEGORY_KEYS:
+        return _SETTINGS_CATEGORY_DEFAULT
+    return raw
+
+
+def _build_settings_items(raw, display_names, *, readonly_predicate=None):
+    """把 raw_with_docs() 的 section→{key:value} 扁平化成 UI 行列表。
+
+    Args:
+        raw: dict[section, dict[key, value]] —— service.raw_with_docs() 输出。
+        display_names: dict[section, dict[key, str]] —— service.display_names() 输出。
+        readonly_predicate: 可选回调 (section, key) -> bool，True 表示该项只读。
+
+    返回结构：
+        [
+            {
+                'section': 'thresholds',
+                'section_label': '异常检测阈值',  # display_names[section]['_doc']
+                'section_doc': '<section _doc in JSON>',  # 原文中的 section _doc（可能为空）
+                'key': 'anomaly',
+                'name': '异常分数阈值',          # display_names[section][key]
+                'doc': '<key _doc>',            # 原文 key 的 _doc（如有）
+                'value': 0.5,
+                'value_kind': 'float',          # bool/int/float/str/object/array
+                'editable': True,
+            },
+            ...
+        ]
+    """
+    items = []
+    for section, sec_values in raw.items():
+        if section.startswith('_') or not isinstance(sec_values, dict):
+            continue
+        sec_names = display_names.get(section, {})
+        section_label = sec_names.get('_doc', section)
+        section_doc = sec_values.get('_doc', '') if isinstance(sec_values, dict) else ''
+        # 排序：按 display_names 顺序（已定义顺序），未在 display_names 的追加在后
+        ordered_keys = [k for k in sec_names.keys() if k != '_doc']
+        extra_keys = [k for k in sec_values.keys()
+                      if k != '_doc' and k not in ordered_keys]
+        for key in ordered_keys + extra_keys:
+            if key.startswith('_'):
+                continue
+            if key not in sec_values:
+                continue  # display_names 里有但 JSON 没有的 key 跳过
+            value = sec_values[key]
+            value_kind = _classify_value_kind(value)
+            editable = value_kind in ('bool', 'int', 'float', 'str')
+            if editable and readonly_predicate and readonly_predicate(section, key):
+                editable = False
+            items.append({
+                'section': section,
+                'section_label': section_label,
+                'section_doc': section_doc,
+                'key': key,
+                'name': sec_names.get(key, key),
+                'doc': '',  # 单 key 的 _doc 暂不在 JSON 中维护（_doc 是 section 级）
+                'value': value,
+                'value_kind': value_kind,
+                'editable': editable,
+            })
+    return items
+
+
+def _classify_value_kind(value):
+    """把 Python 值映射到 UI 类型标签（bool/int/float/str/object/array）。"""
+    if isinstance(value, bool):
+        return 'bool'
+    if isinstance(value, int):
+        return 'int'
+    if isinstance(value, float):
+        return 'float'
+    if isinstance(value, str):
+        return 'str'
+    if isinstance(value, list):
+        return 'array'
+    if isinstance(value, dict):
+        return 'object'
+    return 'unknown'
+
+
+def _group_items_by_section(items):
+    """把扁平 items 按 section 分组，便于模板按卡片渲染。
+
+    返回 [{'section': 'thresholds', 'label': '...', 'doc': '...', 'items': [...]}, ...]
+    顺序：保持首次出现顺序（dict 保留插入序）。
+    """
+    groups = {}
+    order = []
+    for it in items:
+        sec = it['section']
+        if sec not in groups:
+            groups[sec] = {
+                'section': sec,
+                'label': it['section_label'],
+                'doc': it['section_doc'],
+                'items': [],
+            }
+            order.append(sec)
+        groups[sec]['items'].append(it)
+    return [groups[s] for s in order]
+
+
+@staff_member_required
+def settings_view(request):
+    """系统设置页（GET）。
+
+    GET ?category=system|theme|calibration 切换三类（默认 system）。
+    Container 未就绪时也能渲染前两类（不依赖 Container；但 calibration 需要
+    Container 解析的 channel 名映射，这里仍用文件直读，故三态机守门放宽：
+    只在 service 异常时退回占位页）。
+    """
+    category = _parse_settings_category(request.GET.get('category'))
+    is_superuser = request.user.is_authenticated and request.user.is_superuser
+
+    groups = []
+    save_url = None
+    error_msg = None
+
+    try:
+        if category == 'system':
+            from phm.services.system_config_service import get_system_config
+            svc = get_system_config()
+            raw = svc.raw_with_docs()
+            items = _build_settings_items(
+                raw, svc.display_names(),
+                readonly_predicate=lambda s, k: svc.is_readonly(s, k),
+            )
+            groups = _group_items_by_section(items)
+        elif category == 'theme':
+            svc = get_theme()
+            raw = svc.raw_with_docs()
+            items = _build_settings_items(
+                raw, svc.display_names(),
+                readonly_predicate=lambda s, k: svc.is_readonly(s, k),
+            )
+            groups = _group_items_by_section(items)
+        else:  # calibration
+            groups = _build_calibration_groups()
+    except Exception as e:
+        logger.warning("settings_view(%s) failed: %s", category, e, exc_info=True)
+        error_msg = str(e)
+
+    # 三类 tab（active 标记当前）
+    tabs = [
+        {'key': k, 'label': lbl, 'active': (k == category)}
+        for k, lbl in _SETTINGS_CATEGORIES
+    ]
+
+    return render(request, 'phm_site/admin/settings.html', {
+        'page_title': '系统设置',
+        'category': category,
+        'tabs': tabs,
+        'groups': groups,
+        'is_superuser': is_superuser,
+        'error_msg': error_msg,
+        # 给 JS 用：每行可编辑的项集合（用于批量收集改动）
+        'editable_json': json.dumps(
+            [{'section': it['section'], 'key': it['key']}
+             for grp in groups for it in grp['items'] if it['editable']],
+            ensure_ascii=False,
+        ),
+    })
+
+
+def _build_calibration_groups():
+    """读 channel_calibration.json 原文，构造只读展示分组。
+
+    每条记录是 {channel: {flip, score_type, threshold, threshold_name, ...}}，
+    UI 按 channel 一行展开，列出关键字段（threshold/score_type/flip/threshold_name）。
+    嵌套数组字段（freq_band_mean/std）折叠成「<N 个数值>」摘要，不展开。
+    """
+    if not os.path.exists(_CALIBRATION_PATH):
+        return [{
+            'section': 'calibration',
+            'label': '通道校准',
+            'doc': 'channel_calibration.json 不存在（系统未标定）',
+            'items': [],
+            'readonly_hint': True,
+        }]
+    try:
+        with open(_CALIBRATION_PATH, encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        logger.warning("failed to read calibration", exc_info=True)
+        return [{
+            'section': 'calibration',
+            'label': '通道校准',
+            'doc': 'channel_calibration.json 解析失败',
+            'items': [],
+            'readonly_hint': True,
+        }]
+    items = []
+    for channel, cfg in raw.items():
+        if channel.startswith('_') or not isinstance(cfg, dict):
+            continue
+        # 把每个 channel 当成一个 section，cfg 内字段当 items
+        sec_items = []
+        for key, value in cfg.items():
+            if key.startswith('_'):
+                continue
+            value_kind = _classify_value_kind(value)
+            # 数组字段折叠成摘要
+            display_value = value
+            if value_kind == 'array':
+                display_value = f"<{len(value)} 个数值>"
+            elif value is None:
+                display_value = "—"
+            sec_items.append({
+                'section': channel,
+                'section_label': f"通道 {channel}",
+                'section_doc': '',
+                'key': key,
+                'name': key,  # calibration 字段名直接展示（中文映射暂无）
+                'doc': '',
+                'value': display_value,
+                'value_kind': value_kind,
+                'editable': False,  # 全只读
+            })
+        if sec_items:
+            items.append({
+                'section': channel,
+                'label': f"通道 {channel}",
+                'doc': '',
+                'items': sec_items,
+                'readonly_hint': True,
+            })
+    return items
+
+
+@staff_member_required
+@require_http_methods(['POST'])
+def settings_save_api(request):
+    """保存单个配置项（POST，仅超管）。
+
+    入参 JSON: {category: 'system'|'theme', section: str, key: str, value: any}
+    出参 JSON: {status: 'ok', old, new} 或 {status: 'error', message}
+    calibration 类直接 403（只读）。
+    """
+    ok, err_resp = _require_superuser(request)
+    if not ok:
+        return err_resp
+    try:
+        body = json.loads(request.body or b'{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'status': 'error', 'message': '请求体不是合法 JSON'},
+                            status=400)
+
+    category = body.get('category')
+    if category not in ('system', 'theme'):
+        return JsonResponse({'status': 'error',
+                             'message': f'category 只接受 system/theme（calibration 只读）'},
+                            status=400)
+    section = body.get('section')
+    key = body.get('key')
+    if 'value' not in body:
+        return JsonResponse({'status': 'error', 'message': '缺少 value 字段'},
+                            status=400)
+    value = body['value']
+    if not isinstance(section, str) or not isinstance(key, str):
+        return JsonResponse({'status': 'error', 'message': 'section/key 必须为字符串'},
+                            status=400)
+
+    try:
+        if category == 'system':
+            from phm.services.system_config_service import get_system_config
+            result = get_system_config().save(section, key, value)
+        else:  # theme
+            result = get_theme().save(section, key, value)
+    except Exception as e:
+        logger.warning("settings_save_api failed: %s", e, exc_info=True)
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+
+    if result.get('status') != 'ok':
+        return JsonResponse(result, status=400)
+    return JsonResponse(result)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 第 4 页：告警和预警管理（仅 measured 告警；predicted 预警在仪表盘）
+# ════════════════════════════════════════════════════════════════════════════
+# 需求书 §后台「告警和预警管理（含预警）」：
+#   每行显示 id、告警或预警、传感器名称、遥测值、异常分数、告警时间(UTC)、
+#   llm 诊断状态、人工诊断状态、综合状态、操作（点击抽屉显示波形/描述/LLM/标注）。
+#   上方：新增 / 移动到回收站 / 删除 / llm 诊断 / 人工标注 / 导出（都可批量）。
+#
+# 决策（已确认）：
+#   - 本页只管 measured 告警（持久化在 SQLite alert_records）
+#   - predicted 预警在仪表盘已展示，本页不重复
+#   - 列表非实时更新（需求书：「界面不会实时更新，需要刷新网页获取新数据」）
+
+# 筛选参数白名单与默认值（对齐需求书 §后台 L97 列定义：类型 / 传感器名称 /
+# LLM 诊断 / 人工诊断 / 综合状态；外加时间窗，但不暴露数据库 status 字段）
+_ALERT_FILTER_DEFAULTS = {
+    'channel': None,        # str | None — 传感器 channelName（UI 标签为"传感器名称"）
+    'alert_type': None,     # 'measured'|'predicted'|'joint' | None
+    'llm_verdict': None,    # 'real'|'false_alarm'|'uncertain'|'' | None（空=未诊断）
+    'human_verdict': None,  # 同上
+    'verdict': None,        # 'real'|'false_alarm'|'uncertain'（综合：人/LLM 任一匹配）
+    'start_ts': None,       # float | None
+    'end_ts': None,         # float | None
+}
+_ALERT_LIMIT_DEFAULT = 50
+_ALERT_LIMIT_MAX = 1000
+
+# LLM 诊断异步线程池（请求线程不阻塞，进度走 alert_diagnose_status_api）
+# 模块级单例：避免每次请求新建池
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+_diagnose_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='phm-diagnose')
+# 简易进度跟踪（started/done/total/errors），与 DiagnosisService.auto_status 分离
+# 这里只跟踪网页触发的批量诊断进度
+_diagnose_progress: dict = {'running': False, 'done': 0, 'total': 0,
+                             'errors': 0, 'started_at': 0.0, 'finished_at': 0.0}
+
+
+def _parse_alert_filters(get_params):
+    """从 GET 参数解析筛选条件（对齐需求书 §后台 L97 列定义）。
+
+    返回 dict，键与 SQLiteStore.query_alerts_filtered 对齐。非法值兜底 None。
+
+    新增 llm_verdict / human_verdict 单独过滤（需求书 §后台「LLM 诊断状态」
+    「人工诊断状态」两列独立筛选）；保留 verdict 表示综合（人/LLM 任一匹配）。
+    """
+    out = dict(_ALERT_FILTER_DEFAULTS)
+
+    channel = get_params.get('channel')
+    if channel and isinstance(channel, str) and channel.strip():
+        out['channel'] = channel.strip()[:64]  # 限长防注入
+
+    alert_type = get_params.get('alert_type')
+    if alert_type in ('measured', 'predicted', 'joint'):
+        out['alert_type'] = alert_type
+
+    # LLM 诊断筛选：支持 real/false_alarm/uncertain（已诊断三种） + 'none'（未诊断）
+    llm_v = get_params.get('llm_verdict')
+    if llm_v in ('real', 'false_alarm', 'uncertain', 'none'):
+        out['llm_verdict'] = llm_v
+
+    # 人工诊断筛选：同上
+    human_v = get_params.get('human_verdict')
+    if human_v in ('real', 'false_alarm', 'uncertain', 'none'):
+        out['human_verdict'] = human_v
+
+    # 综合状态（保留 verdict 字段：人/LLM 任一匹配）
+    verdict = get_params.get('verdict')
+    if verdict in ('real', 'false_alarm', 'uncertain'):
+        out['verdict'] = verdict
+
+    start_str = get_params.get('start_ts')
+    if start_str:
+        out['start_ts'] = _parse_iso_or_float(start_str)
+    end_str = get_params.get('end_ts')
+    if end_str:
+        out['end_ts'] = _parse_iso_or_float(end_str)
+
+    return out
+
+
+def _parse_iso_or_float(raw):
+    """把 ISO 8601 字符串或数字串解析成 Unix 时间戳（float）。
+
+    支持 'YYYY-MM-DD' / 'YYYY-MM-DDTHH:MM:SS' / 'YYYY-MM-DD HH:MM:SS' / 1234567890.0。
+    失败返回 None。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    s = str(raw).strip()
+    if not s:
+        return None
+    # 先尝试纯数字（Unix 时间戳）
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    # ISO 8601（含空格分隔的也支持）
+    for fmt in ('%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+        try:
+            return _dt.datetime.strptime(s, fmt).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_alert_limit(raw):
+    """解析 limit 参数，限幅 [1, 1000]，默认 50。"""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return _ALERT_LIMIT_DEFAULT
+    return max(1, min(n, _ALERT_LIMIT_MAX))
+
+
+_ALERT_PAGE_DEFAULT = 1
+_ALERT_PAGE_MAX = 100000  # 上限防滥用（10 万页 × 50 条/页 = 500 万条，远超实际）
+
+
+def _parse_alert_page(raw):
+    """解析 page 参数，限幅 [1, _ALERT_PAGE_MAX]，默认 1。"""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return _ALERT_PAGE_DEFAULT
+    return max(1, min(n, _ALERT_PAGE_MAX))
+
+
+def _build_page_range(page: int, total_pages: int, *, window: int = 2) -> list:
+    """构建分页页码列表（当前页前后各 window 页 + 首尾 + 省略号）。
+
+    返回 list[int | str]，其中 '..' 表示省略号。例如 page=5, total=10：
+    [1, '..', 3, 4, 5, 6, 7, '..', 10]
+    """
+    if total_pages <= 0:
+        return []
+    if total_pages <= 7:
+        return list(range(1, total_pages + 1))
+    pages: list = []
+    left = max(1, page - window)
+    right = min(total_pages, page + window)
+    pages.append(1)
+    if left > 2:
+        pages.append('..')
+    for p in range(max(2, left), right + 1):
+        pages.append(p)
+    if right < total_pages - 1:
+        pages.append('..')
+    if total_pages > 1:
+        pages.append(total_pages)
+    # 去重（page=1 时 left=1 可能与首部重复）
+    seen = set()
+    deduped = []
+    for p in pages:
+        key = (p, len(deduped) and deduped[-1] == p)
+        if p not in seen or p == '..':
+            if p == '..' and deduped and deduped[-1] == '..':
+                continue
+            deduped.append(p)
+            if p != '..':
+                seen.add(p)
+    return deduped
+
+
+@staff_member_required
+def alert_view(request):
+    """告警和预警管理页（GET，measured 告警列表）。
+
+    GET 参数（全部可选）：channel / alert_type / status / verdict /
+    start_ts / end_ts / limit / page。时间戳支持 ISO 8601 或 Unix 秒。
+    Container 未就绪时渲染占位页。
+    """
+    filters = _parse_alert_filters(request.GET)
+    limit = _parse_alert_limit(request.GET.get('limit'))
+    page = _parse_alert_page(request.GET.get('page'))
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return _render_state_page(request, err, '告警和预警管理')
+
+    # 总行数（分页用，与 query_alerts_filtered 共用同一套筛选条件）
+    try:
+        total_count = c.sqlite.count_alerts_filtered(
+            channel=filters['channel'],
+            alert_type=filters['alert_type'],
+            llm_verdict=filters['llm_verdict'],
+            human_verdict=filters['human_verdict'],
+            verdict=filters['verdict'],
+            start_ts=filters['start_ts'],
+            end_ts=filters['end_ts'],
+        )
+    except Exception as e:
+        logger.warning("alert count_alerts_filtered failed: %s", e, exc_info=True)
+        total_count = 0
+
+    # 计算分页：page 超出 total_pages 时兜底到最后一页
+    total_pages = max(1, math.ceil(total_count / limit)) if total_count > 0 else 1
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * limit
+
+    # 拉取告警（query_alerts_filtered 已按 created_at DESC 排序）
+    try:
+        rows = c.sqlite.query_alerts_filtered(
+            channel=filters['channel'],
+            alert_type=filters['alert_type'],
+            llm_verdict=filters['llm_verdict'],
+            human_verdict=filters['human_verdict'],
+            verdict=filters['verdict'],
+            start_ts=filters['start_ts'],
+            end_ts=filters['end_ts'],
+            limit=limit,
+            offset=offset,
+        )
+    except Exception as e:
+        logger.warning("alert query_alerts_filtered failed: %s", e, exc_info=True)
+        rows = []
+
+    # 传感器元信息（名+单位）
+    sensor_meta = _build_sensor_meta(getattr(c, 'config', None))
+
+    # 给每行加徽章 + 传感器名 + 单位
+    decorated = []
+    for r in rows:
+        item = dict(r)
+        item['alert_type_badge'] = _alert_type_badge(r.get('alert_type'))
+        item['llm_verdict_badge'] = _verdict_badge(r.get('llm_verdict'))
+        item['human_verdict_badge'] = _verdict_badge(r.get('human_verdict'))
+        item['final_status_badge'] = _final_status_badge(r.get('final_status'))
+        # raw_snapshot 末点 = 遥测值
+        raw_value = None
+        snap = r.get('raw_snapshot')
+        if isinstance(snap, list) and snap:
+            last = snap[-1]
+            if isinstance(last, (int, float)):
+                raw_value = float(last)
+        item['raw_value'] = raw_value
+        # 传感器名 + 单位
+        meta = sensor_meta.get(r.get('channel'))
+        item['sensor_name'] = meta['sensor_name'] if meta else (r.get('channel') or '—')
+        item['unit'] = meta['unit'] if meta else ''
+        decorated.append(item)
+
+    is_superuser = request.user.is_authenticated and request.user.is_superuser
+
+    # 当前筛选状态回填到模板（form 控件显示当前值）
+    current_filters = {
+        'channel': filters['channel'] or '',
+        'alert_type': filters['alert_type'] or '',
+        'llm_verdict': filters['llm_verdict'] or '',
+        'human_verdict': filters['human_verdict'] or '',
+        'verdict': filters['verdict'] or '',
+        'start_ts': request.GET.get('start_ts', ''),
+        'end_ts': request.GET.get('end_ts', ''),
+    }
+
+    return render(request, 'phm_site/admin/alert.html', {
+        'page_title': '告警和预警管理',
+        'rows': decorated,
+        'row_count': len(decorated),
+        'limit': limit,
+        'current_filters': current_filters,
+        'is_superuser': is_superuser,
+        # 分页
+        'total_count': total_count,
+        'page': page,
+        'total_pages': total_pages,
+        'page_range': _build_page_range(page, total_pages),
+        # AJAX 端点
+        'api_detail_url': reverse('phm_admin_alert_detail', args=[0]).replace('/0/', '/__ID__/'),
+        'api_annotate_url': reverse('phm_admin_alert_annotate'),
+        'api_delete_url': reverse('phm_admin_alert_delete'),
+        'api_diagnose_url': reverse('phm_admin_alert_diagnose'),
+        'api_diagnose_status_url': reverse('phm_admin_alert_diagnose_status'),
+        'api_export_url': reverse('phm_admin_alert_export'),
+        'api_create_url': reverse('phm_admin_alert_create'),
+    })
+
+
+@staff_member_required
+@require_http_methods(['GET'])
+def alert_detail_api(request, alert_id):
+    """告警详情（抽屉用）。
+
+    返回单条告警的完整数据：raw_snapshot / score_snapshot / 描述 / LLM
+    诊断文本（从 DiagnosisService 缓存或即时调用获取）/ 当前 verdict。
+    """
+    try:
+        aid = int(alert_id)
+    except (TypeError, ValueError):
+        return JsonResponse({'status': 'error', 'message': '非法 alert_id'}, status=400)
+    if aid <= 0:
+        return JsonResponse({'status': 'error', 'message': 'alert_id 必须 > 0'}, status=400)
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'PHM 服务未就绪：{}'.format(err.get('phm_state'))},
+                            status=503)
+
+    # 直接查 SQLiteStore.query_alerts_filtered，限定 id（白名单内已含此参数）
+    # 但 query_alerts_filtered 没有 id 参数，这里用更直接的 SQL
+    try:
+        row = c.sqlite.get_alert_by_id(aid)
+    except AttributeError:
+        # 老版本没有 get_alert_by_id，fallback 到 query_alerts_filtered 全量过滤
+        all_rows = c.sqlite.query_alerts_filtered(limit=1000)
+        row = next((r for r in all_rows if r.get('id') == aid), None)
+    except Exception as e:
+        logger.warning("alert_detail query failed: %s", e, exc_info=True)
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+
+    if not row:
+        return JsonResponse({'status': 'error', 'message': f'告警 {aid} 不存在'},
+                            status=404)
+
+    # LLM 诊断文本：从 diagnosis_records 查缓存
+    diagnosis_text = ''
+    diagnosis_error = None
+    try:
+        diag = c.sqlite.get_diagnosis(row.get('channel'), row.get('alert_type'),
+                                       row.get('created_at'))
+        if diag:
+            diagnosis_text = diag.get('diagnosis') or ''
+            diagnosis_error = diag.get('error')
+    except Exception as e:
+        logger.debug("get_diagnosis failed: %s", e)
+
+    # 传感器元信息（名+单位）
+    sensor_meta = _build_sensor_meta(getattr(c, 'config', None))
+    meta = sensor_meta.get(row.get('channel'))
+
+    return JsonResponse({
+        'status': 'ok',
+        'alert': {
+            'id': row.get('id'),
+            'channel': row.get('channel'),
+            'alert_type': row.get('alert_type'),
+            'score': row.get('score'),
+            'message': row.get('message') or '',
+            'created_at': row.get('created_at'),
+            'status': row.get('status'),
+            'llm_verdict': row.get('llm_verdict'),
+            'human_verdict': row.get('human_verdict'),
+            'final_status': row.get('final_status'),
+            'raw_snapshot': row.get('raw_snapshot'),
+            'score_snapshot': row.get('score_snapshot'),
+            'sensor_name': meta['sensor_name'] if meta else (row.get('channel') or '—'),
+            'unit': meta['unit'] if meta else '',
+        },
+        'diagnosis': {
+            'text': diagnosis_text,
+            'error': diagnosis_error,
+        },
+    })
+
+
+@staff_member_required
+@require_http_methods(['POST'])
+def alert_annotate_api(request):
+    """批量标注（实警/虚警/待定）。仅超管。
+
+    入参 JSON: {ids: [int], verdict: 'real'|'false_alarm'|'uncertain'}
+    """
+    ok, err_resp = _require_superuser(request)
+    if not ok:
+        return err_resp
+    try:
+        body = json.loads(request.body or b'{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'status': 'error', 'message': '请求体不是合法 JSON'},
+                            status=400)
+    ids = _parse_id_list(body.get('ids'))
+    verdict = body.get('verdict')
+    if not ids:
+        return JsonResponse({'status': 'error', 'message': '未提供有效 id'},
+                            status=400)
+    if verdict not in ('real', 'false_alarm', 'uncertain'):
+        return JsonResponse({'status': 'error', 'message': 'verdict 非法'},
+                            status=400)
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'PHM 服务未就绪：{}'.format(err.get('phm_state'))},
+                            status=503)
+    try:
+        n = c.sqlite.update_alert_verdict_by_ids(ids, verdict, is_llm=False)
+    except Exception as e:
+        logger.warning("alert_annotate failed: %s", e, exc_info=True)
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+    return JsonResponse({'status': 'ok', 'updated': n, 'verdict': verdict})
+
+
+@staff_member_required
+@require_http_methods(['POST'])
+def alert_delete_api(request):
+    """批量软删（移到回收站）。仅超管。
+
+    入参 JSON: {ids: [int]}
+    """
+    ok, err_resp = _require_superuser(request)
+    if not ok:
+        return err_resp
+    try:
+        body = json.loads(request.body or b'{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'status': 'error', 'message': '请求体不是合法 JSON'},
+                            status=400)
+    ids = _parse_id_list(body.get('ids'))
+    if not ids:
+        return JsonResponse({'status': 'error', 'message': '未提供有效 id'},
+                            status=400)
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'PHM 服务未就绪：{}'.format(err.get('phm_state'))},
+                            status=503)
+    try:
+        n = c.sqlite.delete_by_ids('alert_records', ids)
+    except Exception as e:
+        logger.warning("alert_delete failed: %s", e, exc_info=True)
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+    return JsonResponse({'status': 'ok', 'deleted': n})
+
+
+@staff_member_required
+@require_http_methods(['POST'])
+def alert_diagnose_api(request):
+    """触发 LLM 诊断（staff 可用，只读语义）。单条或批量。
+
+    入参 JSON: {ids: [int], force_refresh?: bool}
+    行为：在线程池里循环调 DiagnosisService.diagnose(...)，进度走 status 端点。
+    """
+    try:
+        body = json.loads(request.body or b'{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'status': 'error', 'message': '请求体不是合法 JSON'},
+                            status=400)
+    ids = _parse_id_list(body.get('ids'))
+    force_refresh = bool(body.get('force_refresh', False))
+    if not ids:
+        return JsonResponse({'status': 'error', 'message': '未提供有效 id'},
+                            status=400)
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'PHM 服务未就绪：{}'.format(err.get('phm_state'))},
+                            status=503)
+
+    # 已有任务在跑：拒绝（避免并发触发多个）
+    if _diagnose_progress.get('running'):
+        return JsonResponse({'status': 'error',
+                             'message': '已有诊断任务在跑，请等结束后再触发'},
+                            status=409)
+
+    # 取目标 alert 的 (channel, alert_type, alert_ts) 三元组
+    targets = []
+    for aid in ids:
+        try:
+            row = c.sqlite.get_alert_by_id(aid)
+        except AttributeError:
+            all_rows = c.sqlite.query_alerts_filtered(limit=1000)
+            row = next((r for r in all_rows if r.get('id') == aid), None)
+        except Exception:
+            row = None
+        if row and row.get('channel') and row.get('created_at'):
+            targets.append((row['channel'], row.get('alert_type', 'measured'),
+                            row['created_at']))
+
+    if not targets:
+        return JsonResponse({'status': 'error', 'message': '没有可诊断的告警'},
+                            status=400)
+
+    # 初始化进度并提交到线程池
+    _diagnose_progress.update(
+        running=True, done=0, total=len(targets), errors=0,
+        started_at=_time.time(), finished_at=0.0,
+    )
+    _diagnose_executor.submit(_run_diagnose_batch, c, targets, force_refresh)
+
+    return JsonResponse({'status': 'ok', 'started': True, 'total': len(targets)})
+
+
+def _run_diagnose_batch(container, targets, force_refresh):
+    """批量诊断 worker（线程池里执行）。
+
+    直接调 DiagnosisService.diagnose(...) —— 它内部已带缓存（重复点不会重调
+    LLM，除非 force_refresh=True）。
+    """
+    diag = getattr(container, 'diagnosis', None)
+    if diag is None:
+        _diagnose_progress.update(running=False, errors=len(targets),
+                                   finished_at=_time.time())
+        return
+    for channel, alert_type, alert_ts in targets:
+        try:
+            diag.diagnose(channel, alert_type=alert_type,
+                          alert_ts=alert_ts, force_refresh=force_refresh)
+            _diagnose_progress['done'] += 1
+        except Exception as e:
+            logger.warning("diagnose failed for %s: %s", channel, e)
+            _diagnose_progress['errors'] += 1
+    _diagnose_progress['running'] = False
+    _diagnose_progress['finished_at'] = _time.time()
+
+
+@staff_member_required
+@require_http_methods(['GET'])
+def alert_diagnose_status_api(request):
+    """查询诊断进度。staff 可用。"""
+    return JsonResponse({'status': 'ok', 'progress': dict(_diagnose_progress)})
+
+
+@staff_member_required
+@require_http_methods(['GET'])
+def alert_export_api(request):
+    """导出告警为 CSV/JSON。
+
+    GET 参数：
+      - format: 'csv'（默认，UTF-8 BOM）/ 'json'
+      - ids: 逗号分隔（可选，指定导出某些 id；不填则按当前筛选）
+      - 其他筛选参数同 alert_view（channel/alert_type/status/verdict/时间窗）
+    """
+    fmt = request.GET.get('format', 'csv').lower()
+    if fmt not in ('csv', 'json'):
+        fmt = 'csv'
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'PHM 服务未就绪：{}'.format(err.get('phm_state'))},
+                            status=503)
+
+    # 优先按 ids 导出；否则按筛选参数（与列表页一致）
+    ids_raw = request.GET.get('ids')
+    ids = _parse_id_list(ids_raw) if ids_raw else []
+    if ids:
+        # 按 id 列表查（无筛选）
+        rows = []
+        for aid in ids:
+            try:
+                row = c.sqlite.get_alert_by_id(aid)
+            except AttributeError:
+                continue
+            except Exception:
+                continue
+            if row:
+                rows.append(row)
+    else:
+        filters = _parse_alert_filters(request.GET)
+        # 导出放宽 limit 上限到 10 万（需求书 L114：每通道上限 10 万行）
+        rows = c.sqlite.query_alerts_filtered(
+            channel=filters['channel'],
+            alert_type=filters['alert_type'],
+            llm_verdict=filters['llm_verdict'],
+            human_verdict=filters['human_verdict'],
+            verdict=filters['verdict'],
+            start_ts=filters['start_ts'],
+            end_ts=filters['end_ts'],
+            limit=100000,
+        )
+
+    # 序列化为 5 列（需求书 L114）：channel/timestamp/raw_value/anomaly_score/received_at_iso
+    def _iso(ts):
+        if ts is None:
+            return ''
+        try:
+            return _dt.datetime.fromtimestamp(float(ts)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        except Exception:
+            return ''
+
+    def _raw_value(snap):
+        if isinstance(snap, list) and snap:
+            last = snap[-1]
+            if isinstance(last, (int, float)):
+                return float(last)
+        return ''
+
+    serialised = [{
+        'channel': r.get('channel') or '',
+        'timestamp': r.get('created_at') or '',
+        'raw_value': _raw_value(r.get('raw_snapshot')),
+        'anomaly_score': r.get('score') if r.get('score') is not None else '',
+        'received_at_iso': _iso(r.get('ingested_at') or r.get('created_at')),
+    } for r in rows]
+
+    if fmt == 'json':
+        payload = json.dumps({'count': len(serialised), 'alerts': serialised},
+                             ensure_ascii=False, indent=2)
+        resp = HttpResponse(payload, content_type='application/json; charset=utf-8')
+        resp['Content-Disposition'] = (
+            'attachment; filename="phm_alerts.json"'
+        )
+        return resp
+
+    # CSV（UTF-8 BOM，Excel 直开）
+    import csv
+    import io as _io
+
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(['channel', 'timestamp', 'raw_value', 'anomaly_score',
+                     'received_at_iso'])
+    for row in serialised:
+        writer.writerow([row['channel'], row['timestamp'], row['raw_value'],
+                         row['anomaly_score'], row['received_at_iso']])
+
+    # 流式响应（大文件友好）
+    def _stream():
+        yield b'\xef\xbb\xbf'  # UTF-8 BOM
+        yield buf.getvalue().encode('utf-8')
+
+    resp = StreamingHttpResponse(_stream(), content_type='text/csv; charset=utf-8')
+    resp['Content-Disposition'] = 'attachment; filename="phm_alerts.csv"'
+    return resp
+
+
+@staff_member_required
+@require_http_methods(['POST'])
+def alert_create_api(request):
+    """人工补录告警（漏检时用）。仅超管。
+
+    入参 JSON: {channel: str, score: float, message?: str,
+                created_at?: float (ISO 字符串或 Unix 秒),
+                raw_snapshot?: list[float], score_snapshot?: list[float]}
+    """
+    ok, err_resp = _require_superuser(request)
+    if not ok:
+        return err_resp
+    try:
+        body = json.loads(request.body or b'{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'status': 'error', 'message': '请求体不是合法 JSON'},
+                            status=400)
+
+    channel = body.get('channel')
+    if not channel or not isinstance(channel, str):
+        return JsonResponse({'status': 'error', 'message': 'channel 必填且为字符串'},
+                            status=400)
+
+    try:
+        score = float(body.get('score', 0))
+    except (TypeError, ValueError):
+        return JsonResponse({'status': 'error', 'message': 'score 必须为数字'},
+                            status=400)
+
+    message = str(body.get('message') or '')
+    created_at = _parse_iso_or_float(body.get('created_at'))
+    raw_snapshot = body.get('raw_snapshot')
+    if raw_snapshot is not None and not isinstance(raw_snapshot, list):
+        return JsonResponse({'status': 'error', 'message': 'raw_snapshot 必须为数组'},
+                            status=400)
+    score_snapshot = body.get('score_snapshot')
+    if score_snapshot is not None and not isinstance(score_snapshot, list):
+        return JsonResponse({'status': 'error', 'message': 'score_snapshot 必须为数组'},
+                            status=400)
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'PHM 服务未就绪：{}'.format(err.get('phm_state'))},
+                            status=503)
+
+    try:
+        new_id = c.sqlite.insert_alert_manual(
+            channel=channel, score=score, message=message,
+            created_at=created_at,
+            raw_snapshot=raw_snapshot,
+            score_snapshot=score_snapshot,
+        )
+    except Exception as e:
+        logger.warning("alert_create failed: %s", e, exc_info=True)
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+
+    if new_id is None:
+        return JsonResponse({'status': 'error', 'message': '插入失败'}, status=500)
+    return JsonResponse({'status': 'ok', 'id': new_id})
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 第 6 页：设备树管理（左树 + 右编辑面板 + 拖拽 3 语义 + 防成环）
+# ════════════════════════════════════════════════════════════════════════════
+# 需求书 §后台「设备树管理」：
+#   左树（新建文件夹/传感器/拖拽 3 种语义 + 防成环）+ 右编辑面板
+#   （名称/健康度计算方式/数据源下拉/传输块大小/描述/@命令/应用/删除）
+#   + 特殊传感器 * 标注 + 不参与轮播。
+#
+# 决策（已确认）：
+#   - 模型绑定延续 @ 命令隐式（schema 不改）
+#   - service 层零改动：ConfigService.save 已就绪（空树保护 + 重复 sourceId 校验 + TCP 推送）
+#   - 拖拽防成环在前端 JS 实现（DFS 检测祖先链），后端不重做
+
+# space_daq_channels.json 位置（与 system_config 同目录）
+_SPACE_CHANNELS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "data", "space_daq_channels.json",
+)
+
+
+def _load_space_channels():
+    """读取 space_daq_channels.json，给设备树「数据源下拉」用。
+
+    返回 [{id, source_id, label, enabled}] 列表。文件缺失返回 []。
+    """
+    if not os.path.exists(_SPACE_CHANNELS_PATH):
+        return []
+    try:
+        with open(_SPACE_CHANNELS_PATH, encoding="utf-8") as f:
+            raw = json.load(f)
+        channels = raw.get('channels', []) if isinstance(raw, dict) else []
+        out = []
+        for ch in channels:
+            if not isinstance(ch, dict):
+                continue
+            out.append({
+                'id': ch.get('id'),
+                'source_id': ch.get('source_id') or ch.get('sourceId') or '',
+                'label': ch.get('label') or ch.get('source_id') or '',
+                'enabled': bool(ch.get('enabled', True)),
+            })
+        return out
+    except Exception:
+        logger.warning("failed to read space_daq_channels.json", exc_info=True)
+        return []
+
+
+def _mark_special_sensors(nodes):
+    """递归给 sensor 加 _special 标记（含 @rul 命令或 isSpecial=true）。
+
+    返回新的树（深拷贝，避免污染 service 内存）。前端依据此标记加 * 标注。
+    """
+    if not isinstance(nodes, list):
+        return []
+    import copy
+    out = []
+    for n in nodes:
+        if not isinstance(n, dict):
+            continue
+        m = copy.deepcopy(n)
+        if m.get('type') == 'sensor':
+            desc = m.get('description') or ''
+            is_special = bool(m.get('isSpecial')) or '@rul' in desc
+            m['_special'] = is_special
+        children = m.get('children')
+        if children:
+            m['children'] = _mark_special_sensors(children)
+        out.append(m)
+    return out
+
+
+@staff_member_required
+def device_tree_view(request):
+    """设备树管理页（GET）。
+
+    Container 未就绪时渲染占位页。Container 就绪后渲染左树 + 右空面板，
+    前端 JS 负责选中节点、编辑、拖拽、防成环、保存。
+    """
+    c, err = _container_or_error(request)
+    if c is None:
+        return _render_state_page(request, err, '设备树管理')
+
+    try:
+        cfg = c.config.load()
+        tree = _mark_special_sensors(cfg.get('device_tree') or [])
+    except Exception as e:
+        logger.warning("device_tree load failed: %s", e, exc_info=True)
+        tree = []
+
+    channels = _load_space_channels()
+
+    is_superuser = request.user.is_authenticated and request.user.is_superuser
+    aggregation_strategy = cfg.get('aggregation_strategy', 'min') if isinstance(cfg, dict) else 'min'
+
+    return render(request, 'phm_site/admin/device_tree.html', {
+        'page_title': '设备树管理',
+        'tree_json': json.dumps(tree, ensure_ascii=False),
+        'channels_json': json.dumps(channels, ensure_ascii=False),
+        'aggregation_strategy': aggregation_strategy,
+        'is_superuser': is_superuser,
+        'save_url': reverse('phm_admin_device_tree_save'),
+        'channels_api_url': reverse('phm_admin_device_tree_channels'),
+    })
+
+
+@staff_member_required
+@require_http_methods(['GET'])
+def device_tree_space_channels_api(request):
+    """数据源下拉的数据源（GET）。
+
+    返回 space_daq_channels.json 内容（与 device_tree_view 注入的 channels_json 同源）。
+    提供独立端点供前端动态刷新（管理员改了 space_daq_channels.json 后无需 reload 页面）。
+    """
+    return JsonResponse({
+        'status': 'ok',
+        'channels': _load_space_channels(),
+    })
+
+
+@staff_member_required
+@require_http_methods(['POST'])
+def device_tree_save_api(request):
+    """保存整树（POST，仅超管）。
+
+    入参 JSON: 整个 device_config.json 的 body（含 device_tree + aggregation_strategy）。
+    也可以只传 {device_tree: [...]}（aggregation_strategy 缺省时保留旧值）。
+    """
+    ok, err_resp = _require_superuser(request)
+    if not ok:
+        return err_resp
+    try:
+        body = json.loads(request.body or b'{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'status': 'error', 'message': '请求体不是合法 JSON'},
+                            status=400)
+    if not isinstance(body, dict):
+        return JsonResponse({'status': 'error', 'message': '请求体必须是 JSON 对象'},
+                            status=400)
+    if 'device_tree' not in body:
+        return JsonResponse({'status': 'error', 'message': '缺少 device_tree 字段'},
+                            status=400)
+    tree = body.get('device_tree')
+    if not isinstance(tree, list):
+        return JsonResponse({'status': 'error', 'message': 'device_tree 必须为数组'},
+                            status=400)
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'PHM 服务未就绪：{}'.format(err.get('phm_state'))},
+                            status=503)
+
+    try:
+        result = c.config.save(body)
+    except Exception as e:
+        logger.warning("device_tree save failed: %s", e, exc_info=True)
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+
+    if result.get('status') != 'ok':
+        return JsonResponse(result, status=400)
+    return JsonResponse(result)

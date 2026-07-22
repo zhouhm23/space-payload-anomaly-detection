@@ -1,5 +1,13 @@
 {% extends "phm_site/admin/admin_base.html" %}
 
+{% block extrahead %}
+{{ block.super }}
+{% if state == 'initializing' %}
+{# 初始化中自动每 5 秒刷新，服务就绪后自动跳到真实页面，用户无需手动操作 #}
+<meta http-equiv="refresh" content="5">
+{% endif %}
+{% endblock %}
+
 {% block content %}
 <div class="phm-admin-shell">
   <div class="phm-page-header">
@@ -19,7 +27,11 @@
       </p>
       {% endif %}
       <p class="phm-text-dim" style="margin-top: 16px; font-size: 13px;">
-        服务就绪后请 <a href="javascript:location.reload()" style="color: var(--phm-blue);">刷新页面</a>
+        {% if state == 'initializing' %}
+          页面将每 5 秒自动刷新，服务就绪后自动跳转
+        {% else %}
+          <a href="javascript:location.reload()" style="color: var(--phm-blue);">刷新页面</a>
+        {% endif %}
       </p>
     </div>
   </div>

@@ -47,6 +47,60 @@ __all__ = ["SQLiteStore"]
 
 _DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "phm.db"
 
+
+def _build_alert_where_clause(
+    *,
+    channel: str | None = None,
+    alert_type: str | None = None,
+    status: str | None = None,
+    verdict: str | None = None,
+    llm_verdict: str | None = None,
+    human_verdict: str | None = None,
+    start_ts: float | None = None,
+    end_ts: float | None = None,
+) -> tuple[str, list]:
+    """构建 alert_records 的 WHERE 子句片段 + 参数列表。
+
+    供 ``query_alerts_filtered`` 和 ``count_alerts_filtered`` 共用，避免筛选
+    逻辑在两处重复维护。返回的 sql 片段以 ``AND`` 开头（拼到
+    ``WHERE is_deleted = 0`` 之后），参数顺序与占位符一致。
+    """
+    parts: list[str] = []
+    params: list = []
+    if channel:
+        parts.append("channel = ?")
+        params.append(channel)
+    if alert_type:
+        parts.append("alert_type = ?")
+        params.append(alert_type)
+    if status:
+        parts.append("status = ?")
+        params.append(status)
+    if verdict:
+        parts.append("(llm_verdict = ? OR human_verdict = ?)")
+        params.extend([verdict, verdict])
+    if llm_verdict:
+        if llm_verdict == 'none':
+            parts.append("llm_verdict IS NULL")
+        else:
+            parts.append("llm_verdict = ?")
+            params.append(llm_verdict)
+    if human_verdict:
+        if human_verdict == 'none':
+            parts.append("human_verdict IS NULL")
+        else:
+            parts.append("human_verdict = ?")
+            params.append(human_verdict)
+    if start_ts is not None:
+        parts.append("created_at >= ?")
+        params.append(start_ts)
+    if end_ts is not None:
+        parts.append("created_at <= ?")
+        params.append(end_ts)
+    if parts:
+        return " AND " + " AND ".join(parts), params
+    return "", params
+
 _SCHEMA = """
 -- Per-block three-layer cascade detection results
 CREATE TABLE IF NOT EXISTS detection_results (
@@ -1392,6 +1446,85 @@ class SQLiteStore:
             logger.warning("update_alert_verdict_by_ids failed", exc_info=True)
             return 0
 
+    def get_alert_by_id(self, alert_id: int) -> dict | None:
+        """按 id 查单条告警（含 raw_snapshot/score_snapshot 解析）。
+
+        告警详情抽屉用。返回字段与 ``query_alerts_filtered`` 一致；
+        未命中返回 None。
+        """
+        if not self.enabled or self._conn is None:
+            return None
+        try:
+            aid = int(alert_id)
+        except (TypeError, ValueError):
+            return None
+        if aid <= 0:
+            return None
+        try:
+            cur = self._conn.execute(
+                "SELECT id, channel, alert_type, score, message, created_at, status, "
+                "       verified_at, llm_verdict, human_verdict, raw_snapshot, "
+                "       score_snapshot, ingested_at "
+                "FROM alert_records WHERE id = ? AND is_deleted = 0",
+                [aid],
+            )
+            r = cur.fetchone()
+        except Exception:
+            logger.warning("get_alert_by_id failed", exc_info=True)
+            return None
+        if not r:
+            return None
+        llm_v = r[8]
+        human_v = r[9]
+        try:
+            raw_snap = json.loads(r[10]) if r[10] else None
+        except (json.JSONDecodeError, TypeError):
+            raw_snap = None
+        try:
+            score_snap = json.loads(r[11]) if r[11] else None
+        except (json.JSONDecodeError, TypeError):
+            score_snap = None
+        return {
+            "id": r[0], "channel": r[1], "alert_type": r[2], "score": r[3],
+            "message": r[4], "created_at": r[5], "status": r[6],
+            "verified_at": r[7], "llm_verdict": llm_v, "human_verdict": human_v,
+            "raw_snapshot": raw_snap, "score_snapshot": score_snap,
+            "ingested_at": r[12],
+            "final_status": compute_final_status(r[6], llm_v, human_v),
+        }
+
+    def count_alerts_filtered(
+        self,
+        *,
+        channel: str | None = None,
+        alert_type: str | None = None,
+        status: str | None = None,
+        verdict: str | None = None,
+        llm_verdict: str | None = None,
+        human_verdict: str | None = None,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+    ) -> int:
+        """统计符合筛选条件的 alert_records 总行数（分页计算总页数用）。
+
+        筛选参数与 ``query_alerts_filtered`` 完全一致（不含 limit/offset）。
+        失败返回 0。
+        """
+        if not self.enabled or self._conn is None:
+            return 0
+        where_sql, params = _build_alert_where_clause(
+            channel=channel, alert_type=alert_type, status=status,
+            verdict=verdict, llm_verdict=llm_verdict, human_verdict=human_verdict,
+            start_ts=start_ts, end_ts=end_ts,
+        )
+        sql = "SELECT COUNT(*) FROM alert_records WHERE is_deleted = 0" + where_sql
+        try:
+            cur = self._conn.execute(sql, params)
+            return int(cur.fetchone()[0])
+        except Exception:
+            logger.warning("count_alerts_filtered failed", exc_info=True)
+            return 0
+
     def query_alerts_filtered(
         self,
         *,
@@ -1399,14 +1532,20 @@ class SQLiteStore:
         alert_type: str | None = None,
         status: str | None = None,
         verdict: str | None = None,
+        llm_verdict: str | None = None,
+        human_verdict: str | None = None,
         start_ts: float | None = None,
         end_ts: float | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[dict]:
         """筛选查询 alert_records（告警管理页列表用）。
 
-        所有参数可选，None 表示不过滤。``verdict`` 同时匹配 llm_verdict
-        或 human_verdict（任一相等即命中，对齐仪表盘三分类语义）。
+        所有参数可选，None 表示不过滤。
+          - ``verdict``：综合（llm_verdict 或 human_verdict 任一相等即命中）
+          - ``llm_verdict``：单独过滤 LLM 诊断；'none' 表示未诊断（IS NULL）
+          - ``human_verdict``：同上
+          - ``offset``：分页偏移（默认 0，向后兼容）。配合 ``limit`` 实现翻页。
         返回字段与 ``query_alerts`` 一致，外加 ``ingested_at``。
         失败返回 ``[]``。
         """
@@ -1416,33 +1555,24 @@ class SQLiteStore:
             limit = max(1, min(int(limit), 1000))
         except (TypeError, ValueError):
             limit = 50
+        try:
+            offset = max(0, int(offset))
+        except (TypeError, ValueError):
+            offset = 0
+        where_sql, params = _build_alert_where_clause(
+            channel=channel, alert_type=alert_type, status=status,
+            verdict=verdict, llm_verdict=llm_verdict, human_verdict=human_verdict,
+            start_ts=start_ts, end_ts=end_ts,
+        )
         sql = (
             "SELECT id, channel, alert_type, score, message, created_at, status, "
             "       verified_at, llm_verdict, human_verdict, raw_snapshot, "
             "       score_snapshot, ingested_at "
-            "FROM alert_records WHERE is_deleted = 0"
+            "FROM alert_records WHERE is_deleted = 0" + where_sql
+            + " ORDER BY created_at DESC LIMIT ? OFFSET ?"
         )
-        params: list = []
-        if channel:
-            sql += " AND channel = ?"
-            params.append(channel)
-        if alert_type:
-            sql += " AND alert_type = ?"
-            params.append(alert_type)
-        if status:
-            sql += " AND status = ?"
-            params.append(status)
-        if verdict:
-            sql += " AND (llm_verdict = ? OR human_verdict = ?)"
-            params.extend([verdict, verdict])
-        if start_ts is not None:
-            sql += " AND created_at >= ?"
-            params.append(start_ts)
-        if end_ts is not None:
-            sql += " AND created_at <= ?"
-            params.append(end_ts)
-        sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
+        params.append(offset)
         try:
             cur = self._conn.execute(sql, params)
             rows = cur.fetchall()

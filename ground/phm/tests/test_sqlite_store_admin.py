@@ -399,6 +399,84 @@ class TestQueryAlertsFiltered:
         assert rows[0]["raw_snapshot"] == [1, 2, 3]
         assert rows[0]["score_snapshot"] == [0.1, 0.2]
 
+    def test_offset_pagination_skips_first_n(self, store):
+        """offset=N 跳过最新的 N 条（SQL DESC 排序的前 N 条），返回后续 limit 条。"""
+        ids = []
+        for i in range(5):
+            ids.append(_insert_alert(store, created_at=time.time() + i))
+        # 全部 5 条（按 created_at DESC 查再 reversed → 升序返回）
+        all_rows = store.query_alerts_filtered(limit=50)
+        assert len(all_rows) == 5
+        # offset=2, limit=2 跳过最新 2 条（DESC 排序的前 2 条），返回第 3-4 新的
+        page_rows = store.query_alerts_filtered(limit=2, offset=2)
+        assert len(page_rows) == 2
+        # all_rows 是升序（最旧到最新），跳过最新 2 条 = 取 all_rows[1:3]
+        assert {r["id"] for r in page_rows} == {all_rows[1]["id"], all_rows[2]["id"]}
+
+    def test_offset_zero_matches_no_offset(self, store):
+        """offset=0 行为与不传 offset 完全一致（向后兼容）。"""
+        for i in range(3):
+            _insert_alert(store, created_at=time.time() + i)
+        no_offset = store.query_alerts_filtered(limit=50)
+        zero_offset = store.query_alerts_filtered(limit=50, offset=0)
+        assert [r["id"] for r in no_offset] == [r["id"] for r in zero_offset]
+
+    def test_offset_beyond_returns_empty(self, store):
+        """offset 超出总行数时返回空列表。"""
+        _insert_alert(store)
+        rows = store.query_alerts_filtered(limit=10, offset=100)
+        assert rows == []
+
+    def test_offset_negative_clamped_to_zero(self, store):
+        """负 offset 被钳到 0。"""
+        _insert_alert(store)
+        rows = store.query_alerts_filtered(limit=10, offset=-5)
+        assert len(rows) == 1
+
+
+class TestCountAlertsFiltered:
+
+    def test_count_all_no_filters(self, store):
+        _insert_alert(store, channel="C-1")
+        _insert_alert(store, channel="C-2")
+        assert store.count_alerts_filtered() == 2
+
+    def test_count_with_channel_filter(self, store):
+        _insert_alert(store, channel="C-1")
+        _insert_alert(store, channel="C-1")
+        _insert_alert(store, channel="C-2")
+        assert store.count_alerts_filtered(channel="C-1") == 2
+        assert store.count_alerts_filtered(channel="C-2") == 1
+        assert store.count_alerts_filtered(channel="C-3") == 0
+
+    def test_count_excludes_deleted(self, store):
+        a1 = _insert_alert(store)
+        _insert_alert(store)
+        assert store.count_alerts_filtered() == 2
+        store.delete_by_ids("alert_records", [a1])
+        assert store.count_alerts_filtered() == 1
+
+    def test_count_matches_query_len(self, store):
+        """count_alerts_filtered 与 query_alerts_filtered(len) 必须一致（分页正确性前提）。"""
+        for i in range(7):
+            _insert_alert(store, channel="C-1" if i < 5 else "C-2",
+                          created_at=time.time() + i)
+        for ch in (None, "C-1", "C-2"):
+            counted = store.count_alerts_filtered(channel=ch) if ch else store.count_alerts_filtered()
+            queried = store.query_alerts_filtered(channel=ch, limit=1000) if ch else store.query_alerts_filtered(limit=1000)
+            assert counted == len(queried), f"channel={ch}: count={counted} vs len={len(queried)}"
+
+    def test_count_with_time_range(self, store):
+        t0 = time.time()
+        _insert_alert(store, created_at=t0 - 100)
+        _insert_alert(store, created_at=t0 - 50)
+        _insert_alert(store, created_at=t0)
+        assert store.count_alerts_filtered(start_ts=t0 - 60, end_ts=t0 - 40) == 1
+
+    def test_count_disabled_store(self, db_path):
+        s = SQLiteStore(db_path, enabled=False)
+        assert s.count_alerts_filtered() == 0
+
 
 # ── insert_alert_manual ──────────────────────────────────────────────────
 

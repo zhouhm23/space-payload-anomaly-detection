@@ -5,6 +5,7 @@
     {"channel": "C-1",  "sourceId": "file:NASA-MSL/C-1",   "loop": true},
     {"channel": "D-14", "sourceId": "file:NASA-MSL/D-14",  "loop": true},
     {"channel": "VS-sine",       "sourceId": "virtual:sine",       "signal_freq_hz": 2.0},
-    {"channel": "VS-multi_sine", "sourceId": "virtual:multi_sine", "signal_freq_hz": 5.0}
+    {"channel": "VS-multi_sine", "sourceId": "virtual:multi_sine", "signal_freq_hz": 5.0},
+    {"channel": "CMAPSS_FD001_1", "sourceId": "cmapss:FD001:1", "loop": true, "sample_rate": 1.0}
   ]
 }

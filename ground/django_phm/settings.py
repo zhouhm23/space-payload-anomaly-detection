@@ -173,6 +173,8 @@ SIMPLEUI_HOME_INFO = False
 SIMPLEUI_ANALYSIS = False
 # 登录后台默认跳转仪表盘（v1.1 新增）
 SIMPLEUI_INDEX = '/admin/phm_site/dashboard/'
+# 品牌名：登录页 / 首页大标题（原默认 "Django administration"，用户反馈应改为本系统简称）
+SIMPLEUI_HOME_TITLE = '天地PHM 管理后台'
 # 自定义菜单（对齐需求书 §后台 9 项）：首页/用户管理/审计日志走 SimpleUI 默认，
 # 仪表盘/告警与预警/回收站/设备树/系统设置/模型管理为本系统自定义页。
 # system_keep=True 让 SimpleUI 自动列出 django.contrib.auth (User/Group →「认证和授权」)
@@ -182,6 +184,11 @@ SIMPLEUI_INDEX = '/admin/phm_site/dashboard/'
 # 「权限说明」是用户管理页上的按钮（需求书原文："用户管理...加个说明按钮，
 # 打开显示权限说明面板"），URL 保留但不挂菜单——按钮嵌入待用户管理页改造时完成。
 SIMPLEUI_CONFIG = {
+    # 品牌名（左侧菜单头部主标题 + 副标题 + 图标）。fas fa-satellite-dish
+    # 契合「天地协同」（卫星↔地面站）语义。
+    'title': '天地PHM',
+    'subtitle': '空间载荷健康管理平台',
+    'icon': 'fas fa-satellite-dish',
     'system_keep': True,
     'menu_display': ['运营管理', '配置管理', '认证和授权', '管理'],
     'menus': [

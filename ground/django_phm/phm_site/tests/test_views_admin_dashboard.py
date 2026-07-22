@@ -783,15 +783,26 @@ class DashboardViewAutoRefreshTest(TestCase):
         ar_qs.objects.filter.return_value.only.return_value = []
         return sb, ar_qs
 
-    def test_default_off_no_auto_param(self):
-        """无 ?auto=1 时 checkbox 未勾选。"""
+    def test_default_on_no_auto_param(self):
+        """无 ?auto 参数时默认勾选自动刷新（需求书反馈：dashboard 默认开自动刷新）。"""
         self.client.force_login(self.staff)
         self._setup_mocks()
         resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 200)
-        # checkbox 不带 checked 属性
-        self.assertNotIn('checked', resp.content.decode('utf-8').split(
-            'id="phm-auto-refresh-toggle"')[1].split('>')[0])
+        body = resp.content.decode('utf-8')
+        # checkbox 应带 checked
+        toggle_part = body.split('id="phm-auto-refresh-toggle"')[1].split('>')[0]
+        self.assertIn('checked', toggle_part)
+
+    def test_auto_param_zero_disables_refresh(self):
+        """?auto=0 显式关闭自动刷新。"""
+        self.client.force_login(self.staff)
+        self._setup_mocks()
+        resp = self.client.get(self.url, {'auto': '0'})
+        self.assertEqual(resp.status_code, 200)
+        body = resp.content.decode('utf-8')
+        toggle_part = body.split('id="phm-auto-refresh-toggle"')[1].split('>')[0]
+        self.assertNotIn('checked', toggle_part)
 
     def test_auto_param_enables_refresh(self):
         """?auto=1 时 checkbox 勾选 + 渲染倒计时脚本。"""
