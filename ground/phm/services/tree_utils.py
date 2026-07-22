@@ -172,11 +172,33 @@ def get_aggregation_strategy(config: dict[str, Any]) -> str:
     return strat if strat in ("min", "mean") else "min"
 
 
+def is_special_sensor(node: Node) -> bool:
+    """Return True if the sensor is a "special" channel (excluded from
+    telemetry rotation and health aggregation).
+
+    A sensor is special when its ``description`` carries an ``@rul`` command
+    (RUL degradation channel driven by the C-MAPSS benchmark, which runs a
+    separate prediction pipeline and should not skew anomaly-based health).
+    Mirrors the front-end rule in ``device_tree.html`` (``/@rul/.test(desc)``)
+    so back-end and UI agree on which sensors are special — single source of
+    truth via the ``@rul`` marker in the sensor description.
+
+    Non-sensor nodes (folders) are never special.
+    """
+    if not isinstance(node, dict):
+        return False
+    if not _is_sensor(node):
+        return False
+    desc = node.get("description") or ""
+    return "@rul" in str(desc)
+
+
 __all__ = [
     "get_flat_sensors",
     "get_folders",
     "get_sensor_to_folder",
     "get_sensors_in_folder",
     "get_aggregation_strategy",
+    "is_special_sensor",
     "remove_node",
 ]

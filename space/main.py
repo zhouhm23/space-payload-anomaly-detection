@@ -307,15 +307,28 @@ def main():
         )
 
         # ★ C12: AlertPacket must carry raw_window + score_window snapshots
+        # ★ C13: AlertPacket must carry acq_ts (真实异常采样时刻) so the
+        #        ground segment + 前端红点 can align to the telemetry time
+        #        axis. acq_ts = t_acq_start + argmax(scores)/sample_rate.
+        #        旧版只传 wall-clock time.time()，与遥测采样网格属不同时钟，
+        #        导致前端红点偏离真实异常位置（Day22 issue 3.3b）。
         if scores is not None and len(scores) > 0:
             mx = float(np.nanmax(scores))
             if mx > ALERT_THRESHOLD:
+                # argmax 在有 NaN 时仍返回第一个最大值的位置（NaN 安全），
+                # 但要先做 nanargmax 找到真实峰值的采样索引。
+                try:
+                    peak_idx = int(np.nanargmax(scores))
+                except (ValueError, RuntimeWarning):
+                    peak_idx = int(np.argmax(scores))
+                acq_ts = (t_acq + peak_idx / sr) if (t_acq is not None and sr > 0) else None
                 server.enqueue_alert(
                     channel=ch_name,
                     score=mx,
                     step=cur_step,
                     raw_window=raw.tolist() if hasattr(raw, 'tolist') else list(raw),
                     score_window=scores.tolist() if hasattr(scores, 'tolist') else list(scores),
+                    acq_ts=acq_ts,
                 )
 
         return True

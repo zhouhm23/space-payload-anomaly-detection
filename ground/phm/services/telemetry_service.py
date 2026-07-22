@@ -241,12 +241,16 @@ class TelemetryService:
                 if p.metadata.get("exhausted", False):
                     exhausted = True
             elif isinstance(p, AlertPacket):
+                # 优先用 space 段传来的真实异常采样时刻（acq_ts），
+                # 它与遥测时间轴同源（t_acq_start 锚定），前端红点能精准对齐。
+                # 旧版 space 段不传 acq_ts，兜底用接收时刻 time.time()。
+                alert_time = p.acq_ts if p.acq_ts is not None else time.time()
                 alerts_list.append({
                     "channel": p.channel,
                     "score": p.score,
                     "step": p.step,
                     "message": p.message or f"异常分数 {p.score:.3f} 超阈值",
-                    "time": time.time(),
+                    "time": alert_time,
                     "type": "measured",
                     "raw_snapshot": p.raw_window,
                     "score_snapshot": p.score_window,

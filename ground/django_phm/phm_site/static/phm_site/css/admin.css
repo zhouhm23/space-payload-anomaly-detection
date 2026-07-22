@@ -1027,10 +1027,20 @@ a.phm-recycle-tab-switch {
 }
 .phm-tree-folder > .phm-tree-row .phm-tree-icon { color: var(--phm-yellow); }
 .phm-tree-sensor > .phm-tree-row .phm-tree-icon { color: var(--phm-cyan, #00c9db); }
-.phm-tree-drop-hover {
+/* SortableJS 拖拽视觉反馈（替代原生 HTML5 DnD 的 .phm-tree-drop-hover） */
+.phm-tree-ghost {
+  opacity: 0.4;
+  background: rgba(45, 140, 240, 0.12);
   outline: 2px dashed var(--phm-blue);
   outline-offset: -2px;
-  background: rgba(45,140,240,0.06);
+}
+.phm-tree-chosen {
+  background: rgba(45, 140, 240, 0.06);
+}
+.phm-tree-drag {
+  opacity: 0.95;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  background: var(--phm-card-bg, #1a2240);
 }
 
 /* 右编辑面板：复用 .phm-card 默认 padding */

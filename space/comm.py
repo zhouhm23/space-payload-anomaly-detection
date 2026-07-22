@@ -73,6 +73,10 @@ class AlertPacket:
     message: str = ""
     raw_window: list | None = None
     score_window: list | None = None
+    # 真实异常采样时刻（秒，epoch）：t_acq_start + argmax(scores)/sample_rate。
+    # 这是异常在遥测时间轴上的真实位置，供前端红点精准对齐。
+    # 旧版 space 段不传此字段（None），消费方需兜底用 timestamp。
+    acq_ts: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +142,8 @@ class SpaceServer:
         })
 
     def enqueue_alert(self, channel: str, score: float, step: int,
-                      message: str = "", *, raw_window=None, score_window=None):
+                      message: str = "", *, raw_window=None, score_window=None,
+                      acq_ts: float | None = None):
         self._enqueue({
             "type": "alert",
             "channel": channel,
@@ -147,6 +152,7 @@ class SpaceServer:
             "message": message,
             "raw_window": raw_window,
             "score_window": score_window,
+            "acq_ts": acq_ts,
         })
 
     def start(self):

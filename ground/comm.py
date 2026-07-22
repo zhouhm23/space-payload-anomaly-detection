@@ -77,6 +77,10 @@ class AlertPacket:
     # scrolled past the alert point by the time diagnosis runs).
     raw_window: list | None = None
     score_window: list | None = None
+    # 真实异常采样时刻（秒，epoch）：t_acq_start + argmax(scores)/sample_rate。
+    # 异常在遥测时间轴上的真实位置，供前端红点精准对齐。
+    # 旧版 space 段不传此字段（None），消费方需兜底用 timestamp。
+    acq_ts: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +266,7 @@ class GroundClient:
                         message=obj.get("message", ""),
                         raw_window=obj.get("raw_window"),
                         score_window=obj.get("score_window"),
+                        acq_ts=obj.get("acq_ts"),
                     ))
         except (socket.timeout, ConnectionRefusedError, OSError):
             pass

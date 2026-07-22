@@ -24,8 +24,10 @@ from ..config import ANOMALY_THRESHOLD
 from ..database import RingBuffer
 from .tree_utils import (
     get_aggregation_strategy,
+    get_flat_sensors,
     get_folders,
     get_sensors_in_folder,
+    is_special_sensor,
 )
 
 try:  # ConfigService lives in the same package; import lazily to avoid cycles
@@ -62,10 +64,19 @@ class HealthService:
         single-block semantics (per ``docs/产品需求书.md`` §健康度计算方式)
         should pass the sensor's transport ``blockSize`` (e.g. 512); the
         formula stays the same (``1 - 异常点数 / 总点数``).
+
+        ``@rul``-marked special sensors are excluded from both the system
+        aggregate and folder aggregation — they run a separate RUL pipeline
+        and would otherwise skew anomaly-based health (Day22 issue 3.1:
+        a C-MAPSS special channel dragged its folder to 73% while ordinary
+        siblings were 98%/100%).
         """
         per_channel_scores = self.ring.all_channel_scores(block_size)
+        excluded = self._special_channel_names()
         per_channel: dict[str, float] = {}
         for ch, scores in per_channel_scores.items():
+            if ch in excluded:
+                continue  # @rul special channels don't participate in health
             per_channel[ch] = channel_health(scores)
         if per_channel:
             system = round(sum(per_channel.values()) / len(per_channel), 3)
@@ -86,6 +97,23 @@ class HealthService:
 
         return result
 
+    def _special_channel_names(self) -> set[str]:
+        """Return the set of ``channelName``s belonging to ``@rul`` special
+        sensors, so they can be excluded from health aggregation.
+
+        Returns an empty set when no ConfigService is wired (legacy callers)
+        or when the device tree contains no special sensors.
+        """
+        if self.config_service is None:
+            return set()
+        config = self.config_service.load()
+        tree = config.get("device_tree", [])
+        return {
+            s.get("channelName")
+            for s in get_flat_sensors(tree)
+            if is_special_sensor(s) and s.get("channelName")
+        }
+
     def _aggregate_folders(self, per_channel: dict[str, float]) -> dict[str, dict] | None:
         """Build {folder_id: {name, health, strategy, channels}} from the tree.
 
@@ -102,7 +130,10 @@ class HealthService:
         out: dict[str, dict] = {}
         for folder in get_folders(tree):
             sensors = get_sensors_in_folder(tree, folder.get("id", ""))
-            ch_names = [s.get("channelName") for s in sensors if s.get("channelName")]
+            # Exclude @rul special sensors — they don't participate in health
+            # aggregation (separate RUL pipeline, would skew folder health).
+            ordinary = [s for s in sensors if not is_special_sensor(s)]
+            ch_names = [s.get("channelName") for s in ordinary if s.get("channelName")]
             ch_healths = [per_channel[ch] for ch in ch_names if ch in per_channel]
             if not ch_healths:
                 continue  # folder has no sensors with data yet — skip it

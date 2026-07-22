@@ -559,3 +559,55 @@ def test_c18_ipc_default_port_documented():
     assert re.search(r"^IPC_DEFAULT_PORT\s*=\s*\d+", ipc_src, re.MULTILINE), (
         "IPC_DEFAULT_PORT constant not defined in signal_ipc.py"
     )
+
+
+# ════════════════════════════════════════════════════════════════════════
+# C19 — AlertPacket carries acq_ts (真实异常采样时刻)
+# ════════════════════════════════════════════════════════════════════════
+# Day22 issue 3.3b：前端红点偏离真实异常位置，根因是 AlertPacket 只带
+# wall-clock time.time()（地基接收时刻），与遥测采样网格（t_acq_start 锚定）
+# 属不同时钟。修复：AlertPacket 新增 acq_ts = t_acq + argmax(scores)/sr，
+# 全链路（space → ground → sqlite.created_at → alert_points API → 前端 tsToX）
+# 传递真实采样时刻。
+
+def test_c19_alert_packet_has_acq_ts_field():
+    """AlertPacket 必须含 acq_ts 字段（真实异常采样时刻）。"""
+    from comm import AlertPacket
+    fields = AlertPacket.__dataclass_fields__
+    assert "acq_ts" in fields, "AlertPacket must have acq_ts field"
+
+
+def test_c19_space_main_computes_acq_ts_from_argmax():
+    """space/main.py 的告警路径必须用 nanargmax 算峰值位置并传 acq_ts。"""
+    src = (SPACE_DIR / "main.py").read_text(encoding="utf-8")
+    alert_lines = _lines_of(src, "enqueue_alert")
+    assert alert_lines, "enqueue_alert call not found in main.py"
+    region = _region(src, alert_lines[0] - 15, 20)  # 往前看算 acq_ts 的逻辑
+    assert "acq_ts" in region, "enqueue_alert must pass acq_ts="
+    assert "nanargmax" in region or "argmax" in region, (
+        "acq_ts must be computed from argmax/nanargmax of scores"
+    )
+
+
+def test_c19_ground_client_poll_reads_acq_ts():
+    """GroundClient.poll 解析 alert 包时必须读取 acq_ts 字段。"""
+    src = (GROUND_DIR / "comm.py").read_text(encoding="utf-8")
+    # 找 AlertPacket 构造的代码块
+    idx = _first_line(src, 'obj.get("type") == "alert"')
+    assert idx >= 0, "alert parsing branch not found in ground/comm.py"
+    region = _region(src, idx, 12)
+    assert "acq_ts" in region, (
+        "GroundClient.poll must read acq_ts when constructing AlertPacket"
+    )
+
+
+def test_c19_telemetry_service_prefers_acq_ts():
+    """TelemetryService 必须优先用 AlertPacket.acq_ts 作为告警时间，
+    而非 wall-clock time.time()。"""
+    src = (GROUND_DIR / "phm" / "services" / "telemetry_service.py").read_text(encoding="utf-8")
+    idx = _first_line(src, "isinstance(p, AlertPacket)")
+    assert idx >= 0, "AlertPacket handling not found in telemetry_service.py"
+    region = _region(src, idx, 10)
+    assert "acq_ts" in region, (
+        "telemetry_service must use p.acq_ts as alert time (fallback time.time())"
+    )

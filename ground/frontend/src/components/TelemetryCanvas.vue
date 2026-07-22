@@ -19,6 +19,7 @@ import { computed, ref, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useSystemStore } from '@/stores/system'
 import { api } from '@/api'
 import { usePoll } from '@/composables/usePoll'
+import { computeRedDots } from '@/utils/alertGeometry'
 
 const store = useSystemStore()
 const currentChannel = computed(() => store.currentChannel)
@@ -58,6 +59,59 @@ const lastFullData = ref<any[]>([])
 const gaps = ref<any[]>([])
 const threshold = ref<number>(0.5)
 const alertPoints = ref<any[]>([])  // 全通道告警点（用于点图 + 遥测图红点）
+
+// 通道数据缓存池：切换通道时先用缓存瞬时填充，消除"等待数据"空窗。
+// 业界标准做法（demo 亦有）——通道数有限（通常 < 20），无容量风险。
+// 缓存写入时机：每次 windowPoll 拉到新数据；读取时机：切换通道瞬间。
+interface CachedWindow { data: any[]; gaps: any[]; threshold: number; ts: number }
+const channelCache = new Map<string, CachedWindow>()
+
+// ── 预加载：当前通道数据到达后，异步预取下一个轮播通道 ──────────────────
+// 面向领导展示的视觉优化：切到下一通道时缓存必然命中，零空窗、零"加载中"。
+// 预取是 fire-and-forget，失败静默（缓存未命中会 fallback 到正常 tick 拉取）。
+let preloadingChannels = new Set<string>()  // 防重复预取同一通道
+async function preloadNextCarousel() {
+  const channels = store.carouselChannels
+  if (!channels || channels.length === 0) return
+  const cur = currentChannel.value
+  const curIdx = channels.indexOf(cur)
+  if (curIdx < 0) return
+  const nextCh = channels[(curIdx + 1) % channels.length]
+  if (!nextCh || nextCh === cur) return
+  if (channelCache.has(nextCh) || preloadingChannels.has(nextCh)) return
+  preloadingChannels.add(nextCh)
+  try {
+    const v = await api.window(nextCh, 2048)
+    if (v && v.data) {
+      channelCache.set(nextCh, {
+        data: v.data, gaps: v.gaps || [],
+        threshold: v.threshold || 0.5,
+        ts: Date.now(),
+      })
+    }
+  } catch (e) {
+    // 静默失败：预取不影响主流程
+  } finally {
+    preloadingChannels.delete(nextCh)
+  }
+}
+
+// ── 通道切换动画（垂直滑动 500ms，仅换通道触发） ──────────────────────────
+// 单 canvas + CSS：切换时 chart-wrapper 做 translateY + opacity 过渡，
+// canvas 内容已重画为新通道，过渡期间给出"新数据从下方滑入"的视觉。
+const chartWrapperRef = ref<HTMLDivElement | null>(null)
+let animTimer: ReturnType<typeof setTimeout> | null = null
+function triggerChannelSwitchAnim() {
+  const el = chartWrapperRef.value
+  if (!el) return
+  // 重置 → 触发回流 → 加 anim 类（确保 transition 重新播放）
+  el.classList.remove('phm-chart-switch-anim')
+  // 强制回流（offsetWidth 读取触发 reflow）
+  void el.offsetWidth
+  el.classList.add('phm-chart-switch-anim')
+  if (animTimer) clearTimeout(animTimer)
+  animTimer = setTimeout(() => el.classList.remove('phm-chart-switch-anim'), 600)
+}
 
 // 鼠标交互
 let mouseX = -1, mouseY = -1
@@ -132,6 +186,16 @@ watch(() => windowPoll.data.value, (v) => {
   lastFullData.value = v.data
   gaps.value = v.gaps || []
   threshold.value = v.threshold || sensorCfg.value?.threshold || 0.5
+  // 写入缓存池：供下次切回该通道时瞬时填充
+  if (v.channel) {
+    channelCache.set(v.channel, {
+      data: v.data, gaps: v.gaps || [],
+      threshold: v.threshold || sensorCfg.value?.threshold || 0.5,
+      ts: Date.now(),
+    })
+    // 预加载下一个轮播通道（消除切换空窗，面向领导展示的视觉优化）
+    preloadNextCarousel()
+  }
   scheduleDraw()
 })
 
@@ -147,9 +211,23 @@ watch(() => alertPoll.data.value, (v) => {
 
 watch(currentChannel, async (ch) => {
   lastWindowSig = ''
-  lastFullData.value = []
-  gaps.value = []
-  if (ch) await windowPoll.tick()
+  if (ch) {
+    // 通道切换：触发垂直滑动动画（仅换通道才动画，新数据到达不动画）
+    triggerChannelSwitchAnim()
+    // 缓存命中→瞬时填充（预加载保证通常命中，零空窗）
+    const cached = channelCache.get(ch)
+    if (cached) {
+      lastFullData.value = cached.data
+      gaps.value = cached.gaps
+      threshold.value = cached.threshold || sensorCfg.value?.threshold || 0.5
+    } else {
+      // 缓存未命中→清空（不再保留前一通道数据，避免"闪现其他通道" bug）
+      // 动画期间 canvas 被位移+透明度过渡盖住，留白不突兀
+      lastFullData.value = []
+      gaps.value = []
+    }
+    await windowPoll.tick()
+  }
   scheduleDraw()
 })
 
@@ -181,6 +259,24 @@ function resizeCanvas() {
 function formatTime(ts: number): string {
   const d = new Date(ts * 1000)
   return d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0')
+}
+
+// 横坐标刻度格式化：自适应精度。
+// 采样率 100Hz、数据窗 5.12s，秒级刻度无区分度，故用 SS.mmm（秒.毫秒）。
+// 跨度 ≥ 10s 时退化为 MM:SS（避免秒数超过 60 显示混乱）。
+// spanSec = 数据时间跨度（秒），ts = epoch 秒。
+function formatAxisTime(ts: number, spanSec: number): string {
+  const d = new Date(ts * 1000)
+  if (spanSec < 10) {
+    // SS.mmm：仅取秒+毫秒，与数据精度匹配
+    const ss = String(d.getSeconds()).padStart(2, '0')
+    const mmm = String(d.getMilliseconds()).padStart(3, '0')
+    return `${ss}.${mmm}`
+  }
+  // MM:SS
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  const ss = String(d.getSeconds()).padStart(2, '0')
+  return `${mm}:${ss}`
 }
 
 function fmt(v: number | null | undefined, digits = 3): string {
@@ -446,36 +542,28 @@ function drawChart() {
   drawRegionTitle(topH, '异常分数', C.yellow, '实测(黄实) 预测(绿虚) 阈值(红虚)')
   drawRegionTitle(topH + midH, '全通道告警点图', C.red, '实测告警(红) 预测预警(黄)')
 
-  // ── 新增：遥测图事件开始红点（告警时刻） ──────────────────────────────────
-  // 在遥测区画红色圆点标注告警发生时刻
-  // ★ 关键修复：用统一的 tsToX 映射，确保与告警点图、原始数据 x 轴完全对齐
-  for (const ap of currentChannelAlertPoints.value) {
-    const tsMsAp = ap.timestamp * 1000
-    if (tsMsAp < dataTsMin || tsMsAp > dataTsMax) continue
-    const x = tsToX(tsMsAp)
-    if (x == null) continue
-    // 取该时刻的 raw_value 作为 Y（无 raw 则用 pred）
-    let nearestIdx = -1, nearestDist = Infinity
-    for (let i = 0; i < tsMs.length; i++) {
-      const d = Math.abs(tsMs[i] - tsMsAp)
-      if (d < nearestDist) { nearestDist = d; nearestIdx = i }
-    }
-    if (nearestIdx >= 0) {
-      const v = data[nearestIdx].raw_value ?? data[nearestIdx].predicted_value
-      if (v != null) {
-        const y = topLayout.yOf(v)
-        // 红色圆点 + 光晕
-        c.beginPath()
-        c.fillStyle = 'rgba(245, 108, 108, 0.3)'
-        c.arc(x, y, 8 * dpr, 0, Math.PI * 2)
-        c.fill()
-        c.beginPath()
-        c.fillStyle = C.red
-        c.arc(x, y, 4 * dpr, 0, Math.PI * 2)
-        c.fill()
-      }
-    }
+  // ── 告警时刻红点：遥测区 + 异常分数区双标 ──────────────────────────────────
+  // 在遥测区和异常分数区都画红色圆点标注告警发生时刻，两区共享同一 X（tsToX）。
+  // ★ 关键修复（3.3a）：原版只在遥测区画红点，异常分数曲线无标注。
+  // ★ 关键修复（3.3e）：三处红点半径统一为 4*dpr（遥测区/分数区/全通道点图）。
+  // ★ 关键修复（3.3b/c）：timestamp 现在是真实采样时刻（acq_ts），与遥测轴同源。
+  // 坐标计算抽到 utils/alertGeometry.ts（纯函数，可单测）；这里只负责绘制。
+  function drawAlertDot(x: number, y: number) {
+    if (!c) return
+    c.beginPath()
+    c.fillStyle = 'rgba(245, 108, 108, 0.3)'
+    c.arc(x, y, 8 * dpr, 0, Math.PI * 2)  // 光晕（仅视觉强调，不计入"大小"）
+    c.fill()
+    c.beginPath()
+    c.fillStyle = C.red
+    c.arc(x, y, 4 * dpr, 0, Math.PI * 2)  // 实心红点（三区统一半径）
+    c.fill()
   }
+  const dots = computeRedDots(
+    data, currentChannelAlertPoints.value, tsToX,
+    (v) => topLayout.yOf(v), (v) => midLayout.yOf(v),
+  )
+  for (const d of dots) drawAlertDot(d.x, d.y)
 
   // ── 第三区：全通道告警点图 ────────────────────────────────────────────────
   drawAlertScatter(topH + midH, botH, tsToX, dataTsMin, dataTsMax)
@@ -529,6 +617,33 @@ function drawChart() {
     c.font = `${9 * dpr}px sans-serif`
     c.textAlign = 'center'
     c.fillText('数据未到达', (x1 + x2) / 2, pad.top - 4 * dpr)
+  }
+
+  // ── 横坐标时间刻度（底部 pad.bottom 区域） ────────────────────────────────
+  // 采样率 100Hz、窗 5.12s，用 SS.mmm（秒.毫秒）格式匹配数据精度。
+  // 刻度数自适应：每约 80px 一个，最少 3 个。用 tsToX 映射（含 gap 折叠）。
+  {
+    const axisY = topH + midH + botH - pad.bottom  // 图表区底边
+    const labelY = axisY + 14 * dpr                 // 刻度文字基线（pad.bottom 内）
+    const spanSec = (dataTsMax - dataTsMin) / 1000   // 数据跨度（秒）
+    const tickCount = Math.max(3, Math.round(plotW / (80 * dpr)))
+    c.strokeStyle = C.border
+    c.lineWidth = 0.5 * dpr
+    c.fillStyle = C.textSec
+    c.font = `${9 * dpr}px sans-serif`
+    c.textAlign = 'center'
+    for (let i = 0; i <= tickCount; i++) {
+      const tsMsTick = dataTsMin + (dataTsMax - dataTsMin) * i / tickCount
+      const x = tsToX(tsMsTick)
+      if (x == null) continue
+      // 短刻度线
+      c.beginPath()
+      c.moveTo(x, axisY)
+      c.lineTo(x, axisY + 4 * dpr)
+      c.stroke()
+      // 时间标签（SS.mmm）
+      c.fillText(formatAxisTime(tsMsTick / 1000, spanSec), x, labelY)
+    }
   }
 
   // ── 悬停十字准线 + tooltip ────────────────────────────────────────────────
@@ -627,7 +742,9 @@ function drawAlertScatter(
     const chIdx = channels.indexOf(disp)
     if (chIdx < 0) continue
     const y = y0 + pad.top + plotH * (chIdx + 0.5) / Math.max(channels.length, 1)
-    const size = (8 + (p.score || 0) * 8) * dpr
+    // ★ 3.3e：三处红点半径统一为 4*dpr（与遥测区/分数区一致），
+    //   不再用 8+score*8 的渐变大小（之前全通道点图红点比另两区大太多）。
+    const size = 4 * dpr
     c.beginPath()
     c.fillStyle = p.type === 'measured' ? 'rgba(245, 108, 108, 0.85)' : 'rgba(230, 162, 60, 0.85)'
     c.arc(x, y, size, 0, Math.PI * 2)
@@ -669,7 +786,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="chart-wrapper">
+  <div class="chart-wrapper" ref="chartWrapperRef">
     <canvas
       ref="canvasRef"
       class="chart-canvas"
@@ -687,6 +804,17 @@ onUnmounted(() => {
   height: 100%;
   background: #0f1530;
   overflow: hidden;
+}
+
+/* 通道切换垂直滑动动画（500ms）：旧内容上移淡出感、新内容从下方滑入。
+   单 canvas 方案：canvas 内容已重画为新通道，wrapper 整体做位移+透明度过渡，
+   给出"新通道数据从下方滑入"的视觉（与左侧传感器上下轮播方向一致）。 */
+@keyframes phm-chart-slide-in {
+  0%   { transform: translateY(40px); opacity: 0; }
+  100% { transform: translateY(0);    opacity: 1; }
+}
+.chart-wrapper.phm-chart-switch-anim {
+  animation: phm-chart-slide-in 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) both;
 }
 
 .chart-canvas {

@@ -1,4 +1,5 @@
 {% extends "phm_site/admin/admin_base.html" %}
+{% load static %}
 
 {% block content %}
 <div class="phm-admin-shell">
@@ -80,6 +81,7 @@
   </div>{% comment %}close phm-page-body{% endcomment %}
 </div>{% comment %}close phm-admin-shell{% endcomment %}
 
+<script src="{% static 'phm_site/js/vendor/Sortable.min.js' %}"></script>
 <script>
 (function () {
   'use strict';
@@ -90,6 +92,8 @@
   var SAVE_URL = "{{ save_url|escapejs }}";
   var IS_SUPERUSER = {{ is_superuser|yesno:"true,false" }};
   var AGGREGATION = "{{ aggregation_strategy|escapejs }}";
+  // 拖拽过程中的 TREE 快照（syncTreeFromDom 用它查原始字段，TREE 正被重写）
+  var TREE_ORIGINAL = null;
 
   // ── 工具：克隆 / 生成 id ─────────────────────────────────────
   function clone(obj) { return JSON.parse(JSON.stringify(obj)); }
@@ -157,6 +161,91 @@
     ul.className = 'phm-tree-root';
     renderNodes(TREE, ul, 0);
     container.appendChild(ul);
+    // 渲染完后初始化 SortableJS（所有 ul 共享 group，支持跨层级拖拽）
+    initSortable();
+  }
+
+  // ── SortableJS 拖拽初始化 ──────────────────────────────────
+  // 替换原生 HTML5 DnD（手感差、无预览/占位符）。所有 <ul> 共享 group:'phm-tree'，
+  // 节点可跨层级拖拽。onEnd 后用 DOM 反向同步 TREE（精确保留所有位置变化），
+  // 随即 renderTree 重建 DOM 对齐数据源（数据流仍单向：TREE → 渲染）。
+  var sortableInstances = [];
+  function initSortable() {
+    if (typeof Sortable === 'undefined') return;  // vendor 未加载（降级到不可拖）
+    if (!IS_SUPERUSER) return;  // 非超管只读，不启用拖拽
+    // 先销毁旧实例（renderTree 会重建 DOM）
+    sortableInstances.forEach(function (s) { s.destroy(); });
+    sortableInstances = [];
+    var uls = container.querySelectorAll('ul');
+    uls.forEach(function (ul) {
+      sortableInstances.push(Sortable.create(ul, {
+        group: 'phm-tree',
+        animation: 150,
+        fallbackOnBody: true,
+        swapThreshold: 0.65,
+        // 拖动时的占位符样式
+        ghostClass: 'phm-tree-ghost',
+        chosenClass: 'phm-tree-chosen',
+        dragClass: 'phm-tree-drag',
+        onEnd: handleSortableEnd,
+      }));
+    });
+  }
+
+  // Sortable onEnd：先防成环，再从 DOM 反向同步 TREE
+  function handleSortableEnd(evt) {
+    if (!IS_SUPERUSER) return;
+    var srcId = evt.item.getAttribute('data-id');
+    // 找目标父 li（即目标文件夹）；根 ul 的 parentElement 是 container（非 li）
+    var toUl = evt.to;
+    var parentLi = toUl.parentElement.closest('li.phm-tree-node');
+    var dstFolderId = parentLi ? parentLi.getAttribute('data-id') : null;
+    // 防成环：拖到自己子孙文件夹内 → 拒绝（回滚 DOM）
+    var src = findNodeAndParent(TREE, srcId);
+    if (src && dstFolderId && isDescendant(src.node, dstFolderId)) {
+      if (window.PHM) PHM.toast('不能拖到自己的子孙节点（会成环）', 'error', 4000);
+      else alert('不能拖到自己的子孙节点（会成环）');
+      renderTree();  // 重建 DOM 回滚 Sortable 的移动
+      return;
+    }
+    // 建立拖拽前的快照（syncTreeFromDom 用它查原始字段，因为 TREE 正被重写）
+    TREE_ORIGINAL = clone(TREE);
+    syncTreeFromDom();
+    TREE_ORIGINAL = null;  // 释放
+    renderTree();
+    if (window.PHM) PHM.toast('已移动节点（点「保存整树」生效）', 'info');
+  }
+
+  // 从当前 DOM 结构反向重建 TREE（Sortable 已移动 DOM，此处同步数据）
+  function syncTreeFromDom() {
+    var rootUl = container.querySelector('ul.phm-tree-root');
+    if (!rootUl) return;
+    TREE.splice(0, TREE.length);  // 清空原数组（保留引用）
+    Array.prototype.forEach.call(rootUl.children, function (li) {
+      var node = buildNodeFromLi(li);
+      if (node) TREE.push(node);
+    });
+  }
+
+  // 递归：从 <li> 重建节点对象（复用原节点数据，仅调整 children 结构）
+  function buildNodeFromLi(li) {
+    var id = li.getAttribute('data-id');
+    var found = findNodeAndParent(TREE_ORIGINAL, id);
+    if (!found) return null;
+    var node = clone(found.node);  // 保留所有字段（name/sourceId/threshold/...）
+    node._id = id;
+    // 子 ul → children
+    var childUl = li.querySelector('ul');
+    if (childUl) {
+      node.children = [];
+      Array.prototype.forEach.call(childUl.children, function (childLi) {
+        var childNode = buildNodeFromLi(childLi);
+        if (childNode) node.children.push(childNode);
+      });
+    } else if (node.type === 'folder') {
+      node.children = [];
+    }
+    return node;
   }
 
   function renderNodes(nodes, parentEl, depth) {
@@ -164,7 +253,7 @@
       var li = document.createElement('li');
       li.className = 'phm-tree-node' + (n.type === 'folder' ? ' phm-tree-folder' : ' phm-tree-sensor');
       li.setAttribute('data-id', n._id);
-      li.setAttribute('draggable', 'true');
+      // 拖拽改由 SortableJS 接管（renderTree 末尾初始化），不再用原生 draggable。
 
       var row = document.createElement('div');
       row.className = 'phm-tree-row' + (selectedId === n._id ? ' active' : '');
@@ -184,30 +273,13 @@
 
       li.appendChild(row);
 
-      // 拖拽源
-      li.addEventListener('dragstart', function (e) {
-        e.dataTransfer.setData('text/plain', n._id);
-        e.dataTransfer.effectAllowed = 'move';
-      });
-      // 拖拽目标
-      li.addEventListener('dragover', function (e) {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-        li.classList.add('phm-tree-drop-hover');
-      });
-      li.addEventListener('dragleave', function () {
-        li.classList.remove('phm-tree-drop-hover');
-      });
-      li.addEventListener('drop', function (e) {
-        e.preventDefault();
-        e.stopPropagation();
-        li.classList.remove('phm-tree-drop-hover');
-        handleDrop(e.dataTransfer.getData('text/plain'), n._id, e.offsetY < li.clientHeight / 2 ? 'before' : 'inside');
-      });
-
-      if (n.children && n.children.length) {
+      // 文件夹始终创建子 ul（即使空），让 SortableJS 有可放置目标，
+      // 否则空文件夹拖不进节点（Sortable 找不到容器）。
+      if (n.type === 'folder') {
         var childUl = document.createElement('ul');
-        renderNodes(n.children, childUl, depth + 1);
+        if (n.children && n.children.length) {
+          renderNodes(n.children, childUl, depth + 1);
+        }
         li.appendChild(childUl);
       }
       parentEl.appendChild(li);
@@ -218,36 +290,6 @@
     selectedId = id;
     renderTree();
     renderEditor(id);
-  }
-
-  // ── 拖拽处理（3 语义 + 防成环） ─────────────────────────────
-  function handleDrop(srcId, dstId, mode) {
-    if (!IS_SUPERUSER) return;
-    if (srcId === dstId) return;
-    var src = findNodeAndParent(TREE, srcId);
-    var dst = findNodeAndParent(TREE, dstId);
-    if (!src || !dst) return;
-
-    // 防成环：拖到自己子孙 → 拒绝
-    if (isDescendant(src.node, dstId)) {
-      if (window.PHM) PHM.toast('不能拖到自己的子孙节点（会成环）', 'error', 4000);
-      else alert('不能拖到自己的子孙节点（会成环）');
-      return;
-    }
-
-    // 从原位置移除
-    src.list.splice(src.index, 1);
-
-    if (mode === 'inside' && dst.node.type === 'folder') {
-      // 拖到文件夹 → 成为子节点
-      if (!dst.node.children) dst.node.children = [];
-      dst.node.children.push(src.node);
-    } else {
-      // 拖到节点 → 插到该节点之前（同级）
-      dst.list.splice(dst.index, 0, src.node);
-    }
-    renderTree();
-    if (window.PHM) PHM.toast('已移动节点（点「保存整树」生效）', 'info');
   }
 
   // ── 右编辑面板 ──────────────────────────────────────────────
