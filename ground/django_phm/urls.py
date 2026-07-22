@@ -17,7 +17,6 @@ from django.views.generic import RedirectView
 urlpatterns = [
     path('admin/', include('phm_site.urls_admin')),  # 自定义后台 URL（含 admin.site.urls）
     path('api/v2/', include('phm_site.urls_api')),   # DRF 新接口
-    path('api/', include('phm_site.urls_legacy')),   # 旧视图过渡保留
     path('monitor/', include('phm_site.urls_monitor')),  # 前台大屏
 ]
 

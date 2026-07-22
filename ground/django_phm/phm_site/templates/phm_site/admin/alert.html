@@ -5,7 +5,7 @@
   <div class="phm-page-header">
     <h1 class="phm-page-title">告警和预警管理</h1>
     <span class="phm-text-dim" style="font-size: 13px;">
-      已采集告警（measured）· 共 {{ row_count }} 条
+      已采集告警 · 共 {{ total_count }} 条
       {% if not is_superuser %}（仅查看，写操作需超级管理员）{% endif %}
     </span>
   </div>
@@ -75,8 +75,9 @@
 
 {# ── 顶部工具栏（紧贴筛选栏，第一屏可见） ────────────────────────────── #}
 <div class="phm-alert-toolbar">
-  <span class="phm-text-sec" style="font-size: 13px;">
-    已选 <strong id="phm-alert-selected-count">0</strong> 项 · 共 {{ row_count }} 条
+  <span class="phm-text-sec phm-flex" style="font-size: 13px; gap: 12px; flex-wrap: wrap;">
+    <span>已选 <strong id="phm-alert-selected-count">0</strong> 项 · 共 {{ total_count }} 条</span>
+    {% include "phm_site/admin/_page_size_select.html" with limit=limit page_size_options=page_size_options %}
   </span>
   <span class="phm-flex" style="gap: 6px; flex-wrap: wrap;">
     {% if is_superuser %}
@@ -126,7 +127,7 @@
         <tr data-id="{{ r.id }}">
           <td><input type="checkbox" class="phm-alert-row" value="{{ r.id }}"></td>
           <td class="col-mono">{{ r.id }}</td>
-          <td><span class="phm-badge {{ r.alert_type_badge }}">{{ r.alert_type|default:"—" }}</span></td>
+          <td><span class="phm-badge {{ r.alert_type_badge }}">{{ r.alert_type_label }}</span></td>
           <td>{{ r.sensor_name }}</td>
           <td class="col-num">
             {% if r.raw_value is not None %}
@@ -137,15 +138,15 @@
           <td class="col-mono phm-text-sec" data-ts="{{ r.created_at }}">—</td>
           <td>
             {% if r.llm_verdict %}
-              <span class="phm-badge {{ r.llm_verdict_badge }}">{{ r.llm_verdict }}</span>
+              <span class="phm-badge {{ r.llm_verdict_badge }}">{{ r.llm_verdict_label }}</span>
             {% else %}<span class="phm-text-dim">未诊断</span>{% endif %}
           </td>
           <td>
             {% if r.human_verdict %}
-              <span class="phm-badge {{ r.human_verdict_badge }}">{{ r.human_verdict }}</span>
+              <span class="phm-badge {{ r.human_verdict_badge }}">{{ r.human_verdict_label }}</span>
             {% else %}<span class="phm-text-dim">未标注</span>{% endif %}
           </td>
-          <td><span class="phm-badge {{ r.final_status_badge }}">{{ r.final_status|default:"—" }}</span></td>
+          <td><span class="phm-badge {{ r.final_status_badge }}">{{ r.final_status_label }}</span></td>
           <td>
             <button class="phm-btn phm-btn-sm phm-alert-detail-btn" data-id="{{ r.id }}">
               详情
@@ -164,27 +165,7 @@
   </div>
   {% endif %}
 
-  {% if total_pages and total_pages > 1 %}
-  <div class="phm-pagination">
-    <span class="phm-pagination-info">共 {{ total_count }} 条，第 {{ page }}/{{ total_pages }} 页</span>
-    <div class="phm-pagination-pages">
-      <a class="phm-page-btn{% if page == 1 %} disabled{% endif %}"
-         href="?page={{ page|add:'-1' }}{% for k, v in current_filters.items %}{% if v %}&{{ k }}={{ v }}{% endif %}{% endfor %}{% if limit != 50 %}&limit={{ limit }}{% endif %}">‹ 上一页</a>
-      {% for p in page_range %}
-        {% if p == '..' %}
-        <span class="phm-page-ellipsis">…</span>
-        {% elif p == page %}
-        <span class="phm-page-btn active">{{ p }}</span>
-        {% else %}
-        <a class="phm-page-btn"
-           href="?page={{ p }}{% for k, v in current_filters.items %}{% if v %}&{{ k }}={{ v }}{% endif %}{% endfor %}{% if limit != 50 %}&limit={{ limit }}{% endif %}">{{ p }}</a>
-        {% endif %}
-      {% endfor %}
-      <a class="phm-page-btn{% if page == total_pages %} disabled{% endif %}"
-         href="?page={{ page|add:'1' }}{% for k, v in current_filters.items %}{% if v %}&{{ k }}={{ v }}{% endif %}{% endfor %}{% if limit != 50 %}&limit={{ limit }}{% endif %}">下一页 ›</a>
-    </div>
-  </div>
-  {% endif %}
+  {% include "phm_site/admin/_pagination.html" with total_count=total_count page=page total_pages=total_pages page_range=page_range current_filters=current_filters limit=limit page_size_default=20 %}
 </div>
 
   </div>{% comment %}close phm-page-body{% endcomment %}
@@ -280,6 +261,7 @@
     var DELETE_API = "{{ api_delete_url|escapejs }}";
     var DIAGNOSE_API = "{{ api_diagnose_url|escapejs }}";
     var DIAGNOSE_STATUS_API = "{{ api_diagnose_status_url|escapejs }}";
+    var DIAGNOSE_ONE_API = "{{ api_diagnose_one_url|escapejs }}";  // 单条同步诊断（含 __ID__）
     var EXPORT_API = "{{ api_export_url|escapejs }}";
     var CREATE_API = "{{ api_create_url|escapejs }}";
 
@@ -332,32 +314,249 @@
       });
     }
 
-    function renderWaveformSVG(rawSnap, scoreSnap) {
+    function renderWaveformSVG(rawSnap, scoreSnap, scoreVal) {
       if (!rawSnap || !rawSnap.length) return '<p class="phm-text-dim">无波形数据</p>';
-      var W = 600, H = 120, pad = 8;
+      // 画布：W=600，每张图 H=180（含坐标轴留白）
+      // 布局：左侧 padL=44（Y 轴标签）/ 右侧 padR=12 / 顶部 padT=8 / 底部 padB=22（X 轴标签）
+      var W = 600, H = 180;
+      var padL = 44, padR = 12, padT = 8, padB = 22;
+      var plotW = W - padL - padR;
+      var plotH = H - padT - padB;
+      var SCORE_THRESHOLD = 0.5;  // 异常分数阈值，与后端 _render_chart_b64 一致
+
+      function fmtNum(v) {
+        if (typeof v !== 'number' || isNaN(v)) return '—';
+        var abs = Math.abs(v);
+        if (abs >= 100) return v.toFixed(0);
+        if (abs >= 1) return v.toFixed(2);
+        return v.toFixed(3);
+      }
+      function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+      // 绘制单张图：data 点数组 + min/max + 配色 + 是否为 score 图（画阈值线）
+      // alertIdx: 告警点在数组中的索引（score 峰值位置），红点标在此处；null 则不标
+      function drawChart(data, dMin, dMax, color, isScore, alertIdx) {
+        var range = (dMax - dMin) || 1;
+        var step = plotW / Math.max(data.length - 1, 1);
+        function px(i) { return padL + i * step; }
+        function py(v) { return padT + (1 - (v - dMin) / range) * plotH; }
+
+        var parts = [];
+        // 水平网格虚线（3 条：上/中/下）
+        for (var g = 0; g <= 3; g++) {
+          var gy = padT + (plotH * g / 3);
+          parts.push('<line class="phm-alert-wave-grid" x1="' + padL + '" y1="' + gy.toFixed(1) +
+                     '" x2="' + (W - padR) + '" y2="' + gy.toFixed(1) + '"/>');
+        }
+        // Y 轴刻度标签（min / mid / max）
+        var yLabels = [dMax, (dMax + dMin) / 2, dMin];
+        yLabels.forEach(function (lv, i) {
+          var ly = padT + (plotH * i / 2);
+          parts.push('<text class="phm-alert-wave-tick" x="' + (padL - 6) + '" y="' + (ly + 3).toFixed(1) +
+                     '" text-anchor="end">' + esc(fmtNum(lv)) + '</text>');
+        });
+        // score 图：阈值水平虚线
+        if (isScore && dMax >= SCORE_THRESHOLD) {
+          var ty = py(SCORE_THRESHOLD);
+          parts.push('<line class="phm-alert-wave-threshold" x1="' + padL + '" y1="' + ty.toFixed(1) +
+                     '" x2="' + (W - padR) + '" y2="' + ty.toFixed(1) + '"/>');
+          parts.push('<text class="phm-alert-wave-threshold-label" x="' + (W - padR) + '" y="' + (ty - 4).toFixed(1) +
+                     '" text-anchor="end">阈值 ' + SCORE_THRESHOLD + '</text>');
+        }
+        // X/Y 轴线
+        parts.push('<line class="phm-alert-wave-axis" x1="' + padL + '" y1="' + padT +
+                   '" x2="' + padL + '" y2="' + (padT + plotH) + '"/>');  // Y 轴
+        parts.push('<line class="phm-alert-wave-axis" x1="' + padL + '" y1="' + (padT + plotH) +
+                   '" x2="' + (W - padR) + '" y2="' + (padT + plotH) + '"/>');  // X 轴
+        // X 轴刻度标签（首/中/末 = 采样点序号）
+        var xTicks = [0, Math.floor(data.length / 2), data.length - 1];
+        xTicks.forEach(function (xi) {
+          var xx = px(xi);
+          parts.push('<text class="phm-alert-wave-tick" x="' + xx.toFixed(1) + '" y="' + (H - 6) +
+                     '" text-anchor="middle">' + xi + '</text>');
+        });
+        // 波形 path
+        var pathD = data.map(function (v, i) {
+          return (i === 0 ? 'M' : 'L') + px(i).toFixed(1) + ',' + py(v).toFixed(1);
+        }).join(' ');
+        parts.push('<path class="phm-alert-wave-line" d="' + pathD + '" stroke="' + color + '"/>');
+        // 告警点标记（圆点 + 数值）：标在 alertIdx 位置（score 峰值），不是末点
+        if (alertIdx != null && alertIdx >= 0 && alertIdx < data.length) {
+          var av = data[alertIdx];
+          var ax = px(alertIdx), ay = py(av);
+          parts.push('<circle class="phm-alert-wave-point" cx="' + ax.toFixed(1) + '" cy="' + ay.toFixed(1) + '" r="3.5"/>');
+          // 标签位置：靠近右边界时向左偏移避免溢出
+          var lblX = ax > W - padR - 40 ? ax - 6 : ax + 6;
+          var lblAnchor = ax > W - padR - 40 ? 'end' : 'start';
+          parts.push('<text class="phm-alert-wave-point-label" x="' + lblX.toFixed(1) + '" y="' + (ay - 6).toFixed(1) +
+                     '" text-anchor="' + lblAnchor + '">' + esc(fmtNum(av)) + '</text>');
+        }
+        return parts.join('');
+      }
+
+      // 算告警点索引：score 数组中峰值的索引（与后端 score=nanmax 对齐）
+      // raw/score 等长，同一索引位置即告警时刻。无 score 时回退到末点。
+      var alertIdx = rawSnap.length - 1;  // 默认末点
+      if (scoreSnap && scoreSnap.length === rawSnap.length) {
+        var peakIdx = 0, peakVal = -Infinity;
+        for (var si = 0; si < scoreSnap.length; si++) {
+          if (scoreSnap[si] > peakVal) { peakVal = scoreSnap[si]; peakIdx = si; }
+        }
+        alertIdx = peakIdx;
+      }
+
       var rawMin = Math.min.apply(null, rawSnap);
       var rawMax = Math.max.apply(null, rawSnap);
-      var rawRange = (rawMax - rawMin) || 1;
-      function toPath(data, min, range, h) {
-        var step = (W - pad * 2) / Math.max(data.length - 1, 1);
-        return data.map(function (v, i) {
-          var x = pad + i * step;
-          var y = pad + (1 - (v - min) / range) * (h - pad * 2);
-          return (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1);
-        }).join(' ');
-      }
-      var rawPath = toPath(rawSnap, rawMin, rawRange, H);
-      var svg = '<svg class="phm-alert-wave" viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:120px;">' +
-                 '<path d="' + rawPath + '" fill="none" stroke="var(--phm-blue)" stroke-width="1.5"/></svg>';
+      var svg = '<svg class="phm-alert-wave" viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:180px;">';
+      svg += '<text class="phm-alert-wave-title" x="' + padL + '" y="12">原始波形</text>';
+      svg += drawChart(rawSnap, rawMin, rawMax, 'var(--phm-blue)', false, alertIdx);
+      svg += '</svg>';
+
       if (scoreSnap && scoreSnap.length) {
         var sMin = Math.min.apply(null, scoreSnap);
         var sMax = Math.max.apply(null, scoreSnap);
-        var sRange = (sMax - sMin) || 1;
-        var sPath = toPath(scoreSnap, sMin, sRange, H);
-        svg += '<svg class="phm-alert-wave" viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:120px;margin-top:6px;">' +
-               '<path d="' + sPath + '" fill="none" stroke="var(--phm-red)" stroke-width="1.5"/></svg>';
+        // score 图 Y 轴固定 [0, max(1, sMax)]，让阈值线位置稳定可读
+        var sTop = Math.max(1, sMax, SCORE_THRESHOLD);
+        svg += '<svg class="phm-alert-wave" viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:180px;margin-top:8px;">';
+        svg += '<text class="phm-alert-wave-title" x="' + padL + '" y="12">异常分数</text>';
+        svg += drawChart(scoreSnap, 0, sTop, 'var(--phm-red)', true, alertIdx);
+        svg += '</svg>';
       }
       return svg;
+    }
+
+    // ── 联合告警专用：渲染联合分数曲线（无原始波形，只有 joint_curve） ──
+    // joint 告警的 score_snapshot 是 dict（含 joint_curve/contributions/channels），
+    // 不是 list。这里提取 joint_curve 画一张带阈值线 + 峰值红点的曲线图。
+    function renderJointCurveSVG(scoreSnap, scoreVal) {
+      // scoreSnap 对 joint 是 dict
+      var curve = null;
+      if (scoreSnap && typeof scoreSnap === 'object' && !Array.isArray(scoreSnap)) {
+        curve = scoreSnap.joint_curve || scoreSnap['joint_curve'];
+      }
+      if (!curve || !curve.length) return '<p class="phm-text-dim">无联合分数数据</p>';
+
+      // 复用 renderWaveformSVG 的 drawChart 逻辑：把 joint_curve 当作单条分数曲线画
+      // 构造一个临时调用：rawSnap=curve, scoreSnap=curve（让 alertIdx 算峰值）
+      // 但 renderWaveformSVG 会画两张图（原始+分数），joint 只需一张。
+      // 这里直接内联简化版绘制。
+      var W = 600, H = 180;
+      var padL = 44, padR = 12, padT = 8, padB = 22;
+      var plotW = W - padL - padR, plotH = H - padT - padB;
+      var THRESHOLD = 0.5;
+      var sTop = Math.max(1, Math.max.apply(null, curve), THRESHOLD);
+      function px(i) { return padL + i * (plotW / Math.max(curve.length - 1, 1)); }
+      function py(v) { return padT + (1 - v / sTop) * plotH; }
+      function fmtNum(v) {
+        if (typeof v !== 'number' || isNaN(v)) return '—';
+        return v >= 0.01 ? v.toFixed(3) : v.toFixed(4);
+      }
+      // 峰值索引（红点位置）
+      var peakIdx = 0, peakVal = -Infinity;
+      for (var i = 0; i < curve.length; i++) {
+        if (curve[i] > peakVal) { peakVal = curve[i]; peakIdx = i; }
+      }
+      var parts = [];
+      // 网格
+      for (var g = 0; g <= 3; g++) {
+        var gy = padT + (plotH * g / 3);
+        parts.push('<line class="phm-alert-wave-grid" x1="' + padL + '" y1="' + gy.toFixed(1) +
+                   '" x2="' + (W - padR) + '" y2="' + gy.toFixed(1) + '"/>');
+      }
+      // Y 轴刻度
+      [sTop, sTop / 2, 0].forEach(function (lv, i) {
+        var ly = padT + (plotH * i / 2);
+        parts.push('<text class="phm-alert-wave-tick" x="' + (padL - 6) + '" y="' + (ly + 3).toFixed(1) +
+                   '" text-anchor="end">' + fmtNum(lv) + '</text>');
+      });
+      // 阈值线
+      if (sTop >= THRESHOLD) {
+        var ty = py(THRESHOLD);
+        parts.push('<line class="phm-alert-wave-threshold" x1="' + padL + '" y1="' + ty.toFixed(1) +
+                   '" x2="' + (W - padR) + '" y2="' + ty.toFixed(1) + '"/>');
+        parts.push('<text class="phm-alert-wave-threshold-label" x="' + (W - padR) + '" y="' + (ty - 4).toFixed(1) +
+                   '" text-anchor="end">阈值 ' + THRESHOLD + '</text>');
+      }
+      // 轴线
+      parts.push('<line class="phm-alert-wave-axis" x1="' + padL + '" y1="' + padT +
+                 '" x2="' + padL + '" y2="' + (padT + plotH) + '"/>');
+      parts.push('<line class="phm-alert-wave-axis" x1="' + padL + '" y1="' + (padT + plotH) +
+                 '" x2="' + (W - padR) + '" y2="' + (padT + plotH) + '"/>');
+      // X 轴刻度
+      [0, Math.floor(curve.length / 2), curve.length - 1].forEach(function (xi) {
+        parts.push('<text class="phm-alert-wave-tick" x="' + px(xi).toFixed(1) + '" y="' + (H - 6) +
+                   '" text-anchor="middle">' + xi + '</text>');
+      });
+      // 曲线 path
+      var pathD = curve.map(function (v, i) {
+        return (i === 0 ? 'M' : 'L') + px(i).toFixed(1) + ',' + py(v).toFixed(1);
+      }).join(' ');
+      parts.push('<path class="phm-alert-wave-line" d="' + pathD + '" stroke="var(--phm-red)"/>');
+      // 峰值红点
+      var ax = px(peakIdx), ay = py(peakVal);
+      parts.push('<circle class="phm-alert-wave-point" cx="' + ax.toFixed(1) + '" cy="' + ay.toFixed(1) + '" r="3.5"/>');
+      var lblX = ax > W - padR - 40 ? ax - 6 : ax + 6;
+      var lblAnchor = ax > W - padR - 40 ? 'end' : 'start';
+      parts.push('<text class="phm-alert-wave-point-label" x="' + lblX.toFixed(1) + '" y="' + (ay - 6).toFixed(1) +
+                 '" text-anchor="' + lblAnchor + '">' + fmtNum(peakVal) + '</text>');
+      var svg = '<svg class="phm-alert-wave" viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:180px;">';
+      svg += '<text class="phm-alert-wave-title" x="' + padL + '" y="12">联合分数曲线（多通道共识）</text>';
+      svg += parts.join('');
+      svg += '</svg>';
+      return svg;
+    }
+
+    // ── verdict 徽章 HTML（与列表模板渲染规则一致，供局部刷新复用） ──
+    var VERDICT_LABEL = { real: '实警', false_alarm: '虚警', uncertain: '待定' };
+    function verdictBadgeCls(v) {
+      // 与 views_admin._verdict_badge 对齐：real→red, false_alarm→green, uncertain→yellow
+      if (v === 'real') return 'phm-badge-red';
+      if (v === 'false_alarm') return 'phm-badge-green';
+      if (v === 'uncertain') return 'phm-badge-yellow';
+      return 'phm-badge-gray';
+    }
+    function verdictBadgeHTML(v) {
+      if (!v) return '<span class="phm-text-dim">未诊断</span>';
+      return '<span class="phm-badge ' + verdictBadgeCls(v) + '">' + (VERDICT_LABEL[v] || v) + '</span>';
+    }
+    function finalStatusBadgeHTML(s) {
+      if (!s) return '<span class="phm-text-dim">—</span>';
+      // 与 _final_status_badge 对齐
+      var cls = 'phm-badge-gray';
+      if (s === 'real') cls = 'phm-badge-red';
+      else if (s === 'false_alarm') cls = 'phm-badge-green';
+      else if (s === 'uncertain') cls = 'phm-badge-yellow';
+      else if (s === 'active') cls = 'phm-badge-blue';
+      // 中文 label（与后端 _STATUS_LABEL 一致）
+      var STATUS_LABEL = {active:'活跃', real:'实警', false_alarm:'虚警',
+                          uncertain:'待定', confirmed:'已确认', false:'误报', pending:'待处理'};
+      var label = STATUS_LABEL[s] || s;
+      return '<span class="phm-badge ' + cls + '">' + PHM.escapeHTML(label) + '</span>';
+    }
+    function humanVerdictCellHTML(v) {
+      if (!v) return '<span class="phm-text-dim">未标注</span>';
+      return '<span class="phm-badge ' + verdictBadgeCls(v) + '">' + (VERDICT_LABEL[v] || v) + '</span>';
+    }
+
+    // 局部刷新列表中某几行的 verdict 单元格（不 reload，不改变顺序）
+    // 入参 ids: [int]，对每个 id 调 detail API 拿最新数据并更新对应 <tr>
+    function refreshRowVerdicts(ids) {
+      if (!ids || !ids.length) return;
+      ids.forEach(function (aid) {
+        var tr = document.querySelector('tr[data-id="' + aid + '"]');
+        if (!tr) return;  // 该行不在当前页（翻页了或被删），跳过
+        var url = DETAIL_API.replace('__ID__', String(aid));
+        PHM.fetchJSON(url, { method: 'GET' }).then(function (data) {
+          if (data.status !== 'ok') return;
+          var a = data.alert;
+          var tds = tr.querySelectorAll('td');
+          // 列序：0 复选框 / 1 ID / 2 类型 / 3 传感器 / 4 遥测值 / 5 分数 /
+          //       6 时间 / 7 LLM诊断 / 8 人工诊断 / 9 综合状态 / 10 操作
+          if (tds[7]) tds[7].innerHTML = verdictBadgeHTML(a.llm_verdict);
+          if (tds[8]) tds[8].innerHTML = humanVerdictCellHTML(a.human_verdict);
+          if (tds[9]) tds[9].innerHTML = finalStatusBadgeHTML(a.final_status);
+        }).catch(function () { /* 静默，单行刷新失败不阻塞 */ });
+      });
     }
 
     function openDetail(aid) {
@@ -375,15 +574,17 @@
           // 基本信息卡片
           html += '<div class="phm-card" style="margin-bottom:12px;">';
           html += '<h4 class="phm-card-title">基本信息</h4>';
+          var STATUS_LABEL = {active:'活跃', real:'实警', false_alarm:'虚警',
+                              uncertain:'待定', confirmed:'已确认', false:'误报', pending:'待处理'};
           html += '<table class="phm-table"><tbody>' +
                   '<tr><td class="phm-text-dim">通道</td><td>' + PHM.escapeHTML(a.channel) + '</td></tr>' +
                   '<tr><td class="phm-text-dim">传感器</td><td>' + PHM.escapeHTML(a.sensor_name) + '</td></tr>' +
                   '<tr><td class="phm-text-dim">告警时间</td><td>' + fmtTs(a.created_at) + '</td></tr>' +
                   '<tr><td class="phm-text-dim">异常分数</td><td>' + (a.score !== null ? a.score.toFixed(3) : '—') + '</td></tr>' +
-                  '<tr><td class="phm-text-dim">状态</td><td>' + PHM.escapeHTML(a.status || '—') + '</td></tr>' +
-                  '<tr><td class="phm-text-dim">LLM verdict</td><td>' + PHM.escapeHTML(a.llm_verdict || '—') + '</td></tr>' +
-                  '<tr><td class="phm-text-dim">人工 verdict</td><td>' + PHM.escapeHTML(a.human_verdict || '—') + '</td></tr>' +
-                  '<tr><td class="phm-text-dim">综合状态</td><td>' + PHM.escapeHTML(a.final_status || '—') + '</td></tr>' +
+                  '<tr><td class="phm-text-dim">状态</td><td>' + PHM.escapeHTML(STATUS_LABEL[a.status] || a.status || '—') + '</td></tr>' +
+                  '<tr><td class="phm-text-dim">LLM 诊断</td><td id="phm-alert-drawer-llm-cell">' + verdictBadgeHTML(a.llm_verdict) + '</td></tr>' +
+                  '<tr><td class="phm-text-dim">人工诊断</td><td id="phm-alert-drawer-human-cell">' + humanVerdictCellHTML(a.human_verdict) + '</td></tr>' +
+                  '<tr><td class="phm-text-dim">综合状态</td><td id="phm-alert-drawer-final-cell">' + finalStatusBadgeHTML(a.final_status) + '</td></tr>' +
                   '</tbody></table>';
           html += '</div>';
 
@@ -396,30 +597,43 @@
             html += '</div>';
           }
 
-          // 波形
+          // 波形 / 联合分数曲线（joint 告警无原始波形，显示联合分数曲线）
           html += '<div class="phm-card" style="margin-bottom:12px;">';
-          html += '<h4 class="phm-card-title">波形快照</h4>';
-          html += renderWaveformSVG(a.raw_snapshot, a.score_snapshot);
-          if (a.raw_snapshot && a.raw_snapshot.length) {
-            var last = a.raw_snapshot[a.raw_snapshot.length - 1];
+          if (a.alert_type === 'joint') {
+            html += '<h4 class="phm-card-title">联合分数曲线</h4>';
+            html += renderJointCurveSVG(a.score_snapshot, a.score);
             html += '<p class="phm-text-dim" style="font-size:12px;margin-top:4px;">' +
-                    '末点值：' + (typeof last === 'number' ? last.toFixed(3) : '—') +
-                    (a.unit ? ' ' + PHM.escapeHTML(a.unit) : '') +
-                    ' · 异常分数 ' + (a.score !== null ? a.score.toFixed(3) : '—') + '</p>';
+                    '联合告警无单通道原始波形。联合分数 ' +
+                    (a.score !== null ? a.score.toFixed(3) : '—') + '（多通道共识）</p>';
+          } else {
+            html += '<h4 class="phm-card-title">波形快照</h4>';
+            html += renderWaveformSVG(a.raw_snapshot, a.score_snapshot, a.score);
+            if (a.raw_snapshot && a.raw_snapshot.length) {
+              var last = a.raw_snapshot[a.raw_snapshot.length - 1];
+              html += '<p class="phm-text-dim" style="font-size:12px;margin-top:4px;">' +
+                      '末点值：' + (typeof last === 'number' ? last.toFixed(3) : '—') +
+                      (a.unit ? ' ' + PHM.escapeHTML(a.unit) : '') +
+                      ' · 异常分数 ' + (a.score !== null ? a.score.toFixed(3) : '—') + '</p>';
+            }
           }
           html += '</div>';
 
           // LLM 诊断文本
+          var hasDiag = !!(d && (d.text || d.error));
           html += '<div class="phm-card" style="margin-bottom:12px;">';
           html += '<div class="phm-flex-between"><h4 class="phm-card-title" style="margin:0;">LLM 诊断</h4>';
-          html += '<button class="phm-btn phm-btn-sm phm-btn-primary" id="phm-alert-drawer-rediagnose" data-id="' + aid + '">重新诊断</button></div>';
+          // 文案：已诊断 →「重新诊断」；未诊断 →「诊断」
+          html += '<button class="phm-btn phm-btn-sm phm-btn-primary" id="phm-alert-drawer-rediagnose" data-id="' + aid + '">' +
+                  (hasDiag ? '重新诊断' : '诊断') + '</button></div>';
+          html += '<div id="phm-alert-drawer-diag-body">';
           if (d && d.text) {
             html += '<pre class="phm-diagnosis-text">' + PHM.escapeHTML(d.text) + '</pre>';
           } else if (d && d.error) {
             html += '<p class="phm-text-sec" style="color:var(--phm-red);font-size:13px;">错误：' + PHM.escapeHTML(d.error) + '</p>';
           } else {
-            html += '<p class="phm-text-dim">尚未诊断。点「重新诊断」生成。</p>';
+            html += '<p class="phm-text-dim">尚未诊断。点「诊断」生成。</p>';
           }
+          html += '</div>';
           html += '</div>';
 
           // 人工标注（超管可改）
@@ -439,41 +653,78 @@
 
           drawerBody.innerHTML = html;
 
-          // 重新诊断按钮
+          // 重新诊断按钮（单条同步 API：即时返回诊断结果，抽屉内局部更新）
           var rediag = document.getElementById('phm-alert-drawer-rediagnose');
           if (rediag) {
             rediag.addEventListener('click', function () {
               rediag.disabled = true;
+              var origText = rediag.textContent;
               rediag.textContent = '诊断中…';
-              PHM.fetchJSON(DIAGNOSE_API, {
+              var oneUrl = DIAGNOSE_ONE_API.replace('__ID__', String(aid));
+              PHM.fetchJSON(oneUrl, {
                 method: 'POST',
-                body: { ids: [aid], force_refresh: true }
+                body: { force_refresh: true }
               }).then(function (data) {
-                if (data.status === 'ok') {
-                  PHM.toast('诊断已触发，请稍后重新打开详情查看结果', 'success');
-                } else {
-                  throw new Error(data.message || '触发失败');
+                if (data.status !== 'ok') throw new Error(data.message || '诊断失败');
+                // 局部更新抽屉内诊断文本区
+                var diagBody = document.getElementById('phm-alert-drawer-diag-body');
+                if (diagBody) {
+                  if (data.diagnosis_text) {
+                    diagBody.innerHTML = '<pre class="phm-diagnosis-text">' +
+                                         PHM.escapeHTML(data.diagnosis_text) + '</pre>';
+                  } else if (data.error) {
+                    diagBody.innerHTML = '<p class="phm-text-sec" style="color:var(--phm-red);font-size:13px;">错误：' +
+                                         PHM.escapeHTML(data.error) + '</p>';
+                  }
                 }
+                // 局部更新抽屉内基本信息表的 LLM verdict / 综合状态
+                var llmCell = document.getElementById('phm-alert-drawer-llm-cell');
+                if (llmCell) llmCell.innerHTML = verdictBadgeHTML(data.llm_verdict);
+                var finalCell = document.getElementById('phm-alert-drawer-final-cell');
+                if (finalCell) finalCell.innerHTML = finalStatusBadgeHTML(data.final_status);
+                // 按钮文案：已有诊断结果 →「重新诊断」
+                rediag.textContent = '重新诊断';
+                // 局部刷新列表行（不 reload，顺序不变）
+                refreshRowVerdicts([aid]);
+                PHM.toast('诊断完成' + (data.elapsed_sec ? '（' + data.elapsed_sec + 's）' : '') +
+                           (data.cached ? ' · 命中缓存' : ''), 'success');
               }).catch(function (e) {
                 PHM.toast('诊断失败：' + e.message, 'error', 5000);
+                rediag.textContent = origText;
               }).finally(function () {
                 rediag.disabled = false;
-                rediag.textContent = '重新诊断';
               });
             });
           }
-          // 保存 verdict
+          // 保存 verdict（单条标注，抽屉保持打开 + 局部更新）
           var saveVerdict = document.getElementById('phm-alert-drawer-save-verdict');
           if (saveVerdict) {
             saveVerdict.addEventListener('click', function () {
-              var v = document.getElementById('phm-alert-drawer-verdict').value;
+              var verdictSel = document.getElementById('phm-alert-drawer-verdict');
+              var v = verdictSel.value;
+              var aid2 = parseInt(saveVerdict.getAttribute('data-id'), 10);
+              // 后端 annotate 只接受 real/false_alarm/uncertain；空值兜底为 uncertain
+              var appliedV = v || 'uncertain';
               saveVerdict.disabled = true;
               PHM.fetchJSON(ANNOTATE_API, {
                 method: 'POST',
-                body: { ids: [parseInt(saveVerdict.getAttribute('data-id'), 10)], verdict: v || 'uncertain' }
+                body: { ids: [aid2], verdict: appliedV }
               }).then(function (data) {
                 if (data.status === 'ok') {
-                  PHM.toast('已应用：' + (v || '清除'), 'success');
+                  PHM.toast('已应用：' + (VERDICT_LABEL[appliedV] || appliedV), 'success');
+                  // 局部更新抽屉内基本信息表的 人工 verdict / 综合状态
+                  var humanCell = document.getElementById('phm-alert-drawer-human-cell');
+                  if (humanCell) humanCell.innerHTML = humanVerdictCellHTML(appliedV);
+                  // 综合状态需重新查（human 标注会影响 final_status）
+                  refreshRowVerdicts([aid2]);
+                  // 同步刷新抽屉内的综合状态（refreshRowVerdicts 只刷列表行，抽屉需单独拉）
+                  PHM.fetchJSON(DETAIL_API.replace('__ID__', String(aid2)), { method: 'GET' })
+                    .then(function (d) {
+                      if (d.status === 'ok') {
+                        var fc = document.getElementById('phm-alert-drawer-final-cell');
+                        if (fc) fc.innerHTML = finalStatusBadgeHTML(d.alert.final_status);
+                      }
+                    }).catch(function () {});
                 } else {
                   throw new Error(data.message || '应用失败');
                 }
@@ -561,16 +812,17 @@
     }
 
     // ── LLM 诊断（异步，进度查询） ───────────────────────────
+    var lastDiagnoseIds = [];  // 记录本次批量诊断的 ids，完成后局部刷新这些行
     if (diagnoseBtn) {
       diagnoseBtn.addEventListener('click', function () {
         var ids = selectedIds();
         if (ids.length === 0) return;
-        if (!window.confirm('对选中的 ' + ids.length + ' 条告警触发 LLM 诊断？\n（已在后台异步执行，不阻塞页面）')) return;
         diagnoseBtn.disabled = true;
         PHM.fetchJSON(DIAGNOSE_API, { method: 'POST', body: { ids: ids } })
           .then(function (data) {
             if (data.status === 'ok') {
-              PHM.toast('已触发诊断（共 ' + data.total + ' 条），进度可点工具栏「LLM 诊断」查询', 'success', 4000);
+              lastDiagnoseIds = ids.slice();
+              PHM.toast('已触发诊断（共 ' + data.total + ' 条），页面不刷新，完成后自动更新结果', 'success', 4000);
               pollDiagnoseStatus();
             } else {
               throw new Error(data.message || '触发失败');
@@ -593,9 +845,14 @@
             if (!p.running) {
               clearInterval(diagPollTimer);
               diagPollTimer = null;
-              if (diagnoseBtn) diagnoseBtn.disabled = false;
+              if (diagnoseBtn) {
+                diagnoseBtn.disabled = false;
+                diagnoseBtn.textContent = '🤖 LLM 诊断';
+              }
               PHM.toast('诊断完成：成功 ' + (p.done - p.errors) + ' / 失败 ' + p.errors, 'success');
-              setTimeout(function () { window.location.reload(); }, 1500);
+              // 局部刷新被诊断行（不 reload，顺序/滚动位置不变）
+              refreshRowVerdicts(lastDiagnoseIds);
+              lastDiagnoseIds = [];
             } else if (p.total > 0) {
               if (diagnoseBtn) diagnoseBtn.textContent = '🤖 诊断中 ' + p.done + '/' + p.total;
             }
@@ -618,6 +875,44 @@
         window.location.href = url;
       });
     }
+
+    // ── 分页：保留筛选参数跳转 helper ─────────────────────────
+    // 收集当前 URL 的筛选参数（channel/alert_type/llm_verdict/...），
+    // 覆盖 page；limit 仅在显式传入时覆盖（跳页时保留当前每页数量）。
+    function gotoPage(newPage, newLimit) {
+      var params = new URLSearchParams(window.location.search);
+      params.delete('page');
+      if (newLimit != null) {
+        params.set('limit', newLimit);
+      }
+      if (newPage) params.set('page', newPage);
+      var qs = params.toString();
+      window.location.href = '?' + (qs || 'page=1');
+    }
+
+    // 每页数量切换：回到第 1 页（改 limit 后行数变化，当前页码可能越界）
+    var sizeSelect = document.querySelector('.phm-page-size-select');
+    if (sizeSelect) {
+      sizeSelect.addEventListener('change', function () {
+        gotoPage(1, this.value);
+      });
+    }
+
+    // 页码跳转：clamp 到 [1, total_pages]
+    var jumpInput = document.querySelector('.phm-page-jump-input');
+    var jumpBtn = document.querySelector('.phm-page-jump-btn');
+    function doJump() {
+      if (!jumpInput) return;
+      var total = parseInt(jumpInput.getAttribute('data-total-pages'), 10) || 1;
+      var n = parseInt(jumpInput.value, 10);
+      if (isNaN(n)) return;
+      n = Math.max(1, Math.min(n, total));
+      gotoPage(n, null);
+    }
+    if (jumpBtn) jumpBtn.addEventListener('click', doJump);
+    if (jumpInput) jumpInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); doJump(); }
+    });
 
     // ── 新增（超管） ──────────────────────────────────────────
     var createMask = document.getElementById('phm-alert-create-mask');

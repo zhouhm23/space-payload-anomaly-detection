@@ -107,8 +107,8 @@ class ParseIsoOrFloatTest(TestCase):
 class ParseAlertLimitTest(TestCase):
 
     def test_default(self):
-        self.assertEqual(_parse_alert_limit(None), 50)
-        self.assertEqual(_parse_alert_limit(''), 50)
+        self.assertEqual(_parse_alert_limit(None), 20)
+        self.assertEqual(_parse_alert_limit(''), 20)
 
     def test_valid_int(self):
         self.assertEqual(_parse_alert_limit('100'), 100)
@@ -121,7 +121,7 @@ class ParseAlertLimitTest(TestCase):
         self.assertEqual(_parse_alert_limit('-5'), 1)
 
     def test_invalid_falls_back(self):
-        self.assertEqual(_parse_alert_limit('abc'), 50)
+        self.assertEqual(_parse_alert_limit('abc'), 20)
 
 
 class ParseAlertPageTest(TestCase):
@@ -278,6 +278,46 @@ class AlertViewAccessTest(TestCase):
         args, kwargs = c.sqlite.query_alerts_filtered.call_args
         self.assertEqual(kwargs.get('offset'), 50)
 
+    def test_chinese_labels_in_decorated_rows(self):
+        """数据行应带中文 label（避免 SSR 显示英文 measured/real/active）。"""
+        self.client.force_login(self.staff)
+        rows = [{
+            'id': 1, 'channel': 'C-1', 'alert_type': 'measured', 'score': 0.6,
+            'created_at': 1700000000, 'status': 'active',
+            'llm_verdict': 'real', 'human_verdict': 'false_alarm',
+            'final_status': 'real', 'raw_snapshot': [0.1, 0.2],
+        }]
+        c = _make_mock_container(rows=rows)
+        c.sqlite.count_alerts_filtered.return_value = 1
+        p1, p2 = _patch_container(c)
+        with p1, p2:
+            resp = self.client.get(self.url)
+        item = resp.context['rows'][0]
+        self.assertEqual(item['alert_type_label'], '实测告警')
+        self.assertEqual(item['llm_verdict_label'], '实警')
+        self.assertEqual(item['human_verdict_label'], '虚警')
+        self.assertEqual(item['final_status_label'], '实警')
+        # 页面渲染应含中文（不含英文 measured）
+        self.assertContains(resp, '实测告警')
+        self.assertNotContains(resp, '>measured<')
+
+    def test_joint_alert_type_label(self):
+        """联合告警 alert_type_label 应为中文「联合告警」。"""
+        self.client.force_login(self.staff)
+        rows = [{
+            'id': 2, 'channel': 'SUB:数据集', 'alert_type': 'joint', 'score': 0.7,
+            'created_at': 1700000000, 'status': 'active',
+            'llm_verdict': None, 'human_verdict': None,
+            'final_status': 'active', 'raw_snapshot': None,
+        }]
+        c = _make_mock_container(rows=rows)
+        c.sqlite.count_alerts_filtered.return_value = 1
+        p1, p2 = _patch_container(c)
+        with p1, p2:
+            resp = self.client.get(self.url)
+        item = resp.context['rows'][0]
+        self.assertEqual(item['alert_type_label'], '联合告警')
+
 
 class AlertViewPaginationTest(TestCase):
     """alert_view 分页逻辑测试。"""
@@ -368,6 +408,42 @@ class AlertViewPaginationTest(TestCase):
             resp = self.client.get(self.url + '?limit=50')
         self.assertContains(resp, 'phm-pagination')
         self.assertContains(resp, '第 1/3 页')
+
+    def test_page_size_options_in_context(self):
+        """context 含 page_size_options（供每页数量下拉渲染）。"""
+        self.client.force_login(self.staff)
+        c = _make_mock_container(self._make_rows(3))
+        c.sqlite.count_alerts_filtered.return_value = 3
+        p1, p2 = _patch_container(c)
+        with p1, p2:
+            resp = self.client.get(self.url)
+        opts = resp.context['page_size_options']
+        self.assertEqual(opts, [20, 50, 100, 200])
+        # 当前 limit=50 应被选中（HTML 含 selected）
+        self.assertContains(resp, 'phm-page-size-select')
+
+    def test_page_size_select_renders_all_options(self):
+        """每页数量下拉渲染所有候选值。"""
+        self.client.force_login(self.staff)
+        c = _make_mock_container(self._make_rows(3))
+        c.sqlite.count_alerts_filtered.return_value = 3
+        p1, p2 = _patch_container(c)
+        with p1, p2:
+            resp = self.client.get(self.url)
+        for n in (20, 50, 100, 200):
+            self.assertContains(resp, 'value="{}"'.format(n))
+
+    def test_page_jump_input_renders_when_multiple_pages(self):
+        """多页时渲染跳转输入框。"""
+        self.client.force_login(self.staff)
+        c = _make_mock_container(self._make_rows(50))
+        c.sqlite.count_alerts_filtered.return_value = 150
+        p1, p2 = _patch_container(c)
+        with p1, p2:
+            resp = self.client.get(self.url + '?limit=50')
+        self.assertContains(resp, 'phm-page-jump-input')
+        self.assertContains(resp, 'phm-page-jump-btn')
+        self.assertContains(resp, 'max="3"')  # total_pages=3
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -551,6 +627,95 @@ class AlertDiagnoseApiTest(TestCase):
                 content_type='application/json',
             )
         self.assertEqual(resp.status_code, 400)
+
+
+class AlertDiagnoseOneApiTest(TestCase):
+    """单条同步诊断 API（抽屉内「诊断/重新诊断」按钮用）。"""
+
+    def setUp(self):
+        self.client = Client()
+        self.staff = User.objects.create_user(
+            username='staff1', password='pw', is_staff=True
+        )
+
+    def _url(self, aid):
+        return reverse('phm_admin_alert_diagnose_one', args=[aid])
+
+    def test_staff_can_trigger_sync_diagnose(self):
+        """单条同步诊断：staff 可触发，返回诊断文本与 verdict。"""
+        self.client.force_login(self.staff)
+        alert = {'id': 5, 'channel': 'C-1', 'alert_type': 'measured',
+                 'created_at': 1700000000, 'llm_verdict': 'real', 'final_status': 'real'}
+        fresh_alert = dict(alert, llm_verdict='real', final_status='real')
+        c = _make_mock_container(alert_by_id=alert)
+        c.diagnosis = mock.Mock()
+        # diagnose() 返回结果 dict（与 DiagnosisService.diagnose 签名一致）
+        c.diagnosis.diagnose.return_value = {
+            'diagnosis': '该传感器存在异常漂移',
+            'llm_verdict': 'real',
+            'error': None,
+            'elapsed_sec': 1.23,
+            'cached': False,
+        }
+        # 二次 get_alert_by_id（API 内部重读最新行拿 verdict）
+        c.sqlite.get_alert_by_id.side_effect = [alert, fresh_alert]
+        p1, p2 = _patch_container(c)
+        with p1, p2:
+            resp = self.client.post(
+                self._url(5), {'force_refresh': True},
+                content_type='application/json',
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body['status'], 'ok')
+        self.assertEqual(body['id'], 5)
+        self.assertEqual(body['diagnosis_text'], '该传感器存在异常漂移')
+        self.assertEqual(body['llm_verdict'], 'real')
+        self.assertEqual(body['final_status'], 'real')
+        self.assertEqual(body['elapsed_sec'], 1.23)
+        # 验证 diagnosis service 被正确调用
+        c.diagnosis.diagnose.assert_called_once()
+        call_args = c.diagnosis.diagnose.call_args
+        # channel 是位置参数（views_admin: diag.diagnose(row['channel'], alert_type=..., ...))
+        self.assertEqual(call_args.args[0], 'C-1')
+        self.assertEqual(call_args.kwargs.get('alert_type'), 'measured')
+        self.assertTrue(call_args.kwargs.get('force_refresh'))
+
+    def test_non_numeric_id_not_matched(self):
+        """非数字 id 在路由层就被拒（URL 用 <int:>，不匹配 → 404，不到视图）。"""
+        self.client.force_login(self.staff)
+        # 直接拼 URL（reverse 不接受非数字），验证路由不匹配
+        resp = self.client.post(
+            '/admin/phm_site/alert/api/diagnose_one/abc/',
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_zero_id_returns_400(self):
+        self.client.force_login(self.staff)
+        resp = self.client.post(self._url(0), content_type='application/json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_alert_not_found_returns_404(self):
+        self.client.force_login(self.staff)
+        c = _make_mock_container(alert_by_id=None)
+        p1, p2 = _patch_container(c)
+        with p1, p2:
+            resp = self.client.post(self._url(99), content_type='application/json')
+        self.assertEqual(resp.status_code, 404)
+
+    def test_diagnosis_service_missing_returns_503(self):
+        """container 没有 diagnosis 属性 → 503。"""
+        self.client.force_login(self.staff)
+        alert = {'id': 5, 'channel': 'C-1', 'alert_type': 'measured',
+                 'created_at': 1700000000}
+        c = _make_mock_container(alert_by_id=alert)
+        # 不设置 c.diagnosis（Mock 默认会自动生成，用 del 模拟缺失）
+        del c.diagnosis
+        p1, p2 = _patch_container(c)
+        with p1, p2:
+            resp = self.client.post(self._url(5), content_type='application/json')
+        self.assertEqual(resp.status_code, 503)
 
 
 class AlertDiagnoseStatusApiTest(TestCase):

@@ -69,6 +69,19 @@ class ModelsViewAccessTest(TestCase):
             or b'\xe8\xb5\x84\xe4\xba\xa7\xe7\xbc\xba\xe5\xa4\xb1' in resp.content  # "资产缺失"
         )
 
+    def test_deploy_label_in_cards(self):
+        """每张卡片渲染 deploy 标签（地基/天基）。"""
+        self.client.force_login(self.staff)
+        resp = self.client.get(self.url)
+        # 现有 3 个模型默认都是 ground → 至少 3 个「地基」徽章
+        self.assertContains(resp, '地基')
+        # 每个 card dict 都带 deploy / deploy_label 字段
+        for card in resp.context['cards']:
+            self.assertIn('deploy', card)
+            self.assertIn('deploy_label', card)
+            entry = MODEL_REGISTRY[card['key']]
+            self.assertEqual(card['deploy'], entry.deploy)
+
     def test_container_not_ready_still_renders(self):
         """模型管理页不依赖 Container：即使 PHM 未就绪也能渲染（只读 MODEL_REGISTRY）。
 

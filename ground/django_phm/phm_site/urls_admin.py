@@ -49,6 +49,7 @@ urlpatterns = [
     path('phm_site/alert/api/delete/',               views_admin.alert_delete_api,           name='phm_admin_alert_delete'),
     path('phm_site/alert/api/diagnose/',             views_admin.alert_diagnose_api,         name='phm_admin_alert_diagnose'),
     path('phm_site/alert/api/diagnose_status/',      views_admin.alert_diagnose_status_api,  name='phm_admin_alert_diagnose_status'),
+    path('phm_site/alert/api/diagnose_one/<int:alert_id>/', views_admin.alert_diagnose_one_api, name='phm_admin_alert_diagnose_one'),
     path('phm_site/alert/api/export/',               views_admin.alert_export_api,           name='phm_admin_alert_export'),
     path('phm_site/alert/api/create/',               views_admin.alert_create_api,           name='phm_admin_alert_create'),
 

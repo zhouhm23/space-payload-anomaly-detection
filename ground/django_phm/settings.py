@@ -171,8 +171,10 @@ CORS_ALLOW_ALL_HEADERS = True
 # ── SimpleUI 配置 ───────────────────────────────────────────────────────────
 SIMPLEUI_HOME_INFO = False
 SIMPLEUI_ANALYSIS = False
-# 登录后台默认跳转仪表盘（v1.1 新增）
-SIMPLEUI_INDEX = '/admin/phm_site/dashboard/'
+# 右上角 fa-home 按钮点击后 window.open() 的目标 URL。
+# 指向 /monitor/（前台监控大屏），复用 SimpleUI 自带首页按钮做"后台→前台"跳转，
+# 无需在 dashboard.html 自建按钮。仪表盘仍通过左侧菜单访问。
+SIMPLEUI_INDEX = '/monitor/'
 # 品牌名：登录页 / 首页大标题（原默认 "Django administration"，用户反馈应改为本系统简称）
 SIMPLEUI_HOME_TITLE = '天地PHM 管理后台'
 # 自定义菜单（对齐需求书 §后台 9 项）：首页/用户管理/审计日志走 SimpleUI 默认，

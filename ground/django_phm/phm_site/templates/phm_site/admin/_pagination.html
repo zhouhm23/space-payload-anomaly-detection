@@ -1,0 +1,42 @@
+{% comment %}
+  可复用分页控件（告警管理 + 回收站共用），只含页码按钮 + 跳转输入框。
+  每页数量下拉不在这里——它在各页的工具栏（表格上方），方便操作。
+  用法：{% include "phm_site/admin/_pagination.html" with total_count=... page=... total_pages=... page_range=... current_filters=... limit=... page_size_default=... %}
+  说明：
+    - 页码链接保留 current_filters（dict）里的非空参数 + limit（非默认时）
+    - 跳转输入框 clamp 到 [1, total_pages]
+    - total_pages <= 1 时不渲染（单页无需分页）
+{% endcomment %}
+{% if total_pages and total_pages > 1 %}
+<div class="phm-pagination">
+  <span class="phm-pagination-info">
+    共 {{ total_count }} 条，第 {{ page }}/{{ total_pages }} 页
+  </span>
+  <div class="phm-pagination-controls">
+    <div class="phm-pagination-pages">
+      <a class="phm-page-btn{% if page == 1 %} disabled{% endif %}"
+         href="?page={{ page|add:'-1' }}{% for k, v in current_filters.items %}{% if v %}&{{ k }}={{ v }}{% endif %}{% endfor %}{% if limit != page_size_default %}&limit={{ limit }}{% endif %}">‹ 上一页</a>
+      {% for p in page_range %}
+        {% if p == '..' %}
+        <span class="phm-page-ellipsis">…</span>
+        {% elif p == page %}
+        <span class="phm-page-btn active">{{ p }}</span>
+        {% else %}
+        <a class="phm-page-btn"
+           href="?page={{ p }}{% for k, v in current_filters.items %}{% if v %}&{{ k }}={{ v }}{% endif %}{% endfor %}{% if limit != page_size_default %}&limit={{ limit }}{% endif %}">{{ p }}</a>
+        {% endif %}
+      {% endfor %}
+      <a class="phm-page-btn{% if page == total_pages %} disabled{% endif %}"
+         href="?page={{ page|add:'1' }}{% for k, v in current_filters.items %}{% if v %}&{{ k }}={{ v }}{% endif %}{% endfor %}{% if limit != page_size_default %}&limit={{ limit }}{% endif %}">下一页 ›</a>
+    </div>
+    <label class="phm-pagination-jump">
+      跳至
+      <input type="number" class="phm-input phm-page-jump-input"
+             min="1" max="{{ total_pages }}" value="{{ page }}"
+             data-total-pages="{{ total_pages }}">
+      页
+      <button type="button" class="phm-btn phm-btn-sm phm-page-jump-btn">Go</button>
+    </label>
+  </div>
+</div>
+{% endif %}

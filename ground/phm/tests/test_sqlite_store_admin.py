@@ -177,6 +177,83 @@ class TestQueryDeleted:
         rows2 = store.query_deleted("alert_records", limit="abc")
         assert len(rows2) <= 200  # fallback
 
+    def test_offset_pagination_skips_first_n(self, store):
+        """offset 跳过前 N 条（按 deleted_at DESC）。"""
+        for i in range(5):
+            _insert_alert(store)
+        store._conn.execute(
+            "UPDATE alert_records SET is_deleted=1, deleted_at=unixepoch()+id"
+        )
+        store._conn.commit()
+        all_rows = store.query_deleted("alert_records", limit=50)
+        page2 = store.query_deleted("alert_records", limit=2, offset=2)
+        assert len(page2) == 2
+        # page2 的 id 应是 all_rows[2] 和 all_rows[3]
+        assert page2[0]["id"] == all_rows[2]["id"]
+        assert page2[1]["id"] == all_rows[3]["id"]
+
+    def test_offset_zero_matches_no_offset(self, store):
+        """offset=0 与不传 offset 行为一致。"""
+        for _ in range(3):
+            _insert_alert(store)
+        store._conn.execute(
+            "UPDATE alert_records SET is_deleted=1, deleted_at=unixepoch()"
+        )
+        store._conn.commit()
+        a = store.query_deleted("alert_records", limit=10)
+        b = store.query_deleted("alert_records", limit=10, offset=0)
+        assert [r["id"] for r in a] == [r["id"] for r in b]
+
+    def test_offset_beyond_returns_empty(self, store):
+        """offset 超过总条数返回空列表。"""
+        _insert_alert(store)
+        store._conn.execute(
+            "UPDATE alert_records SET is_deleted=1, deleted_at=unixepoch()"
+        )
+        store._conn.commit()
+        assert store.query_deleted("alert_records", limit=10, offset=100) == []
+
+
+# ── count_deleted ────────────────────────────────────────────────────────
+
+class TestCountDeleted:
+
+    def test_count_zero_when_empty(self, store):
+        assert store.count_deleted("alert_records") == 0
+
+    def test_count_after_soft_delete(self, store):
+        a1 = _insert_alert(store)
+        a2 = _insert_alert(store)
+        _insert_alert(store)  # 第 3 条不删
+        store.delete_by_ids("alert_records", [a1, a2])
+        assert store.count_deleted("alert_records") == 2
+
+    def test_count_excludes_restored(self, store):
+        a1 = _insert_alert(store)
+        store.delete_by_ids("alert_records", [a1])
+        assert store.count_deleted("alert_records") == 1
+        store.restore("alert_records", [a1])
+        assert store.count_deleted("alert_records") == 0
+
+    def test_count_per_table(self, store):
+        _insert_alert(store)
+        store.delete_by_ids("alert_records", [_insert_alert(store)])
+        # detection_results 和 diagnosis_records 应为 0
+        assert store.count_deleted("detection_results") == 0
+        assert store.count_deleted("diagnosis_records") == 0
+
+    def test_count_invalid_table_returns_zero(self, store):
+        assert store.count_deleted("unknown_table") == 0
+        assert store.count_deleted("") == 0
+
+    def test_count_disabled_store_returns_zero(self, db_path):
+        s = SQLiteStore(db_path, enabled=False)
+        s.start()
+        try:
+            assert s.count_deleted("alert_records") == 0
+        finally:
+            s.close()
+
 
 # ── delete_by_ids ────────────────────────────────────────────────────────
 

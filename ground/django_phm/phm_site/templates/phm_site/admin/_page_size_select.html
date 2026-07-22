@@ -1,0 +1,14 @@
+{% comment %}
+  可复用「每页数量」下拉（告警管理 + 回收站工具栏共用）。
+  放在表格上方工具栏，onchange 跳 ?limit=N&page=1（回到第 1 页）。
+  用法：{% include "phm_site/admin/_page_size_select.html" with limit=... page_size_options=... %}
+{% endcomment %}
+<label class="phm-page-size-label">
+  每页
+  <select class="phm-input phm-page-size-select">
+    {% for n in page_size_options %}
+    <option value="{{ n }}" {% if limit == n %}selected{% endif %}>{{ n }}</option>
+    {% endfor %}
+  </select>
+  条
+</label>

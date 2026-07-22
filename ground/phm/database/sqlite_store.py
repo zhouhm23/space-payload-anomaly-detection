@@ -1253,12 +1253,13 @@ class SQLiteStore:
         """生成 ``?,?,?`` 形式的占位符串（sqlite3 不接受列表直接展开）。"""
         return ",".join(["?"] * max(n, 1))
 
-    def query_deleted(self, table: str, limit: int = 200) -> list[dict]:
+    def query_deleted(self, table: str, limit: int = 200, offset: int = 0) -> list[dict]:
         """返回某张表的**已软删**记录（回收站列表用）。
 
         Args:
             table: 必须是 ``_ADMIN_TABLES`` 之一。
             limit: 返回上限，按 ``deleted_at DESC`` 排序。
+            offset: 跳过前 N 条（分页用），offset=0 向后兼容。
 
         返回字段尽量与 ``query_alerts`` / ``query_detection`` 对齐，
         便于前端表格复用列定义。失败返回 ``[]``。
@@ -1272,13 +1273,17 @@ class SQLiteStore:
         except (TypeError, ValueError):
             limit = 200
         try:
+            offset = max(0, int(offset))
+        except (TypeError, ValueError):
+            offset = 0
+        try:
             if table == "alert_records":
                 cur = self._conn.execute(
                     "SELECT id, channel, alert_type, score, message, created_at, status, "
                     "       verified_at, llm_verdict, human_verdict, raw_snapshot, deleted_at "
                     f"FROM {table} WHERE is_deleted = 1 "
-                    "ORDER BY deleted_at DESC LIMIT ?",
-                    [limit],
+                    "ORDER BY deleted_at DESC LIMIT ? OFFSET ?",
+                    [limit, offset],
                 )
                 rows = cur.fetchall()
                 out = []
@@ -1309,8 +1314,8 @@ class SQLiteStore:
                     "SELECT id, channel, timestamp, l1_score, l2_score, l3_score, "
                     "       final_score, deleted_at "
                     f"FROM {table} WHERE is_deleted = 1 "
-                    "ORDER BY deleted_at DESC LIMIT ?",
-                    [limit],
+                    "ORDER BY deleted_at DESC LIMIT ? OFFSET ?",
+                    [limit, offset],
                 )
                 rows = cur.fetchall()
                 return [
@@ -1325,8 +1330,8 @@ class SQLiteStore:
             cur = self._conn.execute(
                 "SELECT id, channel, alert_type, alert_ts, llm_verdict, error, created_at, deleted_at "
                 f"FROM {table} WHERE is_deleted = 1 "
-                "ORDER BY deleted_at DESC LIMIT ?",
-                [limit],
+                "ORDER BY deleted_at DESC LIMIT ? OFFSET ?",
+                [limit, offset],
             )
             rows = cur.fetchall()
             return [
@@ -1340,6 +1345,28 @@ class SQLiteStore:
         except Exception:
             logger.warning("query_deleted(%s) failed", table, exc_info=True)
             return []
+
+    def count_deleted(self, table: str) -> int:
+        """返回某张表的已软删记录总数（回收站分页计数用）。
+
+        Args:
+            table: 必须是 ``_ADMIN_TABLES`` 之一。
+
+        返回 ``SELECT COUNT(*) FROM {table} WHERE is_deleted=1``，失败返回 0。
+        """
+        if not self.enabled or self._conn is None:
+            return 0
+        if table not in self._ADMIN_TABLES:
+            return 0
+        try:
+            cur = self._conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE is_deleted = 1"
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+        except Exception:
+            logger.warning("count_deleted(%s) failed", table, exc_info=True)
+            return 0
 
     def delete_by_ids(self, table: str, ids: list[int]) -> int:
         """按 id 列表**软删**（移到回收站）。

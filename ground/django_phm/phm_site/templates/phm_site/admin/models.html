@@ -45,6 +45,12 @@
             {% else %}phm-badge-gray{% endif %}">
             {{ card.kind_label }}
           </span>
+          {# 部署位置标签（天基=卫星图标蓝，地基=房屋图标灰） #}
+          {% if card.deploy == 'space' %}
+          <span class="phm-badge phm-badge-blue" title="天基模型，预留 OTA 推送">🛰️ {{ card.deploy_label }}</span>
+          {% else %}
+          <span class="phm-badge phm-badge-gray" title="地基模型，本地推理">🏠 {{ card.deploy_label }}</span>
+          {% endif %}
         </div>
       </div>
       {% if card.assets_available %}

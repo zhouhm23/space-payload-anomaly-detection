@@ -120,6 +120,35 @@ VERDICT: uncertain
 用中文，简洁，只基于数据，不编造。总长不超过 300 字。"""
 
 
+_JOINT_SYSTEM_PROMPT = """你是航天器有效载荷健康管理（PHM）分析师。你正在分析一条**联合告警**——同一子系统（设备树 folder）下多个通道同时超过异常阈值时触发的子系统级告警。
+
+重要：联合告警没有单通道原始波形数据，只有联合分数曲线和各子通道的异常分数贡献。不要假设存在波形图。
+
+判定依据：
+1. 联合分数是否显著超过阈值？联合分数曲线是否有明显的持续高峰（而非瞬时尖刺）？
+2. 共识通道数：同时超阈值的通道越多，越可能是真实系统性异常（而非单通道偶发误报）。
+3. 各子通道的异常分数：是多个通道都明显超阈值，还是只有少数通道擦线？
+4. 子系统历史告警频率：频繁告警可能暗示检测模型对该子系统数据存在系统性误报倾向。
+
+请按以下格式输出你的诊断报告。注意：必须给出你自己的判断和分析，不要照抄下面的格式说明。
+
+## 判断结论
+（从以下四个选项中选择一个，并说明依据：真实系统性异常、采集/通信异常、模型误报、数据不足无法判定）
+
+## 依据分析
+（基于联合分数曲线、各子通道贡献、共识通道数，写你自己的观察，两三句话。不要提到"波形图"——联合告警没有波形。）
+
+## 置信度
+（从高、中、低中选择一个，并说明理由）
+
+最后另起一行，从以下三个选项中选择一个输出你的最终判断：
+VERDICT: real
+VERDICT: false_alarm
+VERDICT: uncertain
+
+用中文，简洁，只基于数据，不编造。总长不超过 300 字。"""
+
+
 class DiagnosisService:
     """On-demand LLM anomaly diagnosis.
 
@@ -262,7 +291,10 @@ class DiagnosisService:
                 )
             except Exception:
                 logger.debug("chart render failed for %s", channel, exc_info=True)
-        text, err = self._call_llm(user_prompt, image_b64=image_b64)
+        text, err = self._call_llm(
+            user_prompt, image_b64=image_b64,
+            system_prompt=_JOINT_SYSTEM_PROMPT if alert_type == "joint" else None,
+        )
         elapsed = round(time.time() - t0, 2)
         verdict = self._parse_verdict(text) if text else None
         result = {
@@ -308,7 +340,8 @@ class DiagnosisService:
                                 if wid and hasattr(store, "set_verdict"):
                                     store.set_verdict(wid, "llm", verdict)
                                 break
-            elif alert_type == "measured" and self.sqlite is not None:
+            elif alert_type in ("measured", "joint") and self.sqlite is not None:
+                # joint 告警也在 alert_records，复用 measured 的回写路径
                 self.sqlite.update_alert_verdict(channel, alert_ts, verdict, is_llm=True)
         except Exception:
             logger.debug("write_verdict_back failed for %s/%s", channel, alert_type, exc_info=True)
@@ -452,6 +485,16 @@ class DiagnosisService:
         # Device-tree position + display name.
         display_name, device_path, description = self._resolve_device(channel)
 
+        # ── Joint alert（子系统联合告警）专用分支 ──────────────────────
+        # joint 告警的 channel 是虚拟 "SUB:<folder>"，无遥测表/cascade/raw_snapshot。
+        # 它的上下文全部存在 alert_records.score_snapshot 里（dict，含 joint_curve /
+        # contributions / channels）。这里提取后直接构造 context 提前返回，
+        # 不走下面的 measured/predicted 通用逻辑（那套依赖遥测表，对 joint 全空）。
+        if alert_type == "joint":
+            return self._build_joint_context(
+                channel, alert_ts, display_name, device_path, description, history,
+            )
+
         if cascade_dict is None and not recent_rows and snapshot_raw is None:
             return None
 
@@ -542,12 +585,82 @@ class DiagnosisService:
             "snapshot_scores": snapshot_scores,
         }
 
+    def _build_joint_context(
+        self, channel: str, alert_ts: float | None,
+        display_name: str | None, device_path: str | None,
+        description: str | None, history: list,
+    ) -> dict | None:
+        """构造联合告警（joint）的诊断上下文。
+
+        joint 告警的 channel 是虚拟 ``SUB:<folder>``，无遥测表/cascade。
+        上下文来自 alert_records.score_snapshot（dict，含 joint_curve /
+        contributions / channels）。找不到对应告警记录时返回 None。
+        """
+        if self.sqlite is None or alert_ts is None:
+            return None
+        # 从 alert_records 按 (channel, alert_ts) 找到这条联合告警
+        joint_alert = None
+        try:
+            for a in (self.sqlite.query_alerts(limit=200) or []):
+                if a.get("channel") == channel and abs(
+                    (a.get("created_at") or 0) - alert_ts
+                ) < 1.0:
+                    joint_alert = a
+                    break
+        except Exception:
+            logger.debug("joint alert lookup failed for %s", channel, exc_info=True)
+        if not joint_alert:
+            return None
+
+        snap = joint_alert.get("score_snapshot")
+        if not isinstance(snap, dict):
+            snap = {}
+        joint_curve = snap.get("joint_curve") or []
+        contributions = snap.get("contributions") or []
+        sub_channels = snap.get("channels") or []
+        joint_score = joint_alert.get("score") or 0.0
+
+        summary = {
+            "channel": channel,
+            "display_name": display_name or channel,
+            "description": description,
+            "device_path": device_path,
+            "alert_type": "joint",
+            "threshold": ANOMALY_THRESHOLD,
+            "joint_score": float(joint_score),
+            "joint_curve": joint_curve,
+            "contributions": contributions,
+            "sub_channels": sub_channels,
+            "n_history_alerts": len(history),
+            "history_statuses": [h.get("status", "?") for h in history][:5],
+            "predict_horizon": FORECAST_PREDICTION_LENGTH,
+            "predict_max_score": None,
+            "n_recent_points": 0,
+            "window_stats": None,
+            "baseline": None,
+            "cascade": None,
+        }
+        return {
+            "summary": summary,
+            "cascade_dict": None,
+            "window_stats": None,
+            "layer_summary": None,
+            "display_name": display_name,
+            "device_path": device_path,
+            "snapshot_raw": None,
+            "snapshot_scores": None,
+            "_joint": True,  # 标记，供 _build_prompt 识别走 joint 模板
+        }
+
     # ------------------------------------------------------------------
     # Prompt construction
     # ------------------------------------------------------------------
 
     def _build_prompt(self, channel: str, context: dict) -> str:
         s = context["summary"]
+        # 联合告警走专用 prompt 模板（多通道共识，非单通道波形）
+        if context.get("_joint") or s.get("alert_type") == "joint":
+            return self._build_joint_prompt(channel, s)
         ws = s["window_stats"]
         ls = s["cascade"]
         lines = [
@@ -662,6 +775,78 @@ class DiagnosisService:
         ]
         return "\n".join(lines)
 
+    @staticmethod
+    def _build_joint_prompt(channel: str, s: dict) -> str:
+        """联合告警专用 prompt（多通道共识，无单通道波形）。
+
+        联合告警是同一子系统（设备树 folder）下 >=2 个 sibling 通道同时超阈值时
+        触发的「子系统级」告警。prompt 聚焦：子系统名 + 联合分数 + 各子通道贡献 +
+        共识通道数，让 LLM 判断是否为真实系统性异常。
+        """
+        sub_channels = s.get("sub_channels") or []
+        contributions = s.get("contributions") or []
+        joint_curve = s.get("joint_curve") or []
+        joint_score = s.get("joint_score", 0.0)
+        lines = [
+            f"子系统联合告警：{s['display_name'] or channel}",
+            f"告警类型：联合告警（{len(sub_channels)} 通道共识）",
+            f"异常阈值：{s['threshold']}",
+            "",
+            f"【联合异常分数】{joint_score:.4f}"
+            + (f"（{'超' if joint_score > s['threshold'] else '未超'}阈值）" if joint_score else ""),
+        ]
+        if s.get("device_path"):
+            lines.append(f"设备位置：{s['device_path']}")
+        if s.get("description"):
+            lines.append(f"子系统描述：{s['description']}")
+
+        # 各子通道贡献（contributions 是 list[dict]，含 channel/score/threshold/over 等）
+        if contributions:
+            lines += ["", f"【各子通道贡献】（共 {len(contributions)} 个通道）"]
+            for c in contributions:
+                if not isinstance(c, dict):
+                    continue
+                ch = c.get("channel", "?")
+                sc = c.get("score", 0.0)
+                th = c.get("threshold", s["threshold"])
+                over = c.get("over", sc > th)
+                lines.append(
+                    f"- {ch}：异常分数 {sc:.4f}（阈值 {th:.2f}，"
+                    f"{'超限' if over else '未超限'}）"
+                )
+
+        # 联合分数曲线（降采样到 ~16 点，避免 prompt 过长）
+        if joint_curve and len(joint_curve) > 1:
+            try:
+                import numpy as _np
+                arr = _np.array(joint_curve, dtype=float)
+                n = len(arr)
+                target = 16
+                if n > target:
+                    idx = _np.linspace(0, n - 1, target).astype(int)
+                    arr = arr[idx]
+                downsample = ",".join(f"{v:.3f}" for v in arr)
+                peak = float(max(joint_curve))
+                lines += [
+                    "",
+                    f"【联合分数曲线】（{len(joint_curve)} 点降采样到 {len(arr)} 点）",
+                    f"- 峰值：{peak:.4f}",
+                    f"- 曲线：{downsample}",
+                ]
+            except Exception:
+                logger.debug("joint_curve downsample failed", exc_info=True)
+
+        lines += [
+            "",
+            f"【历史告警】该子系统过去共 {s['n_history_alerts']} 条，"
+            f"最近状态：{s['history_statuses'] or '无'}",
+            "",
+            "请判断本次联合告警是真实系统性异常还是误报，并给出依据。"
+            "重点考虑：多通道同时超阈值是否反映真实物理异常，"
+            "还是检测模型对该子系统数据的系统性误报。",
+        ]
+        return "\n".join(lines)
+
     # ------------------------------------------------------------------
     # Waveform chart rendering for vision LLM input
     # ------------------------------------------------------------------
@@ -729,6 +914,7 @@ class DiagnosisService:
 
     def _call_llm(
         self, user_prompt: str, image_b64: str | None = None,
+        system_prompt: str | None = None,
     ) -> tuple[str, str | None]:
         """Call the chat-completions endpoint. Returns (text, error).
 
@@ -737,6 +923,9 @@ class DiagnosisService:
         ``text`` content blocks).  This requires a vision model (e.g.
         GLM-4V-Flash).  When ``image_b64`` is ``None``, falls back to the
         plain text format for backward compatibility with text-only models.
+
+        ``system_prompt`` overrides the default system prompt selection
+        (used by joint alerts which need a waveform-free prompt).
         """
         url = f"{self.base_url}/chat/completions"
         headers = {
@@ -757,7 +946,7 @@ class DiagnosisService:
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": _VISION_SYSTEM_PROMPT if image_b64 else _SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt or (_VISION_SYSTEM_PROMPT if image_b64 else _SYSTEM_PROMPT)},
                 {"role": "user", "content": user_content},
             ],
             "temperature": 0.3,

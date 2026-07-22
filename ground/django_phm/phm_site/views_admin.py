@@ -98,6 +98,11 @@ _KIND_LABEL = {
     'forecaster': '趋势预测',
     'rul': '退化预测(RUL)',
 }
+# 部署位置标签（天基预留 OTA，地基本地推理）
+_DEPLOY_LABEL = {
+    'ground': '地基',
+    'space': '天基',
+}
 
 # @ 命令到模型 key 的映射（需求书 §补充说明：传感器可 @异常检测模型 / @预测模型 / @专属模型）
 # 支持的 @ 命令前缀 → registry key。扫描 description 时按前缀匹配。
@@ -209,6 +214,8 @@ def models_view(request):
             'key': key,
             'kind': entry.kind,
             'kind_label': _KIND_LABEL.get(entry.kind, entry.kind),
+            'deploy': entry.deploy,
+            'deploy_label': _DEPLOY_LABEL.get(entry.deploy, entry.deploy),
             'hub_id': entry.hub_id or '（本地权重）',
             'context_length': entry.context_length,
             'prediction_length': entry.prediction_length,
@@ -577,8 +584,9 @@ _RECYCLE_TABLE_MAP = {
     'diagnoses':  ('diagnosis_records', '诊断记录'),
 }
 _RECYCLE_TABLE_DEFAULT = 'alerts'
-_RECYCLE_LIMIT_DEFAULT = 200
+_RECYCLE_LIMIT_DEFAULT = 20
 _RECYCLE_LIMIT_MAX = 1000
+_RECYCLE_PAGE_SIZE_OPTIONS = [20, 50, 100, 200]
 
 
 def _parse_recycle_table(key):
@@ -706,6 +714,39 @@ def _final_status_badge(final_status):
     }.get(final_status, 'phm-badge-gray')
 
 
+# ── 中文 label 映射（单一真相源，alert_view + recycle_view 共用） ──────
+# 解决中英混合问题：数据行直接输出数据库英文原始值（measured/real/active），
+# 筛选栏用中文，JS 局部刷新又是中文——SSR 与 JS 不一致。这里统一由后端
+# 提供 *_label 字段，模板和 JS 都用 label，保持一致。
+_ALERT_TYPE_LABEL = {
+    'measured':  '实测告警',
+    'predicted': '预测预警',
+    'joint':     '联合告警',
+}
+_VERDICT_LABEL = {
+    'real':        '实警',
+    'false_alarm': '虚警',
+    'uncertain':   '待定',
+}
+# 综合状态/告警状态中文映射（final_status + status 共用）
+_STATUS_LABEL = {
+    'active':      '活跃',
+    'real':        '实警',
+    'false_alarm': '虚警',
+    'uncertain':   '待定',
+    'confirmed':   '已确认',
+    'false':       '误报',
+    'pending':     '待处理',
+}
+
+
+def _label(mapping, value):
+    """从 mapping 取中文 label，未命中时回退原值（None 回退 '—'）。"""
+    if not value:
+        return '—'
+    return mapping.get(value, value)
+
+
 @staff_member_required
 def recycle_view(request):
     """回收站页（GET）。
@@ -721,14 +762,28 @@ def recycle_view(request):
     """
     table_key, sql_table, label = _parse_recycle_table(request.GET.get('table'))
     limit = _parse_recycle_limit(request.GET.get('limit'))
+    page = _parse_alert_page(request.GET.get('page'))  # 复用通用 page 解析
 
     c, err = _container_or_error(request)
     if c is None:
         return _render_state_page(request, err, '回收站')
 
+    # 总行数（分页用）
+    try:
+        total_count = c.sqlite.count_deleted(sql_table)
+    except Exception as e:
+        logger.warning("recycle count_deleted(%s) failed: %s", sql_table, e)
+        total_count = 0
+
+    # 计算分页：page 超出 total_pages 时兜底到最后一页
+    total_pages = max(1, math.ceil(total_count / limit)) if total_count > 0 else 1
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * limit
+
     # 调 SQLiteStore.query_deleted（按 deleted_at DESC 排序）
     try:
-        rows = c.sqlite.query_deleted(sql_table, limit=limit)
+        rows = c.sqlite.query_deleted(sql_table, limit=limit, offset=offset)
     except Exception as e:
         logger.warning("recycle query_deleted(%s) failed: %s", sql_table, e)
         rows = []
@@ -744,6 +799,11 @@ def recycle_view(request):
         item['llm_verdict_badge'] = _verdict_badge(r.get('llm_verdict'))
         item['human_verdict_badge'] = _verdict_badge(r.get('human_verdict'))
         item['final_status_badge'] = _final_status_badge(r.get('final_status'))
+        # 中文 label（与筛选栏一致，避免数据行显示英文原始值）
+        item['alert_type_label'] = _label(_ALERT_TYPE_LABEL, r.get('alert_type'))
+        item['llm_verdict_label'] = _label(_VERDICT_LABEL, r.get('llm_verdict')) if r.get('llm_verdict') else '未诊断'
+        item['human_verdict_label'] = _label(_VERDICT_LABEL, r.get('human_verdict')) if r.get('human_verdict') else '未标注'
+        item['final_status_label'] = _label(_STATUS_LABEL, r.get('final_status'))
         # 传感器名 + 单位（告警列表列用）
         meta = sensor_meta.get(r.get('channel'))
         item['sensor_name'] = meta['sensor_name'] if meta else (r.get('channel') or '—')
@@ -768,6 +828,13 @@ def recycle_view(request):
         'limit': limit,
         'is_superuser': is_superuser,
         'csrf_token_str': request.META.get('CSRF_COOKIE', ''),
+        # 分页（与 alert_view 同款，复用 _pagination.html / _page_size_select.html）
+        'total_count': total_count,
+        'page': page,
+        'total_pages': total_pages,
+        'page_range': _build_page_range(page, total_pages),
+        'current_filters': {'table': table_key if table_key != _RECYCLE_TABLE_DEFAULT else ''},
+        'page_size_options': _RECYCLE_PAGE_SIZE_OPTIONS,
     })
 
 
@@ -1296,7 +1363,7 @@ _ALERT_FILTER_DEFAULTS = {
     'start_ts': None,       # float | None
     'end_ts': None,         # float | None
 }
-_ALERT_LIMIT_DEFAULT = 50
+_ALERT_LIMIT_DEFAULT = 20
 _ALERT_LIMIT_MAX = 1000
 
 # LLM 诊断异步线程池（请求线程不阻塞，进度走 alert_diagnose_status_api）
@@ -1390,6 +1457,9 @@ def _parse_alert_limit(raw):
 
 _ALERT_PAGE_DEFAULT = 1
 _ALERT_PAGE_MAX = 100000  # 上限防滥用（10 万页 × 50 条/页 = 500 万条，远超实际）
+
+# 分页栏「每页显示数量」下拉的候选值（结构化：单一真相源，前端不硬编码）
+_ALERT_PAGE_SIZE_OPTIONS = [20, 50, 100, 200]
 
 
 def _parse_alert_page(raw):
@@ -1502,6 +1572,11 @@ def alert_view(request):
         item['llm_verdict_badge'] = _verdict_badge(r.get('llm_verdict'))
         item['human_verdict_badge'] = _verdict_badge(r.get('human_verdict'))
         item['final_status_badge'] = _final_status_badge(r.get('final_status'))
+        # 中文 label（与筛选栏一致，避免数据行显示英文原始值）
+        item['alert_type_label'] = _label(_ALERT_TYPE_LABEL, r.get('alert_type'))
+        item['llm_verdict_label'] = _label(_VERDICT_LABEL, r.get('llm_verdict')) if r.get('llm_verdict') else '未诊断'
+        item['human_verdict_label'] = _label(_VERDICT_LABEL, r.get('human_verdict')) if r.get('human_verdict') else '未标注'
+        item['final_status_label'] = _label(_STATUS_LABEL, r.get('final_status'))
         # raw_snapshot 末点 = 遥测值
         raw_value = None
         snap = r.get('raw_snapshot')
@@ -1541,12 +1616,15 @@ def alert_view(request):
         'page': page,
         'total_pages': total_pages,
         'page_range': _build_page_range(page, total_pages),
+        # 每页数量候选（供分页栏下拉渲染）
+        'page_size_options': _ALERT_PAGE_SIZE_OPTIONS,
         # AJAX 端点
         'api_detail_url': reverse('phm_admin_alert_detail', args=[0]).replace('/0/', '/__ID__/'),
         'api_annotate_url': reverse('phm_admin_alert_annotate'),
         'api_delete_url': reverse('phm_admin_alert_delete'),
         'api_diagnose_url': reverse('phm_admin_alert_diagnose'),
         'api_diagnose_status_url': reverse('phm_admin_alert_diagnose_status'),
+        'api_diagnose_one_url': reverse('phm_admin_alert_diagnose_one', args=[0]).replace('/0/', '/__ID__/'),
         'api_export_url': reverse('phm_admin_alert_export'),
         'api_create_url': reverse('phm_admin_alert_create'),
     })
@@ -1787,6 +1865,86 @@ def _run_diagnose_batch(container, targets, force_refresh):
 def alert_diagnose_status_api(request):
     """查询诊断进度。staff 可用。"""
     return JsonResponse({'status': 'ok', 'progress': dict(_diagnose_progress)})
+
+
+@staff_member_required
+@require_http_methods(['POST'])
+def alert_diagnose_one_api(request, alert_id):
+    """单条同步诊断（抽屉内「诊断/重新诊断」按钮用）。
+
+    与批量异步的 alert_diagnose_api 不同，这里直接调
+    DiagnosisService.diagnose()（同步返回），适合单条即时反馈场景。
+    DiagnosisService 内部已带缓存（force_refresh=False 时命中缓存秒回），
+    并自动把 llm_verdict 写回 alert_records。
+
+    入参 JSON: {force_refresh?: bool}
+    返回: {status, diagnosis_text, llm_verdict, error, elapsed_sec, cached}
+    """
+    try:
+        aid = int(alert_id)
+    except (TypeError, ValueError):
+        return JsonResponse({'status': 'error', 'message': '非法 alert_id'}, status=400)
+    if aid <= 0:
+        return JsonResponse({'status': 'error', 'message': 'alert_id 必须 > 0'}, status=400)
+
+    try:
+        body = json.loads(request.body or b'{}')
+    except json.JSONDecodeError:
+        body = {}
+    force_refresh = bool(body.get('force_refresh', True))  # 单条默认强制刷新（用户主动点）
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'PHM 服务未就绪：{}'.format(err.get('phm_state'))},
+                            status=503)
+
+    # 取告警三元组
+    try:
+        row = c.sqlite.get_alert_by_id(aid)
+    except AttributeError:
+        all_rows = c.sqlite.query_alerts_filtered(limit=1000)
+        row = next((r for r in all_rows if r.get('id') == aid), None)
+    except Exception as e:
+        logger.warning("alert_diagnose_one query failed: %s", e, exc_info=True)
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+    if not row:
+        return JsonResponse({'status': 'error', 'message': f'告警 {aid} 不存在'}, status=404)
+    if not row.get('channel') or not row.get('created_at'):
+        return JsonResponse({'status': 'error', 'message': '告警缺少 channel/created_at，无法诊断'},
+                            status=400)
+
+    diag = getattr(c, 'diagnosis', None)
+    if diag is None:
+        return JsonResponse({'status': 'error', 'message': '诊断服务未初始化'}, status=503)
+
+    try:
+        result = diag.diagnose(
+            row['channel'],
+            alert_type=row.get('alert_type', 'measured'),
+            alert_ts=row['created_at'],
+            force_refresh=force_refresh,
+        )
+    except Exception as e:
+        logger.warning("alert_diagnose_one failed for %s: %s", aid, e, exc_info=True)
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+
+    # 重新读最新行，拿到 DiagnosisService 写回的 llm_verdict / final_status
+    try:
+        fresh = c.sqlite.get_alert_by_id(aid) or {}
+    except Exception:
+        fresh = {}
+
+    return JsonResponse({
+        'status': 'ok',
+        'id': aid,
+        'diagnosis_text': result.get('diagnosis') or '',
+        'llm_verdict': fresh.get('llm_verdict') or result.get('llm_verdict'),
+        'final_status': fresh.get('final_status'),
+        'error': result.get('error'),
+        'elapsed_sec': result.get('elapsed_sec', 0),
+        'cached': result.get('cached', False),
+    })
 
 
 @staff_member_required

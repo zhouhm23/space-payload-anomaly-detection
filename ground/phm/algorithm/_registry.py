@@ -36,6 +36,9 @@ class ModelEntry:
         context_length: input window length the model was trained on.
         prediction_length: output horizon (0 for detectors / RUL).
         notes: free-text provenance / version note.
+        deploy: deployment target — ``"ground"`` (地基，本地推理) /
+            ``"space"`` (天基，预留 OTA 推送). 天基模型未来通过 OTA 传输
+            到星载计算节点，当前仅作元数据标记，不触发传输逻辑。
     """
     key: str
     kind: str
@@ -43,6 +46,7 @@ class ModelEntry:
     context_length: int
     prediction_length: int
     notes: str = ""
+    deploy: str = "ground"
 
 
 # The three foundation / trained models the system currently ships with.

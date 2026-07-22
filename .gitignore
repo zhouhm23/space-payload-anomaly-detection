@@ -14,3 +14,5 @@ ground/data/*
 !ground/data/channel_calibration.json
 # Model weights (large binary) — keep scaler/config JSONs, exclude .pt
 *.pt
+# Vue3 前端 build 产物（部署时现场 npm run build:no-check 生成，不入库）
+ground/django_phm/static/phm_site/dist/

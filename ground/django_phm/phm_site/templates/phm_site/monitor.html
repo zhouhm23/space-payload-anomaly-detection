@@ -1,26 +1,30 @@
+{% load static %}
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>空间有效载荷天地协同健康管理系统</title>
-    {# v1.1 第一轮占位：生产环境由 Vue3 dist 产物接管 #}
-    {# 开发环境直接跳转到 vite dev server :5173 #}
-    <script>
-        // 兜底：如果 DEBUG=False 但 dist 未构建，提示构建命令
-        if (location.pathname === '/monitor/' && !document.querySelector('div#app')) {
-            document.addEventListener('DOMContentLoaded', function() {
-                document.body.innerHTML = '<div style="padding:40px;font-family:sans-serif;">'
-                    + '<h2>前台监控大屏未构建</h2>'
-                    + '<p>请先构建 Vue3 工程：</p>'
-                    + '<pre>cd src/ground/frontend && npm install && npm run build</pre>'
-                    + '<p>开发模式请使用 <code>npm run dev</code>，访问 http://127.0.0.1:5173/</p>'
-                    + '</div>';
-            });
-        }
-    </script>
+    {% if dist_css_url %}
+    <link rel="stylesheet" href="{{ dist_css_url }}">
+    {% endif %}
 </head>
 <body>
+    {% if dist_js_url %}
+    {# 生产环境：Vue3 dist 产物（views_monitor._scan_dist_assets 动态发现带 hash 的文件名） #}
     <div id="app"></div>
+    <script type="module" src="{{ dist_js_url }}"></script>
+    {% else %}
+    {# dist 未构建：显示构建提示 #}
+    <div style="padding:40px;font-family:sans-serif;color:#333;">
+        <h2>前台监控大屏未构建</h2>
+        <p>请先构建 Vue3 工程（生产模式）：</p>
+        <pre style="background:#f5f5f5;padding:12px;border-radius:4px;">cd src/ground/frontend
+npm install
+npm run build:no-check</pre>
+        <p>构建产物会输出到 <code>django_phm/static/phm_site/dist/</code>，刷新本页即可。</p>
+        <p style="color:#888;font-size:13px;">开发模式（DEBUG=True）访问 /monitor/ 会自动跳转到 Vite dev server :5173。</p>
+    </div>
+    {% endif %}
 </body>
 </html>

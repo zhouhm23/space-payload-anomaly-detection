@@ -59,8 +59,8 @@ class ParseRecycleTableTest(TestCase):
 class ParseRecycleLimitTest(TestCase):
 
     def test_default(self):
-        self.assertEqual(_parse_recycle_limit(None), 200)
-        self.assertEqual(_parse_recycle_limit(''), 200)
+        self.assertEqual(_parse_recycle_limit(None), 20)
+        self.assertEqual(_parse_recycle_limit(''), 20)
 
     def test_valid_int_string(self):
         self.assertEqual(_parse_recycle_limit('50'), 50)
@@ -73,7 +73,7 @@ class ParseRecycleLimitTest(TestCase):
         self.assertEqual(_parse_recycle_limit('-5'), 1)
 
     def test_invalid_falls_back(self):
-        self.assertEqual(_parse_recycle_limit('abc'), 200)
+        self.assertEqual(_parse_recycle_limit('abc'), 20)
 
 
 class ParseIdListTest(TestCase):
@@ -213,13 +213,15 @@ class RecycleViewAccessTest(TestCase):
             username='admin1', password='pw', email='a@b.c'
         )
 
-    def _mock_container(self, rows, with_config=True):
+    def _mock_container(self, rows, with_config=True, total=None):
         """构造一个 mock Container，sqlite.query_deleted 返回 rows。
 
         with_config=True 时给 c.config 一个最小 mock（用于 sensor_meta 反查）。
+        total: count_deleted 返回值（默认 = len(rows)，分页测试可覆盖）。
         """
         c = mock.Mock()
         c.sqlite.query_deleted.return_value = rows
+        c.sqlite.count_deleted.return_value = total if total is not None else len(rows)
         if with_config:
             c.config.load.return_value = {
                 'device_tree': [
@@ -311,11 +313,11 @@ class RecycleViewAccessTest(TestCase):
         # 遥测值（raw_snapshot 末点）+ 单位
         self.assertContains(resp, '0.300')
         self.assertContains(resp, 'A (归一化)')
-        # LLM 状态 / 人工状态 / 综合状态 都应作为独立徽章渲染
-        self.assertContains(resp, '>real<')
-        self.assertContains(resp, '>false_alarm<')
-        # 类型徽章
-        self.assertContains(resp, '>measured<')
+        # LLM 状态 / 人工状态 / 综合状态 都应作为独立徽章渲染（中文 label）
+        self.assertContains(resp, '>实警<')
+        self.assertContains(resp, '>虚警<')
+        # 类型徽章（中文 label，不再显示英文 measured）
+        self.assertContains(resp, '>实测告警<')
 
     def test_renders_unknown_channel_falls_back(self):
         """告警 channel 不在 device_tree 里时，传感器名回退为 channel 名。"""
@@ -342,9 +344,9 @@ class RecycleViewAccessTest(TestCase):
             sb.get_container.return_value = self._mock_container([])
             resp = self.client.get(self.url, {'table': 'detections'})
         self.assertEqual(resp.status_code, 200)
-        # query_deleted 应被调用时传 detection_results
+        # query_deleted 应被调用时传 detection_results（offset=0 默认首页）
         sb.get_container.return_value.sqlite.query_deleted.assert_called_once_with(
-            'detection_results', limit=200
+            'detection_results', limit=20, offset=0
         )
 
     def test_invalid_table_falls_back(self):
@@ -354,7 +356,7 @@ class RecycleViewAccessTest(TestCase):
             sb.get_container.return_value = self._mock_container([])
             self.client.get(self.url, {'table': 'garbage'})
         sb.get_container.return_value.sqlite.query_deleted.assert_called_once_with(
-            'alert_records', limit=200
+            'alert_records', limit=20, offset=0
         )
 
     def test_container_not_ready_renders_state_page(self):
@@ -365,6 +367,48 @@ class RecycleViewAccessTest(TestCase):
             resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, '正在初始化')
+
+    def test_pagination_rendered_when_multiple_pages(self):
+        """多页时渲染分页控件（回收站与告警页共用 _pagination.html）。"""
+        self.client.force_login(self.staff)
+        rows = [{'id': i, 'channel': 'C-1', 'alert_type': 'measured',
+                 'score': 0.5, 'created_at': 1719000000.0 + i,
+                 'status': 'active', 'llm_verdict': None, 'human_verdict': None,
+                 'raw_value': 0.1, 'deleted_at': 1719100000.0 + i,
+                 'final_status': 'active'} for i in range(20)]
+        with mock.patch('phm_site.views_admin.services_bridge') as sb:
+            sb.get_state.return_value = 'ready'
+            sb.get_container.return_value = self._mock_container(rows, total=60)
+            resp = self.client.get(self.url + '?limit=20')
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'phm-pagination')
+        self.assertContains(resp, '共 60 条')
+        self.assertContains(resp, '第 1/3 页')
+
+    def test_page_size_select_in_toolbar(self):
+        """工具栏渲染每页数量下拉（与告警页共用 _page_size_select.html）。"""
+        self.client.force_login(self.staff)
+        rows = [{'id': 1, 'channel': 'C-1', 'alert_type': 'measured',
+                 'score': 0.5, 'created_at': 1719000000.0,
+                 'status': 'active', 'llm_verdict': None, 'human_verdict': None,
+                 'raw_value': 0.1, 'deleted_at': 1719100000.0,
+                 'final_status': 'active'}]
+        with mock.patch('phm_site.views_admin.services_bridge') as sb:
+            sb.get_state.return_value = 'ready'
+            sb.get_container.return_value = self._mock_container(rows, total=1)
+            resp = self.client.get(self.url)
+        self.assertContains(resp, 'phm-page-size-select')
+
+    def test_offset_passed_to_query_deleted(self):
+        """?page=2 时 offset 应 = limit（第 2 页跳过第 1 页的行数）。"""
+        self.client.force_login(self.staff)
+        with mock.patch('phm_site.views_admin.services_bridge') as sb:
+            sb.get_state.return_value = 'ready'
+            sb.get_container.return_value = self._mock_container([], total=40)
+            self.client.get(self.url + '?page=2&limit=20')
+        args, kwargs = sb.get_container.return_value.sqlite.query_deleted.call_args
+        self.assertEqual(kwargs.get('offset'), 20)
+        self.assertEqual(kwargs.get('limit'), 20)
 
 
 # ════════════════════════════════════════════════════════════════════════════
