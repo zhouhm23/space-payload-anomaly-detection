@@ -1,15 +1,16 @@
-"""第 1 页：模型管理页测试。
+"""Page 1: model-management page tests.
 
-覆盖：
-  (a) 匿名访问 302 跳登录
-  (b) staff 访问 200 + 关键内容渲染
-  (c) Container 未就绪时渲染状态占位页（不 500）
-  (d) 设备树 @ 命令扫描正确（_scan_sensor_model_usage）
-  (e) 默认使用情况扫描（_scan_default_usage）
-  (f) 本地资产检查（_check_local_assets，不 import torch）
+Coverage:
+  (a) Anonymous access → 302 redirect to login
+  (b) Staff access → 200 + key content rendered
+  (c) Container-not-ready → renders the status placeholder page (no 500)
+  (d) Device-tree @ command scanning is correct (_scan_sensor_model_usage)
+  (e) Default usage scanning (_scan_default_usage)
+  (f) Local asset check (_check_local_assets; no torch import)
 
-测试用 Django TestCase（pytest-django 也能跑），不依赖真实 Container 状态——
-models_view 的设备树读取有 try/except 兜底，Container 未就绪时走占位页。
+Tests use Django TestCase (pytest-django also works) and do not depend on the
+real Container state — models_view's device-tree read has a try/except
+fallback that renders the placeholder page when the Container is not ready.
 """
 from __future__ import annotations
 
@@ -26,12 +27,12 @@ from phm.algorithm._registry import MODEL_REGISTRY
 
 
 class ModelsViewAccessTest(TestCase):
-    """页面访问权限与渲染。"""
+    """Page access control and rendering."""
 
     def setUp(self):
         self.client = Client()
         self.url = reverse('phm_admin_models')
-        # staff 用户（非超管）
+        # Staff user (not superuser).
         self.staff = User.objects.create_user(
             username='staff1', password='pw', is_staff=True
         )
@@ -40,13 +41,13 @@ class ModelsViewAccessTest(TestCase):
         )
 
     def test_anonymous_redirects_to_login(self):
-        """匿名访问 302 跳登录页（需求书"没登录显示登录页"）。"""
+        """Anonymous access → 302 redirect to the login page (spec: "show login page when not logged in")."""
         resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 302)
         self.assertIn('/admin/login/', resp['Location'])
 
     def test_staff_can_access(self):
-        """staff 用户可访问（模型管理是只读页，所有 staff 可看）。"""
+        """Staff users can access (model management is read-only; all staff can view)."""
         self.client.force_login(self.staff)
         resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 200)
@@ -57,25 +58,25 @@ class ModelsViewAccessTest(TestCase):
         self.assertEqual(resp.status_code, 200)
 
     def test_renders_model_cards(self):
-        """页面渲染出 MODEL_REGISTRY 中所有模型的卡片。"""
+        """The page should render a card for every model in MODEL_REGISTRY."""
         self.client.force_login(self.staff)
         resp = self.client.get(self.url)
         self.assertContains(resp, '模型管理')
         for key in MODEL_REGISTRY:
             self.assertContains(resp, key)
-        # 资产状态徽章二选一
+        # Exactly one of the asset-status badges is present.
         self.assertTrue(
             b'\xe8\xb5\x84\xe4\xba\xa7\xe5\xb0\xb1\xe7\xbb\xaa' in resp.content  # "资产就绪"
             or b'\xe8\xb5\x84\xe4\xba\xa7\xe7\xbc\xba\xe5\xa4\xb1' in resp.content  # "资产缺失"
         )
 
     def test_deploy_label_in_cards(self):
-        """每张卡片渲染 deploy 标签（地基/天基）。"""
+        """Each card renders a deploy label (ground / space)."""
         self.client.force_login(self.staff)
         resp = self.client.get(self.url)
-        # 现有 3 个模型默认都是 ground → 至少 3 个「地基」徽章
+        # The 3 default models are all ground → at least 3 "ground" badges.
         self.assertContains(resp, '地基')
-        # 每个 card dict 都带 deploy / deploy_label 字段
+        # Each card dict carries deploy / deploy_label fields.
         for card in resp.context['cards']:
             self.assertIn('deploy', card)
             self.assertIn('deploy_label', card)
@@ -83,10 +84,12 @@ class ModelsViewAccessTest(TestCase):
             self.assertEqual(card['deploy'], entry.deploy)
 
     def test_container_not_ready_still_renders(self):
-        """模型管理页不依赖 Container：即使 PHM 未就绪也能渲染（只读 MODEL_REGISTRY）。
+        """The model-management page does not depend on the Container: it
+        renders even when PHM is not ready (reads MODEL_REGISTRY only).
 
-        这是产品设计——模型信息是静态元数据 + 本地资产存在性检查，
-        不需要加载 torch / 不需要 Container。设备树扫描有 try/except 兜底。
+        This is by design — model info is static metadata + a local asset
+        existence check; no torch load / no Container needed. The device-tree
+        scan has a try/except fallback.
         """
         from unittest import mock
         self.client.force_login(self.staff)
@@ -95,13 +98,13 @@ class ModelsViewAccessTest(TestCase):
             mock_sb.get_init_error.return_value = None
             resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 200)
-        # 仍渲染模型卡片（不 500，不走占位页）
+        # Model cards are still rendered (no 500, no placeholder page).
         for key in MODEL_REGISTRY:
             self.assertIn(key, resp.content.decode('utf-8'))
 
 
 class SensorModelUsageScanTest(TestCase):
-    """@ 命令扫描逻辑（_scan_sensor_model_usage）。"""
+    """@ command scanning logic (_scan_sensor_model_usage)."""
 
     def test_explicit_at_command_detected(self):
         tree = [
@@ -115,7 +118,7 @@ class SensorModelUsageScanTest(TestCase):
         self.assertEqual(usage.get('rul'), ['R1'])
 
     def test_chinese_at_command_alias(self):
-        """@异常检测模型 应映射到 tspulse。"""
+        """@异常检测模型 should map to tspulse."""
         tree = [
             {'type': 'sensor', 'name': 'X1', 'description': '@异常检测模型 备用'},
         ]
@@ -139,7 +142,7 @@ class SensorModelUsageScanTest(TestCase):
         self.assertEqual(usage.get('tspulse'), ['N1'])
 
     def test_duplicate_sensor_dedup(self):
-        """同一传感器描述里 @tspulse 出现多次只计一次。"""
+        """When @tspulse appears multiple times in one sensor's description, it is counted once."""
         tree = [
             {'type': 'sensor', 'name': 'D', 'description': '@tspulse @tspulse'},
         ]
@@ -152,10 +155,10 @@ class SensorModelUsageScanTest(TestCase):
 
 
 class DefaultUsageScanTest(TestCase):
-    """默认使用情况扫描（_scan_default_usage）。"""
+    """Default-usage scanning (_scan_default_usage)."""
 
     def test_normal_sensor_defaults_to_tspulse_and_ttm(self):
-        """普通传感器（无 @ 命令）默认用 tspulse + ttm_r3。"""
+        """A normal sensor (no @ command) defaults to tspulse + ttm_r3."""
         tree = [
             {'type': 'sensor', 'name': 'N1', 'description': '普通通道'},
         ]
@@ -173,7 +176,7 @@ class DefaultUsageScanTest(TestCase):
         self.assertEqual(usage['tspulse'], [])
 
     def test_explicit_at_not_counted_as_default(self):
-        """有显式 @ 命令的传感器不计入默认使用。"""
+        """A sensor with an explicit @ command is not counted as a default usage."""
         tree = [
             {'type': 'sensor', 'name': 'E1', 'description': '@tspulse'},
         ]
@@ -182,7 +185,7 @@ class DefaultUsageScanTest(TestCase):
 
 
 class CheckLocalAssetsTest(TestCase):
-    """本地资产检查（_check_local_assets，不 import torch）。"""
+    """Local asset check (_check_local_assets; no torch import)."""
 
     def test_unknown_model_key(self):
         result = _check_local_assets('nonexistent_key')
@@ -190,7 +193,7 @@ class CheckLocalAssetsTest(TestCase):
         self.assertIn('未知', result['note'])
 
     def test_known_model_returns_structure(self):
-        """每个 registry key 都应返回完整结构字段。"""
+        """Every registry key should return the complete set of structural fields."""
         for key in MODEL_REGISTRY:
             result = _check_local_assets(key)
             self.assertIn('available', result)
@@ -199,9 +202,10 @@ class CheckLocalAssetsTest(TestCase):
             self.assertIsInstance(result['available'], bool)
 
     def test_rul_local_weights_check(self):
-        """RUL 走本地权重路径检查（不 import torch）。"""
+        """RUL takes the local-weights path check (no torch import)."""
         result = _check_local_assets('rul')
-        # 不断言 available 值（依赖运行环境），只断言走对了分支
+        # Do not assert the available value (environment-dependent); only assert
+        # the right branch was taken.
         self.assertIn('note', result)
-        # 路径应指向 models/rul/
+        # The path should point to models/rul/.
         self.assertIn('rul', result['path'].lower())

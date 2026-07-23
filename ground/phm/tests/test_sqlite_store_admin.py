@@ -1,13 +1,16 @@
-"""Unit tests for SQLiteStore 后台管理扩展方法（Day21 第 3/4 页共用前置）。
+"""Unit tests for the SQLiteStore admin-extension methods (Day21 shared prep
+for pages 3 and 4).
 
-覆盖 ``query_deleted`` / ``delete_by_ids`` / ``restore`` / ``purge_by_ids`` /
+Covers ``query_deleted`` / ``delete_by_ids`` / ``restore`` / ``purge_by_ids`` /
 ``update_alert_verdict_by_ids`` / ``query_alerts_filtered`` /
-``insert_alert_manual`` 共 7 个新方法。
+``insert_alert_manual`` — 7 new methods in total.
 
-设计原则（对齐 ``test_sqlite_store.py``）：
-  - 用 ``tmp_path`` fixture 创建临时 db
-  - 直接通过 ``store._conn.execute(...)`` 塞测试数据（绕过 enqueue 的异步 flush）
-  - 每个方法 happy path + 边界（空 ids / 非法 table / 类型校验）+ 部分命中
+Design principles (aligned with ``test_sqlite_store.py``):
+  - Use the ``tmp_path`` fixture to create a temporary db
+  - Insert test data directly via ``store._conn.execute(...)`` (bypassing the
+    async enqueue flush)
+  - Each method: happy path + boundary cases (empty ids / invalid table / type
+    validation) + partial hits
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ def store(db_path):
 
 def _insert_alert(store, channel="C-1", created_at=None, status="active",
                   llm_verdict=None, human_verdict=None, score=0.7):
-    """同步插一条 alert，返回新 id（不走 enqueue 的异步队列）。"""
+    """Synchronously insert one alert; returns the new id (bypasses the async enqueue queue)."""
     ts = created_at if created_at is not None else time.time()
     cur = store._conn.execute(
         "INSERT INTO alert_records "
@@ -87,7 +90,7 @@ class TestQueryDeleted:
     def test_alerts_returns_only_soft_deleted(self, store):
         a1 = _insert_alert(store, channel="C-1")
         a2 = _insert_alert(store, channel="C-2")
-        # 把 a1 软删，并塞个 raw_snapshot 用来验证 raw_value 派生
+        # Soft-delete a1 and stuff in a raw_snapshot to verify raw_value derivation.
         store._conn.execute(
             "UPDATE alert_records SET is_deleted=1, deleted_at=unixepoch(), "
             "raw_snapshot=? WHERE id=?",
@@ -99,14 +102,14 @@ class TestQueryDeleted:
         assert rows[0]["id"] == a1
         assert rows[0]["channel"] == "C-1"
         assert rows[0]["deleted_at"] is not None
-        # final_status 应已派生（compute_final_status）
+        # final_status should already be derived (compute_final_status).
         assert "final_status" in rows[0]
-        # raw_value 应取 raw_snapshot 末点（需求书「遥测值」列）
+        # raw_value should be the last point of raw_snapshot (spec "telemetry value" column).
         assert rows[0]["raw_value"] == 0.35
         assert rows[0]["raw_snapshot"] == [0.10, 0.20, 0.35]
 
     def test_alerts_raw_value_none_when_no_snapshot(self, store):
-        """无 raw_snapshot 时 raw_value 应为 None（不抛错）。"""
+        """When raw_snapshot is absent, raw_value should be None (no error)."""
         a1 = _insert_alert(store)
         store._conn.execute(
             "UPDATE alert_records SET is_deleted=1, deleted_at=unixepoch() WHERE id=?",
@@ -119,7 +122,7 @@ class TestQueryDeleted:
         assert rows[0]["raw_snapshot"] is None
 
     def test_alerts_raw_value_none_when_snapshot_garbage(self, store):
-        """raw_snapshot 是非法 JSON 时，raw_value=None 不抛错。"""
+        """When raw_snapshot is invalid JSON, raw_value is None and no error is raised."""
         a1 = _insert_alert(store)
         store._conn.execute(
             "UPDATE alert_records SET is_deleted=1, deleted_at=unixepoch(), "
@@ -173,12 +176,12 @@ class TestQueryDeleted:
         store._conn.commit()
         rows = store.query_deleted("alert_records", limit=3)
         assert len(rows) == 3
-        # 非法 limit 兜底
+        # Invalid limit falls back to the default.
         rows2 = store.query_deleted("alert_records", limit="abc")
         assert len(rows2) <= 200  # fallback
 
     def test_offset_pagination_skips_first_n(self, store):
-        """offset 跳过前 N 条（按 deleted_at DESC）。"""
+        """offset skips the first N rows (ordered by deleted_at DESC)."""
         for i in range(5):
             _insert_alert(store)
         store._conn.execute(
@@ -188,12 +191,12 @@ class TestQueryDeleted:
         all_rows = store.query_deleted("alert_records", limit=50)
         page2 = store.query_deleted("alert_records", limit=2, offset=2)
         assert len(page2) == 2
-        # page2 的 id 应是 all_rows[2] 和 all_rows[3]
+        # page2 ids should be all_rows[2] and all_rows[3].
         assert page2[0]["id"] == all_rows[2]["id"]
         assert page2[1]["id"] == all_rows[3]["id"]
 
     def test_offset_zero_matches_no_offset(self, store):
-        """offset=0 与不传 offset 行为一致。"""
+        """offset=0 behaves the same as omitting offset."""
         for _ in range(3):
             _insert_alert(store)
         store._conn.execute(
@@ -205,7 +208,7 @@ class TestQueryDeleted:
         assert [r["id"] for r in a] == [r["id"] for r in b]
 
     def test_offset_beyond_returns_empty(self, store):
-        """offset 超过总条数返回空列表。"""
+        """offset beyond the total count returns an empty list."""
         _insert_alert(store)
         store._conn.execute(
             "UPDATE alert_records SET is_deleted=1, deleted_at=unixepoch()"
@@ -224,7 +227,7 @@ class TestCountDeleted:
     def test_count_after_soft_delete(self, store):
         a1 = _insert_alert(store)
         a2 = _insert_alert(store)
-        _insert_alert(store)  # 第 3 条不删
+        _insert_alert(store)  # Third row is not deleted.
         store.delete_by_ids("alert_records", [a1, a2])
         assert store.count_deleted("alert_records") == 2
 
@@ -238,7 +241,7 @@ class TestCountDeleted:
     def test_count_per_table(self, store):
         _insert_alert(store)
         store.delete_by_ids("alert_records", [_insert_alert(store)])
-        # detection_results 和 diagnosis_records 应为 0
+        # detection_results and diagnosis_records should be 0.
         assert store.count_deleted("detection_results") == 0
         assert store.count_deleted("diagnosis_records") == 0
 
@@ -265,7 +268,7 @@ class TestDeleteByIds:
         a3 = _insert_alert(store)
         n = store.delete_by_ids("alert_records", [a1, a3])
         assert n == 2
-        # a2 应仍可查
+        # a2 should still be queryable.
         rows = store.query_alerts(limit=10)
         ids = [r["id"] for r in rows]
         assert a2 in ids and a1 not in ids and a3 not in ids
@@ -282,12 +285,12 @@ class TestDeleteByIds:
     def test_already_deleted_not_recounted(self, store):
         a1 = _insert_alert(store)
         store.delete_by_ids("alert_records", [a1])
-        # 再删一次，不应计数
+        # Deleting again should not be counted.
         assert store.delete_by_ids("alert_records", [a1]) == 0
 
     def test_invalid_ids_filtered(self, store):
         a1 = _insert_alert(store)
-        # 含 0/负数/字符串，应被 _sanitize_ids 过滤掉，只保留 a1
+        # Contains 0/negative/string; _sanitize_ids filters them out, keeping only a1.
         n = store.delete_by_ids("alert_records", [a1, 0, -5, "abc", None])
         assert n == 1
 
@@ -301,10 +304,10 @@ class TestRestore:
         store.delete_by_ids("alert_records", [a1])
         n = store.restore("alert_records", [a1])
         assert n == 1
-        # 现在应能查到
+        # The row should now be queryable.
         rows = store.query_alerts(limit=10)
         assert any(r["id"] == a1 for r in rows)
-        # deleted_at 应被清空
+        # deleted_at should be cleared.
         row = store._conn.execute(
             "SELECT is_deleted, deleted_at FROM alert_records WHERE id=?", [a1]
         ).fetchone()
@@ -314,7 +317,7 @@ class TestRestore:
         a1 = _insert_alert(store)
         a2 = _insert_alert(store)
         store.delete_by_ids("alert_records", [a1])
-        # 传 a1 + a2，但只有 a1 是软删态
+        # Pass a1 + a2, but only a1 is in the soft-deleted state.
         n = store.restore("alert_records", [a1, a2])
         assert n == 1
 
@@ -337,18 +340,18 @@ class TestPurgeByIds:
         store.delete_by_ids("alert_records", [a1])
         n = store.purge_by_ids("alert_records", [a1])
         assert n == 1
-        # 行应已物理消失
+        # The row should be physically gone.
         row = store._conn.execute(
             "SELECT COUNT(*) FROM alert_records WHERE id=?", [a1]
         ).fetchone()
         assert row[0] == 0
 
     def test_purge_refuses_active_row(self, store):
-        """关键安全：purge_by_ids 不能删 is_deleted=0 的行。"""
+        """Key safety: purge_by_ids must not delete rows with is_deleted=0."""
         a1 = _insert_alert(store)
         n = store.purge_by_ids("alert_records", [a1])
         assert n == 0
-        # 行还在
+        # The row is still present.
         rows = store.query_alerts(limit=10)
         assert any(r["id"] == a1 for r in rows)
 
@@ -411,7 +414,7 @@ class TestQueryAlertsFiltered:
 
     def test_filter_by_alert_type(self, store):
         _insert_alert(store)  # measured
-        # 手动塞一条 predicted
+        # Manually insert a predicted row.
         store._conn.execute(
             "INSERT INTO alert_records (channel, alert_type, created_at, ingested_at, is_deleted) "
             "VALUES ('C-1', 'predicted', ?, unixepoch(), 0)",
@@ -451,7 +454,7 @@ class TestQueryAlertsFiltered:
             _insert_alert(store, created_at=time.time() - i)
         rows = store.query_alerts_filtered(limit=3)
         assert len(rows) == 3
-        # 返回按时间升序（query_alerts 同款 reversed）
+        # Returned in ascending time order (query_alerts applies the same reverse).
         ts = [r["created_at"] for r in rows]
         assert ts == sorted(ts)
 
@@ -463,7 +466,7 @@ class TestQueryAlertsFiltered:
         assert all(r["id"] != a1 for r in rows)
 
     def test_snapshot_json_parsed(self, store):
-        """raw_snapshot / score_snapshot 应被解析成 list（与 query_alerts 一致）。"""
+        """raw_snapshot / score_snapshot should be parsed into a list (consistent with query_alerts)."""
         store._conn.execute(
             "INSERT INTO alert_records (channel, alert_type, created_at, status, "
             "raw_snapshot, score_snapshot, ingested_at, is_deleted) "
@@ -477,21 +480,24 @@ class TestQueryAlertsFiltered:
         assert rows[0]["score_snapshot"] == [0.1, 0.2]
 
     def test_offset_pagination_skips_first_n(self, store):
-        """offset=N 跳过最新的 N 条（SQL DESC 排序的前 N 条），返回后续 limit 条。"""
+        """offset=N skips the N newest rows (the first N in SQL DESC order) and
+        returns the subsequent ``limit`` rows."""
         ids = []
         for i in range(5):
             ids.append(_insert_alert(store, created_at=time.time() + i))
-        # 全部 5 条（按 created_at DESC 查再 reversed → 升序返回）
+        # All 5 rows (queried in created_at DESC order, then reversed → ascending).
         all_rows = store.query_alerts_filtered(limit=50)
         assert len(all_rows) == 5
-        # offset=2, limit=2 跳过最新 2 条（DESC 排序的前 2 条），返回第 3-4 新的
+        # offset=2, limit=2 skips the 2 newest (the first 2 in DESC order) and
+        # returns the 3rd-4th newest.
         page_rows = store.query_alerts_filtered(limit=2, offset=2)
         assert len(page_rows) == 2
-        # all_rows 是升序（最旧到最新），跳过最新 2 条 = 取 all_rows[1:3]
+        # all_rows is ascending (oldest to newest); skipping the 2 newest means
+        # taking all_rows[1:3].
         assert {r["id"] for r in page_rows} == {all_rows[1]["id"], all_rows[2]["id"]}
 
     def test_offset_zero_matches_no_offset(self, store):
-        """offset=0 行为与不传 offset 完全一致（向后兼容）。"""
+        """offset=0 behaves exactly the same as omitting offset (backwards compatible)."""
         for i in range(3):
             _insert_alert(store, created_at=time.time() + i)
         no_offset = store.query_alerts_filtered(limit=50)
@@ -499,13 +505,13 @@ class TestQueryAlertsFiltered:
         assert [r["id"] for r in no_offset] == [r["id"] for r in zero_offset]
 
     def test_offset_beyond_returns_empty(self, store):
-        """offset 超出总行数时返回空列表。"""
+        """offset beyond the total row count returns an empty list."""
         _insert_alert(store)
         rows = store.query_alerts_filtered(limit=10, offset=100)
         assert rows == []
 
     def test_offset_negative_clamped_to_zero(self, store):
-        """负 offset 被钳到 0。"""
+        """A negative offset is clamped to 0."""
         _insert_alert(store)
         rows = store.query_alerts_filtered(limit=10, offset=-5)
         assert len(rows) == 1
@@ -534,7 +540,7 @@ class TestCountAlertsFiltered:
         assert store.count_alerts_filtered() == 1
 
     def test_count_matches_query_len(self, store):
-        """count_alerts_filtered 与 query_alerts_filtered(len) 必须一致（分页正确性前提）。"""
+        """count_alerts_filtered and len(query_alerts_filtered) must agree (a precondition for correct pagination)."""
         for i in range(7):
             _insert_alert(store, channel="C-1" if i < 5 else "C-2",
                           created_at=time.time() + i)
@@ -575,7 +581,7 @@ class TestInsertAlertManual:
         assert store.insert_alert_manual(None, score=0.9) is None
 
     def test_invalid_score_handled(self, store):
-        """非数值 score 应被静默转 None（不抛错）。"""
+        """A non-numeric score should be silently coerced to None (no error)."""
         new_id = store.insert_alert_manual("C-1", score="not-a-number")
         assert new_id is not None
         rows = store.query_alerts(limit=10)
@@ -601,7 +607,7 @@ class TestInsertAlertManual:
         assert r["score_snapshot"] == [0.1, 0.2, 0.3]
 
 
-# ── 纯函数 _sanitize_ids / _placeholders ─────────────────────────────────
+# ── Pure functions _sanitize_ids / _placeholders ─────────────────────────
 
 class TestSanitizeIds:
 

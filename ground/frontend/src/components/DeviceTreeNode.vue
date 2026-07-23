@@ -1,12 +1,14 @@
 <script setup lang="ts">
 /**
- * 递归设备树节点（folder/sensor）
+ * Recursive device-tree node component (folder or sensor).
  *
- * 自己引用自己实现递归（Vue 通过组件 name 自引用）。
- * name="DeviceTreeNode" 让模板里 <DeviceTreeNode> 能找到自己。
- * 折叠状态在节点内部管理（默认全部展开）。
+ * The component self-references to achieve recursion (Vue resolves this
+ * via the component's registered name).  Setting name="DeviceTreeNode"
+ * lets the template find <DeviceTreeNode> within itself.
+ * Collapse state is managed internally per node (default: all expanded).
  *
- * 特殊传感器（isSpecial）显示专有属性：RUL 退化时间。
+ * Special sensors (isSpecial) display proprietary attributes:
+ * RUL (Remaining Useful Life) degradation time.
  */
 import { ref, computed } from 'vue'
 import type { DeviceNode } from '@/stores/system'
@@ -19,7 +21,7 @@ const props = defineProps<{
   depth: number
   currentChannel: string
   healthChannels: Record<string, number>
-  // folders 结构兼容两种：{id: {health: 0.95}} 或 {id: {min: 0.9, mean: 0.95}}
+  // folders structure compatibility: {id: {health: 0.95}} or {id: {min: 0.9, mean: 0.95}}
   healthFolders: Record<string, any>
   aggregationStrategy: 'min' | 'mean'
   readonly?: boolean
@@ -31,7 +33,7 @@ const emit = defineEmits<{
 
 const store = useSystemStore()
 
-// 折叠状态（默认展开）
+// collapse state (default expanded)
 const collapsed = ref(false)
 
 function onClick() {
@@ -59,11 +61,11 @@ function channelHealth(name?: string): number | undefined {
 }
 
 function folderHealth(node: DeviceNode): number | undefined {
-  // 后端 /api/v2/device-tree/ 返回的 folders 结构：{id: {name, health, strategy, channels}}
-  // health 是 0~1 的标量（已按 strategy=min/mean 聚合好）
+  // backend /api/v2/device-tree/ returns folders structure {id: {name, health, strategy, channels}};
+  // health is a 0~1 scalar (already aggregated by strategy=min/mean)
   const f = props.healthFolders?.[node.id] || props.healthFolders?.[node.name]
   if (!f) return undefined
-  // 兼容两种结构：{health: 0.95} 或 {min: 0.9, mean: 0.95}
+  // compatible with two structures: {health: 0.95} or {min: 0.9, mean: 0.95}
   if (typeof f.health === 'number') return f.health
   if (typeof f.min === 'number') return props.aggregationStrategy === 'mean' ? f.mean : f.min
   return undefined
@@ -74,14 +76,14 @@ function healthPct(v: number | undefined): string {
   return `${Math.round(v * 100)}%`
 }
 
-// RUL 退化时间（特殊传感器）
+// RUL degradation time (special sensors)
 const rulInfo = computed(() => {
   if (props.node.type !== 'sensor' || !props.node.isSpecial) return null
   if (!props.node.channelName) return null
   return store.getRul(props.node.channelName)
 })
 
-// RUL 进度（0~1，用于颜色判定）
+// RUL progress (0~1, used for colour judgement)
 function rulColor(rul: number, max: number): string {
   if (!max) return '#7a85a8'
   const ratio = rul / max
@@ -107,26 +109,26 @@ const hasChildren = (children?: DeviceNode[]) => Array.isArray(children) && chil
       :title="node.description || node.name"
       @click="onClick"
     >
-      <!-- 展开/折叠图标 -->
+      <!-- Expand/collapse icon -->
       <span v-if="node.type === 'folder' && hasChildren(node.children)" class="expand-icon">
         {{ collapsed ? '▶' : '▼' }}
       </span>
       <span v-else class="expand-icon placeholder"></span>
 
-      <!-- 节点图标 -->
+      <!-- Node icon -->
       <span class="node-icon">
         <template v-if="node.type === 'folder'">📁</template>
         <template v-else-if="node.isSpecial">⚙️</template>
         <template v-else>📊</template>
       </span>
 
-      <!-- 节点名（特殊传感器后加 *） -->
+      <!-- Node name (special sensors suffixed with *) -->
       <span class="node-name">
         {{ node.name }}
         <span v-if="node.isSpecial" class="special-mark" title="特殊传感器，不参与轮播">*</span>
       </span>
 
-      <!-- 健康度徽章 / RUL 退化时间（特殊传感器） -->
+      <!-- Health badge / RUL degradation time (special sensors) -->
       <span
         v-if="node.type === 'sensor' && node.isSpecial && rulInfo"
         class="health-badge rul-badge"
@@ -160,7 +162,7 @@ const hasChildren = (children?: DeviceNode[]) => Array.isArray(children) && chil
       </span>
     </div>
 
-    <!-- 递归子节点 -->
+    <!-- Recursive child nodes -->
     <div v-if="node.type === 'folder' && !collapsed && hasChildren(node.children)">
       <DeviceTreeNode
         v-for="child in node.children"
@@ -180,7 +182,7 @@ const hasChildren = (children?: DeviceNode[]) => Array.isArray(children) && chil
 
 <style scoped>
 .tree-node-wrapper {
-  /* 默认不选中（避免点击展开/折叠时选中图标等无关元素） */
+  /* Default: no selection (avoid selecting icons etc. when clicking expand/collapse) */
   user-select: none;
 }
 
@@ -230,7 +232,7 @@ const hasChildren = (children?: DeviceNode[]) => Array.isArray(children) && chil
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
-  /* 名称部分允许文本选中（用户可复制传感器名） */
+  /* Name area allows text selection (user can copy sensor name) */
   user-select: text;
   -webkit-user-select: text;
 }

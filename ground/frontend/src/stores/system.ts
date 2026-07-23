@@ -1,11 +1,11 @@
 /**
- * 全局系统状态 store
+ * Global system state store.
  *
- * - 后端启动状态（startupStatus）：idle/initializing/ready/failed
- * - 系统信息（systemInfo）：顶栏用（天地链接、UTC、系统名）
- * - 设备树（deviceTree + health）：左栏 + 中央轮播用
+ * - Backend startup state (startupStatus): idle/initializing/ready/failed
+ * - System info (systemInfo): for the top bar (space-ground link, UTC, system name)
+ * - Device tree (deviceTree + health): for the left panel + center carousel
  *
- * 1b 阶段先存这些，后续按需扩展。
+ * Phase 1b stores just these; extend as needed later.
  */
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
@@ -55,7 +55,7 @@ export const useSystemStore = defineStore('system', () => {
   const startupError = ref<string>('')
   const systemInfo = ref<SystemInfo | null>(null)
   const deviceTree = ref<DeviceTreeData | null>(null)
-  // RUL 退化预测数据（特殊传感器用）
+  // RUL degradation prediction data (for special sensors)
   const rulData = ref<Array<{
     channel: string
     rul: number
@@ -64,13 +64,13 @@ export const useSystemStore = defineStore('system', () => {
     model: string
     history?: number[]
   }>>([])
-  // 当前选中通道（轮播 + 手动切换共享）
+  // Currently selected channel (shared by carousel + manual selection)
   const currentChannel = ref<string>('')
-  // 当前通道序号 / 总通道数（用于顶栏显示 X/Y）
-  const carouselChannels = ref<string[]>([]) // 参与轮播的通道列表
+  // Current channel index / total (for the top-bar X/Y indicator)
+  const carouselChannels = ref<string[]>([]) // channels participating in the carousel
   const carouselIndex = ref(0)
 
-  /** 检查启动状态 */
+  /** Check the startup state. */
   async function checkStartup() {
     try {
       const res = await api.startupStatus()
@@ -82,21 +82,21 @@ export const useSystemStore = defineStore('system', () => {
     }
   }
 
-  /** 刷新系统信息 */
+  /** Refresh system info. */
   async function refreshSystemInfo() {
     try {
       systemInfo.value = await api.systemInfo()
     } catch (e) {
-      // 静默失败（顶栏会保留上次数据）
+      // Fail silently (the top bar keeps the last values)
       console.warn('[systemInfo] refresh failed:', e)
     }
   }
 
-  /** 刷新设备树 */
+  /** Refresh the device tree. */
   async function refreshDeviceTree() {
     try {
       deviceTree.value = await api.deviceTree()
-      // 更新参与轮播的通道列表（仅非特殊的一维数据源传感器）
+      // Rebuild the carousel channel list (only non-special 1-D source sensors)
       const sensors: string[] = []
       function walk(nodes: DeviceNode[]) {
         for (const n of nodes) {
@@ -109,7 +109,7 @@ export const useSystemStore = defineStore('system', () => {
       }
       if (deviceTree.value) walk(deviceTree.value.device_tree)
       carouselChannels.value = sensors
-      // 若当前通道被清空了，选第一个
+      // If the current channel was cleared, pick the first one
       if (!currentChannel.value && sensors.length > 0) {
         currentChannel.value = sensors[0]
         carouselIndex.value = 0
@@ -119,38 +119,39 @@ export const useSystemStore = defineStore('system', () => {
     }
   }
 
-  /** 刷新 RUL 退化预测（5s，特殊传感器用） */
+  /** Refresh RUL degradation prediction (every 5s, for special sensors). */
   async function refreshRul() {
     try {
       const res = await api.rul()
       rulData.value = res.channels || []
     } catch (e) {
-      // RUL 服务未启用时静默（保留上次数据）
+      // Silent when the RUL service is disabled (keep the last values)
     }
   }
 
-  /** 按通道名取 RUL 数据 */
+  /** Get RUL data by channel name. */
   function getRul(channel: string) {
     return rulData.value.find((r) => r.channel === channel) || null
   }
 
-  /** 切到下一个轮播通道 */
+  /** Advance to the next carousel channel. */
   function nextCarousel() {
     if (carouselChannels.value.length === 0) return
     carouselIndex.value = (carouselIndex.value + 1) % carouselChannels.value.length
     currentChannel.value = carouselChannels.value[carouselIndex.value]
   }
 
-  /** 手动选中通道（重置轮播序号） */
+  /** Manually select a channel (resets the carousel index). */
   function selectChannel(ch: string) {
     currentChannel.value = ch
     const idx = carouselChannels.value.indexOf(ch)
     if (idx >= 0) carouselIndex.value = idx
   }
 
-  // ── 显示名映射 ────────────────────────────────────────────────────────────
-  // 内部 channelName → 显示 name（如 VS-sine → S1）
-  // 修改设备树后，历史告警里的 channel 会自动用新名显示（实时映射，无需数据迁移）
+  // ── Display-name mapping ───────────────────────────────────────────────
+  // Internal channelName → display name (e.g. VS-sine → S1).
+  // After the device tree is edited, historical alerts re-render with the
+  // new name automatically (live mapping, no data migration needed).
   const displayNameMap = computed<Record<string, string>>(() => {
     const map: Record<string, string> = {}
     function walk(nodes: DeviceNode[]) {
@@ -165,18 +166,19 @@ export const useSystemStore = defineStore('system', () => {
     return map
   })
 
-  /** 内部 channelName → 显示名（找不到时返回原值） */
+  /** Internal channelName → display name (returns the input unchanged if not found). */
   function displayName(channel: string | undefined | null): string {
     if (!channel) return '—'
     return displayNameMap.value[channel] || channel
   }
 
-  // ── 自动轮播 ────────────────────────────────────────────────────────────
-  // 默认 15 秒切换（需求书要求），间隔可从 theme.carousel.intervalMs 读
+  // ── Auto carousel ──────────────────────────────────────────────────────
+  // Defaults to a 15s switch (per the spec); the interval is also readable
+  // from theme.carousel.intervalMs.
   let carouselTimer: ReturnType<typeof setInterval> | null = null
   const carouselIntervalMs = ref<number>(15000)
 
-  /** 启动自动轮播（如已启动则忽略）。 */
+  /** Start the auto carousel (no-op if already running). */
   function startCarousel(intervalMs?: number) {
     if (intervalMs) carouselIntervalMs.value = intervalMs
     if (carouselTimer) return
@@ -187,7 +189,7 @@ export const useSystemStore = defineStore('system', () => {
     }, carouselIntervalMs.value)
   }
 
-  /** 停止自动轮播。 */
+  /** Stop the auto carousel. */
   function stopCarousel() {
     if (carouselTimer) {
       clearInterval(carouselTimer)

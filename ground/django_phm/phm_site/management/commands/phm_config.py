@@ -1,18 +1,21 @@
 """System / theme config management command.
 
-Agent 友好双通道（AGENTS.md §结构化设计规范 第 5 条）：与「系统设置」
-HTTP API 并行的 CLI 通道，直调 service 层，不重复业务逻辑。
+Agent-friendly dual channel (AGENTS.md §Structured Design Spec item 5): a CLI
+channel parallel to the "System Settings" HTTP API. Directly calls the service
+layer; does not duplicate business logic.
 
-子命令：
+Subcommands:
   --get  --category system|theme  --key thresholds.anomaly [--format json|text]
   --set  --category system|theme  --key thresholds.anomaly --value 0.42
   --list --category system|theme|calibration [--format json|text]
 
---key 用点号分隔 section.key（与 settings 页面的「变量名」列一致）。
+--key uses dot-separated section.key (consistent with the "variable name" column
+on the settings page).
 
-注意：calibration 只支持 --list / --get，不支持 --set（离线标定产物）。
+Note: calibration only supports --list / --get, not --set (offline calibration
+artifacts).
 
-示例：
+Examples:
   python manage.py phm_config --list --category system --format json
   python manage.py phm_config --get --category theme --key colors.blue
   python manage.py phm_config --set --category system --key thresholds.anomaly --value 0.42
@@ -31,7 +34,7 @@ from phm_site.views_admin import (
 
 
 def _parse_key(key: str) -> tuple[str, str]:
-    """把 'section.key' 切成 (section, key)。无点号 → CommandError。"""
+    """Split 'section.key' into (section, key). Raises CommandError if no dot is present."""
     if not key or "." not in key:
         raise CommandError(f"--key 必须形如 'section.key'，实际：{key!r}")
     section, _, sub = key.partition(".")
@@ -41,10 +44,11 @@ def _parse_key(key: str) -> tuple[str, str]:
 
 
 def _value_coerce(raw: str | None) -> object:
-    """把命令行字符串智能转成 bool/int/float/str。
+    """Smart-coerce a CLI string into bool/int/float/str.
 
-    service 层会再做一次类型校验，这里只是尽量让 --value 0.42 被识别为
-    float、--value true 被识别为 bool。
+    The service layer performs its own type validation later; this helper
+    simply ensures that e.g. --value 0.42 is recognised as float and
+    --value true is recognised as bool.
     """
     if raw is None:
         raise CommandError("--set 需要 --value")
@@ -53,17 +57,17 @@ def _value_coerce(raw: str | None) -> object:
         return True
     if low in ("false", "no", "off"):
         return False
-    # int？
+    # Try int?
     try:
         return int(raw)
     except ValueError:
         pass
-    # float？
+    # Try float?
     try:
         return float(raw)
     except ValueError:
         pass
-    # JSON 对象/数组？
+    # JSON object/array?
     try:
         return _json.loads(raw)
     except (ValueError, TypeError):
@@ -112,7 +116,7 @@ class Command(BaseCommand):
             self._do_set(category, opts)
             return
 
-    # ── 子操作 ──────────────────────────────────────────────────
+    # ── Sub-operations ──────────────────────────────────────────────────
 
     def _do_list(self, category, opts):
         if category == 'system':
@@ -127,7 +131,7 @@ class Command(BaseCommand):
             self._list_calibration(opts)
             return
 
-        # 扁平化为 [{section, key, name, value, doc}]
+        # Flatten into [{section, key, name, value, doc}]
         flat = []
         for section, sec_values in raw.items():
             if section.startswith('_') or not isinstance(sec_values, dict):

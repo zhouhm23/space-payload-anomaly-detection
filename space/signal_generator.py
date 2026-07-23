@@ -1,24 +1,28 @@
 """Signal generator — independent process that owns SensorSource instances.
 
-架构上下文
-==========
-M1.2 把原本内嵌在 ``main.py`` 里的 SensorSource 调用拆出独立进程：
+Architectural context
+=====================
+M1.2 splits the SensorSource calls that used to live inside ``main.py`` out
+into a standalone process:
 
-- 本进程（信号发生器）：持有 SensorSource 实例（FileSource/VirtualSensorSource），
-  通过本地 TCP IPC（``signal_ipc.SignalIpcServer``）响应采集卡的 read 请求
-- 采集卡（``main.py``）：通过 ``signal_ipc.SignalIpcClient`` 向本进程请求数据
+- This process (the signal generator): holds the SensorSource instances
+  (FileSource / VirtualSensorSource) and answers the DAQ card's read requests
+  via local TCP IPC (``signal_ipc.SignalIpcServer``).
+- The DAQ card (``main.py``): requests data from this process via
+  ``signal_ipc.SignalIpcClient``.
 
-为什么独立进程
-==============
-1. 真实场景中"信号源"是物理传感器（独立硬件），不是采集卡内部的一部分
-2. 仿真期 FileSource 加载大数据集到内存，独立进程避免与采集卡的 TSPulse
-   模型争内存
-3. 进程隔离让数据源切换（如 NASA-MSL → 真实传感器接入）只改本进程，
-   采集卡零改动
+Why a separate process
+======================
+1. In the real world the "signal source" is a physical sensor (separate
+   hardware), not a part of the DAQ card.
+2. During simulation FileSource loads large datasets into memory; a separate
+   process keeps it from contending with the DAQ card's TSPulse model for RAM.
+3. Process isolation means a data-source switch (e.g. NASA-MSL → a real sensor
+   feed) only touches this process; the DAQ card is unchanged.
 
-配置
-====
-读 ``space/data/signal_sources.json``，结构::
+Configuration
+=============
+Reads ``space/data/signal_sources.json`` with this shape::
 
     {
       "default_sample_rate": 100.0,
@@ -28,16 +32,16 @@ M1.2 把原本内嵌在 ``main.py`` 里的 SensorSource 调用拆出独立进程
       ]
     }
 
-- ``channel`` 必须与 ``space_daq.json`` 的 ``channels[].name`` 对应
-- ``sourceId / loop / signal_freq_hz`` 全是 SensorSource 的构造参数
+- ``channel`` must match ``channels[].name`` in ``space_daq.json``.
+- ``sourceId / loop / signal_freq_hz`` are all SensorSource constructor params.
 
-启动
-====
-作为模块运行::
+Startup
+=======
+Run as a module::
 
     python -m space.signal_generator [--port 9878] [--config path]
 
-或直接 ``python space/signal_generator.py``。
+or directly ``python space/signal_generator.py``.
 """
 
 from __future__ import annotations

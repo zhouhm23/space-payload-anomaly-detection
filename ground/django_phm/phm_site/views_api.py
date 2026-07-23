@@ -1,19 +1,20 @@
-"""DRF 新接口视图（/api/v2/）。
+"""DRF v2 views (/api/v2/).
 
-需求书 §前台监控大屏 所需的数据源 API。
-所有需要 Container 的端点先检查 services_bridge.get_state()，
-未就绪时返回 503 + 状态提示，避免误导前端报 500。
+The data-source APIs needed by the spec front-end monitor dashboard.
+Every endpoint that needs the Container first checks
+services_bridge.get_state(); when not ready it returns 503 + a status hint,
+so the front-end is never misled into a 500.
 
-端点清单（v1.1 第一轮 1b）：
-- GET /api/v2/ping/                健康探针（纯 Django 进程）
-- GET /api/v2/startup-status/      Container 三态探针（前端轮询）
-- GET /api/v2/theme/               前台主题
-- GET /api/v2/system-info/         顶栏系统信息
-- GET /api/v2/device-tree/         设备树（含健康值聚合）
-- GET /api/v2/window/              遥测窗口（raw+pred 同行）
-- GET /api/v2/alerts/              实测告警列表（含 verdict 四维度）
-- GET /api/v2/warnings/            预测预警列表
-- GET /api/v2/rul/                 RUL 退化预测（特殊传感器）
+Endpoint list (round 1b of v1.1):
+- GET /api/v2/ping/                health probe (pure Django process)
+- GET /api/v2/startup-status/      Container three-state probe (front-end poll)
+- GET /api/v2/theme/               front-end theme
+- GET /api/v2/system-info/         top-bar system info
+- GET /api/v2/device-tree/         device tree (with health aggregation)
+- GET /api/v2/window/              telemetry window (raw+pred per row)
+- GET /api/v2/alerts/              measured-alert list (with the four-dimension verdict)
+- GET /api/v2/warnings/            predicted-warning list
+- GET /api/v2/rul/                 RUL degradation prediction (special sensors)
 """
 from __future__ import annotations
 
@@ -29,9 +30,9 @@ from phm.services.theme_service import get_theme
 from . import services_bridge
 
 
-# ── 通用工具 ─────────────────────────────────────────────────────────────────
+# ── Common helpers ──────────────────────────────────────────────────────────
 def _container_or_503():
-    """获取 Container，未就绪时返回 (None, 503 Response)。"""
+    """Get the Container; return (None, 503 Response) when not ready."""
     state = services_bridge.get_state()
     if state == 'failed':
         err = services_bridge.get_init_error()
@@ -53,11 +54,11 @@ def _container_or_503():
         )
 
 
-# ── 系统类（无需 Container） ─────────────────────────────────────────────────
+# ── System endpoints (no Container needed) ──────────────────────────────────
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def ping_view(request):
-    """健康探针（纯 Django 进程，不检查 Container）。"""
+    """Health probe (pure Django process; does not check the Container)."""
     return Response({
         'status': 'ok',
         'service': 'phm-ground',
@@ -68,10 +69,10 @@ def ping_view(request):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def startup_status_view(request):
-    """启动状态探针（前端轮询用）。
+    """Startup-state probe (for the front-end poll).
 
-    返回 services_bridge 三态：idle / initializing / ready / failed。
-    前端等到 state=ready 才开始拉业务数据。
+    Returns the services_bridge three states: idle / initializing / ready / failed.
+    The front-end waits until state=ready before fetching business data.
     """
     state = services_bridge.get_state()
     payload = {
@@ -86,18 +87,19 @@ def startup_status_view(request):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def theme_view(request):
-    """前台主题配置（动态可刷，首屏仍走 context_processor）。"""
+    """Front-end theme config (dynamic, refreshable; first paint still goes through the context processor)."""
     return Response(get_theme().as_dict())
 
 
-# ── 顶栏 ────────────────────────────────────────────────────────────────────
+# ── Top bar ─────────────────────────────────────────────────────────────────
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def system_info_view(request):
-    """系统信息（顶栏用）：天地链接状态、延迟、UTC 时间、系统名称。
+    """System info (for the top bar): space-ground link status, latency, UTC time, system name.
 
-    天地延迟 = TCP 往返时延（services_bridge 测量 poll 耗时），
-    本地测试应接近 0；真实卫星链路为秒级。
+    Space-ground latency = TCP round-trip (services_bridge measures the poll
+    cost); it should be near 0 in local tests and on the order of seconds on a
+    real satellite link.
     """
     info = {
         'system_title': '空间有效载荷天地协同健康管理系统',
@@ -113,21 +115,23 @@ def system_info_view(request):
         info['note'] = 'PHM 正在初始化'
         return Response(info)
 
-    # 从 services_bridge 拉链路 RTT 统计
+    # Pull the link RTT statistics from services_bridge
     link = services_bridge.get_link_status()
     info['link_status'] = link['status']
     info['link_latency_ms'] = round(link['rtt_ms'], 1) if link['rtt_ms'] is not None else None
     return Response(info)
 
 
-# ── 设备树（含健康值聚合） ──────────────────────────────────────────────────
+# ── Device tree (with health aggregation) ───────────────────────────────────
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def device_tree_view(request):
-    """设备树（需求书 §左设备树区）。
+    """Device tree (spec left device-tree panel).
 
-    返回 ConfigService.load() + HealthService 健康值聚合（系统+逐通道+文件夹）。
-    特殊传感器（非一维数据源）名称后端加 `*` 标注，前端不参与轮播。
+    Returns ConfigService.load() + HealthService health aggregation
+    (system + per-channel + per-folder). Special sensors (non-1-D sources) get
+    a `*` suffix on their name on the back end and are excluded from the
+    front-end carousel.
     """
     c, err_resp = _container_or_503()
     if err_resp is not None:
@@ -148,25 +152,26 @@ def device_tree_view(request):
         )
 
 
-# ── 遥测窗口（图表主数据源） ────────────────────────────────────────────────
+# ── Telemetry window (the chart's main data source) ─────────────────────────
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def window_view(request):
-    """实时遥测窗口（需求书 §中图表区 主数据源）。
+    """Live telemetry window (the main data source for the spec centre-chart panel).
 
-    数据源：RingBuffer（实时，无 flush 延迟）+ WarningService._latest_predict_scores（实时 pred）。
-    比 SQLite query_window 更新鲜，适合实时大屏 2s 刷新。
+    Data source: RingBuffer (live, no flush latency) +
+    WarningService._latest_predict_scores (live pred). Fresher than
+    SQLite query_window, suitable for a 2s live-monitor refresh.
 
     Query params:
-        channel: 通道名（必填）
-        count:   行数（默认 512）
+        channel: channel name (required)
+        count:   row count (default 512)
 
-    返回结构（raw + pred 合并对齐到同一时间戳）：
+    Return shape (raw + pred merged and aligned on the same timestamp):
         {
           channel, count, threshold,
           data: [{timestamp, raw_value, anomaly_score,
                   predicted_value, predicted_anomaly_score}, ...],
-          predict_window: {start, end, scores: [...]}  # 预测段元信息
+          predict_window: {start, end, scores: [...]}  # prediction-segment metadata
         }
     """
     c, err_resp = _container_or_503()
@@ -185,15 +190,17 @@ def window_view(request):
         count = 512
 
     try:
-        # 数据源：SQLite query_window（已做 raw+pred UPSERT 合并，时间戳对齐）
-        # 主分支策略：默认拉 2048 行（4× 可视区 512），前端按需截取可视子段
-        # 这样能覆盖到 pred 数据（pred 落后 raw 几秒，必须拉足够长窗口）
+        # Data source: SQLite query_window (raw+pred UPSERT-merged, timestamps aligned).
+        # Main-branch policy: pull 2048 rows by default (4× the 512-row viewport);
+        # the front-end slices the visible sub-window as needed. This is necessary
+        # to cover the pred data (pred lags raw by a few seconds, so the window
+        # must be long enough).
         if count < 2048:
             count = 2048
         sqlite_result = c.sqlite.query_window(channel, count=count)
         data = sqlite_result.get('data', [])
 
-        # 阈值（从设备树 sensor 配置取，fallback 默认 0.5）
+        # Threshold (from the device-tree sensor config, fallback default 0.5)
         threshold = 0.5
         try:
             from phm.services.tree_utils import get_flat_sensors
@@ -220,21 +227,22 @@ def window_view(request):
         )
 
 
-# ── 全通道告警点图数据 ──────────────────────────────────────────────────────
+# ── All-channel alert-point map data ────────────────────────────────────────
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def alert_points_view(request):
-    """全通道告警点图（需求书 §全通道告警点图区）。
+    """All-channel alert-point map (spec all-channel alert-point panel).
 
-    返回所有通道在统一时间轴上的告警红点（实测）和预警黄点（预测）。
-    每个点含 (channel, timestamp, score, type)。
+    Returns every channel's alert red dots (measured) and warning yellow dots
+    (predicted) on a unified time axis. Each point carries
+    (channel, timestamp, score, type).
     """
     c, err_resp = _container_or_503()
     if err_resp is not None:
         return err_resp
 
     try:
-        # 实测告警（SQLite 历史最近 50 条）
+        # Measured alerts (most recent 50 from SQLite)
         alerts = c.sqlite.query_alerts(limit=50)
         red_points = [
             {
@@ -247,7 +255,7 @@ def alert_points_view(request):
             if a.get('alert_type') == 'measured'
         ]
 
-        # 预测预警（内存 WarningStore）
+        # Predicted warnings (in-memory WarningStore)
         yellow_points = []
         try:
             warnings_list = c.warnings.recent(limit=50)
@@ -261,14 +269,14 @@ def alert_points_view(request):
         except Exception:
             pass
 
-        # 全通道列表（用于 Y 轴分类）
+        # All-channel list (for Y-axis categories)
         channels = sorted(set(
             [p['channel'] for p in red_points + yellow_points if p.get('channel')]
         ))
 
         return Response({
-            'red_points': red_points,      # 实测告警
-            'yellow_points': yellow_points, # 预测预警
+            'red_points': red_points,      # measured alerts
+            'yellow_points': yellow_points, # predicted warnings
             'channels': channels,
         })
     except Exception as e:
@@ -278,16 +286,18 @@ def alert_points_view(request):
         )
 
 
-# ── 实测告警 + 预测预警 ─────────────────────────────────────────────────────
+# ── Measured alerts + predicted warnings ────────────────────────────────────
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def alerts_view(request):
-    """实测告警列表（需求书 §右详情区下半部分）。
+    """Measured-alert list (spec right-detail panel, lower half).
 
-    对齐主分支风格：从内存 AlertStore 取实时告警（含 raw_window/score_window 快照），
-    合并 SQLite 的 verdict 四维度。返回字段精简，前端直接渲染。
+    Aligned with the main-branch style: pulls live alerts from the in-memory
+    AlertStore (with raw_window/score_window snapshots) and merges the
+    four-dimension verdict from SQLite. The returned fields are trimmed so the
+    front-end can render directly.
 
-    每条告警字段：
+    Per-alert fields:
       channel, time, score, message, raw_window (list), score_window (list),
       human_verdict, llm_verdict, final_status
     """
@@ -301,9 +311,9 @@ def alerts_view(request):
         limit = 20
 
     try:
-        # 从内存 AlertStore 取实时告警（AlertPacket 结构，含 raw_window/score_window）
+        # Live alerts from the in-memory AlertStore (AlertPacket structure, with raw_window/score_window)
         alerts = c.alert_service.list(limit)
-        # 合并 SQLite 的 verdict 四维度（key=channel+time）
+        # Merge the four-dimension verdict from SQLite (key=channel+time)
         try:
             db_rows = c.sqlite.query_alerts(limit=limit * 2)
             verdict_map = {}
@@ -338,9 +348,9 @@ def alerts_view(request):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def warnings_view(request):
-    """预测预警列表（需求书 §右详情区下半部分，黄色预警）。
+    """Predicted-warning list (spec right-detail panel, lower half; yellow warnings).
 
-    返回 WarningStore 中的 pending/confirmed/false/unverifiable 预警。
+    Returns the pending/confirmed/false/unverifiable warnings from WarningStore.
     """
     c, err_resp = _container_or_503()
     if err_resp is not None:
@@ -352,7 +362,7 @@ def warnings_view(request):
         limit = 20
 
     try:
-        # WarningStore.recent(limit) 返回 list[dict]（WarningEntry.to_dict() 已序列化）
+        # WarningStore.recent(limit) returns list[dict] (WarningEntry.to_dict() already serialised)
         warnings_list = c.warnings.recent(limit=limit) if hasattr(c.warnings, 'recent') else []
         return Response({
             'warnings': warnings_list,
@@ -365,14 +375,14 @@ def warnings_view(request):
         )
 
 
-# ── RUL 退化预测（特殊传感器） ──────────────────────────────────────────────
+# ── RUL degradation prediction (special sensors) ────────────────────────────
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def rul_view(request):
-    """RUL 退化预测（需求书 §特殊传感器）。
+    """RUL degradation prediction (spec special-sensor panel).
 
-    标记为 @rul:fd001 的特殊传感器才返回数据。
-    无标记通道或资产缺失时返回 503。
+    Only special sensors tagged @rul:fd001 return data. Untagged channels or
+    missing assets return 503.
     """
     c, err_resp = _container_or_503()
     if err_resp is not None:

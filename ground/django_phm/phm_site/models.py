@@ -1,19 +1,23 @@
-"""Django ORM 模型。
+"""Django ORM models.
 
-设计原则：
-- 现有业务表（alert_records/detection_results/diagnosis_records）通过 db_table
-  映射到 SQLiteStore 的真实表，ORM 与 SQLiteStore 共用同一份 phm.db。
-- 写入仍走 SQLiteStore 后台 flush 线程；ORM 主要用于后台浏览/筛选/CRUD。
-- v1.1 新增模型（设备树/系统设置/审计日志）走标准 Django migration。
+Design principles:
+- The existing business tables (alert_records / detection_results /
+  diagnosis_records) are mapped, via db_table, to SQLiteStore's real tables;
+  the ORM and SQLiteStore share the same phm.db.
+- Writes still go through SQLiteStore's background flush thread; the ORM is
+  mainly for admin browsing / filtering / CRUD.
+- New v1.1 models (device tree / system settings / audit log) use standard
+  Django migrations.
 
-v1.1 第一轮（1a）只迁移 3 个现有业务表 + AlertRecord 的 verdict 四维度。
-后续轮次按需新增设备树/设置/审计模型。
+Round 1 (1a) of v1.1 migrates only the 3 existing business tables +
+AlertRecord's four-dimension verdict. Later rounds add device-tree / settings
+/ audit models as needed.
 """
 from __future__ import annotations
 
 from django.db import models
 
-# verdict 四维度共用 choices（与 phm.database.warning_store._VALID_VERDICTS 对齐）
+# Shared verdict choices for the four-dimension verdict (aligned with phm.database.warning_store._VALID_VERDICTS)
 VERDICT_CHOICES = [
     ('',            '—（未标注）—'),
     ('real',        '真实异常'),
@@ -21,7 +25,7 @@ VERDICT_CHOICES = [
     ('uncertain',   '不确定'),
 ]
 
-# 告警核验状态 choices（alert_records.status）
+# Alert verification status choices (alert_records.status)
 ALERT_STATUS_CHOICES = [
     ('active',      '活跃'),
     ('pending',     '待定'),
@@ -32,10 +36,10 @@ ALERT_STATUS_CHOICES = [
 
 
 class DetectionResult(models.Model):
-    """三层级联检测逐块结果。
+    """Per-block result of the three-layer cascade detection.
 
-    db_table = detection_results（SQLiteStore 真实表名）。ORM 只读为主，
-    写入走 SQLiteStore 后台 flush 线程。
+    db_table = detection_results (SQLiteStore's real table name). The ORM is
+    mostly read-only; writes go through SQLiteStore's background flush thread.
     """
     channel = models.CharField('通道', max_length=64)
     timestamp = models.FloatField('时间戳')
@@ -54,7 +58,7 @@ class DetectionResult(models.Model):
         verbose_name = '检测明细'
         verbose_name_plural = verbose_name
         db_table = 'detection_results'
-        managed = False  # 表由 SQLiteStore 创建/维护，Django 不接管 schema
+        managed = False  # table created/maintained by SQLiteStore; Django does not own the schema
         indexes = [
             models.Index(fields=['channel', 'timestamp'], name='idx_det_channel_time'),
         ]
@@ -64,9 +68,9 @@ class DetectionResult(models.Model):
 
 
 class AlertRecord(models.Model):
-    """实测 + 预测告警（含四维度 verdict + 快照）。
+    """Measured + predicted alerts (with the four-dimension verdict + snapshots).
 
-    db_table = alert_records。alert_type 区分 measured/predicted。
+    db_table = alert_records. alert_type distinguishes measured/predicted.
     """
     channel = models.CharField('通道', max_length=64)
     alert_type = models.CharField('告警类型', max_length=16)  # measured | predicted
@@ -87,14 +91,14 @@ class AlertRecord(models.Model):
         verbose_name = '告警记录'
         verbose_name_plural = verbose_name
         db_table = 'alert_records'
-        managed = False  # 表由 SQLiteStore 创建/维护，Django 不接管 schema
+        managed = False  # table created/maintained by SQLiteStore; Django does not own the schema
         indexes = [
             models.Index(fields=['channel', 'created_at'], name='idx_alert_channel_time'),
         ]
 
     @property
     def final_status(self) -> str:
-        """派生综合状态：人工 > LLM > 核验状态。"""
+        """Derived combined status: human > LLM > verification status."""
         if self.human_verdict:
             return self.human_verdict
         if self.llm_verdict:
@@ -106,7 +110,7 @@ class AlertRecord(models.Model):
 
 
 class DiagnosisRecord(models.Model):
-    """LLM 诊断缓存（一条 alert 一行，唯一键 channel+alert_type+alert_ts）。"""
+    """LLM diagnosis cache (one row per alert; unique key channel+alert_type+alert_ts)."""
     channel = models.CharField('通道', max_length=64)
     alert_type = models.CharField('告警类型', max_length=16)
     alert_ts = models.FloatField('告警时间戳')
@@ -123,7 +127,7 @@ class DiagnosisRecord(models.Model):
         verbose_name = '诊断记录'
         verbose_name_plural = verbose_name
         db_table = 'diagnosis_records'
-        managed = False  # 表由 SQLiteStore 创建/维护，Django 不接管 schema
+        managed = False  # table created/maintained by SQLiteStore; Django does not own the schema
         unique_together = ('channel', 'alert_type', 'alert_ts')
 
     def __str__(self):

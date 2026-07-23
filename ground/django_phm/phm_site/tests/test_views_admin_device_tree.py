@@ -1,9 +1,11 @@
-"""第 6 页：设备树管理测试。
+"""Page 6: device-tree management tests.
 
-覆盖：
-  (a) Helper 纯函数：_mark_special_sensors / _load_space_channels
-  (b) 视图访问：匿名跳登录 / staff 可读 / 超管可改 / Container 未就绪占位页
-  (c) AJAX 端点：save（空树拒绝 / 重复 sourceId / 正常保存）+ channels
+Coverage:
+  (a) Pure helpers: _mark_special_sensors / _load_space_channels
+  (b) View access: anonymous redirects to login / staff read / superuser
+      write / Container-not-ready placeholder page
+  (c) AJAX endpoints: save (empty-tree rejection / duplicate sourceId /
+      normal save) + channels
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ from phm_site.views_admin import (
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Helper 纯函数测试
+# Helper pure-function tests
 # ════════════════════════════════════════════════════════════════════════════
 
 class MarkSpecialSensorsTest(TestCase):
@@ -56,7 +58,7 @@ class MarkSpecialSensorsTest(TestCase):
     def test_does_not_mutate_input(self):
         tree = [{'type': 'sensor', 'name': 'a', 'description': '@rul'}]
         _mark_special_sensors(tree)
-        self.assertNotIn('_special', tree[0])  # 原对象不应被改
+        self.assertNotIn('_special', tree[0])  # The original object must not be mutated.
 
     def test_non_list_returns_empty(self):
         self.assertEqual(_mark_special_sensors(None), [])
@@ -66,17 +68,17 @@ class MarkSpecialSensorsTest(TestCase):
 class LoadSpaceChannelsTest(TestCase):
 
     def test_reads_existing_file(self):
-        """真实文件存在，应该返回非空列表。"""
+        """When the real file exists, it should return a non-empty list."""
         channels = _load_space_channels()
-        # 文件确实存在且非空
+        # The file does exist and is non-empty.
         self.assertGreater(len(channels), 0)
-        # 每项有 source_id
+        # Each item has a source_id.
         for ch in channels:
             self.assertIn('source_id', ch)
             self.assertIn('label', ch)
 
     def test_file_missing_returns_empty(self):
-        """路径不存在时返回 []。"""
+        """When the path does not exist, returns []."""
         from django.test import override_settings
         with mock.patch('phm_site.views_admin._SPACE_CHANNELS_PATH',
                         '/nonexistent/path.json'):
@@ -84,7 +86,7 @@ class LoadSpaceChannelsTest(TestCase):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 视图访问测试
+# View access tests
 # ════════════════════════════════════════════════════════════════════════════
 
 def _make_mock_container(tree=None, save_result=None):
@@ -141,7 +143,7 @@ class DeviceTreeViewAccessTest(TestCase):
         self.assertEqual(resp.status_code, 200)
 
     def test_special_sensor_marked_with_star(self):
-        """@rul 描述的传感器应该带 _special 标记注入到模板。"""
+        """A sensor with an @rul description should have the _special flag injected into the template."""
         self.client.force_login(self.staff)
         c = _make_mock_container(tree=[
             {'type': 'sensor', 'name': 'RUL-1', 'description': '@rul:fd001'},
@@ -150,12 +152,12 @@ class DeviceTreeViewAccessTest(TestCase):
         with p1, p2:
             resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 200)
-        # tree_json 里应包含 _special: true
+        # tree_json should contain _special: true.
         self.assertContains(resp, '_special')
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# AJAX 端点测试
+# AJAX endpoint tests
 # ════════════════════════════════════════════════════════════════════════════
 
 class DeviceTreeSaveApiTest(TestCase):
@@ -190,7 +192,7 @@ class DeviceTreeSaveApiTest(TestCase):
         self.assertEqual(resp.status_code, 400)
 
     def test_empty_tree_rejected_by_service(self):
-        """空树由 ConfigService.save 拒绝（返回 status=error），view 转 400。"""
+        """Empty tree is rejected by ConfigService.save (returns status=error); the view returns 400."""
         self.client.force_login(self.superuser)
         c = _make_mock_container(save_result={
             'status': 'error', 'message': '拒绝保存空设备树（安全保护）',

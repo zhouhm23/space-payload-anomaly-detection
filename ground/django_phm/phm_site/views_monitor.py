@@ -1,6 +1,7 @@
-"""前台监控大屏视图（/monitor/）。
+"""Front-end monitor view (/monitor/).
 
-v1.1 第一轮（1a）的占位页：Vue3 dev 时跳转到 :5173，生产时 serve dist。
+Round 1 (1a) of v1.1 placeholder page: jumps to :5173 during Vue3 dev, serves
+dist in production.
 """
 from __future__ import annotations
 
@@ -12,13 +13,14 @@ from django.views.decorators.clickjacking import xframe_options_exempt
 
 
 def _scan_dist_assets():
-    """扫描 Vue3 build 产物 dist/assets/，返回 (js_url, css_url)。
+    """Scan the Vue3 build output dist/assets/ and return (js_url, css_url).
 
-    Vite 构建产物文件名带 hash（index-AbCd1234.js），需动态发现。
-    找不到时返回 (None, None)，模板据此显示构建提示。
+    Vite build output filenames are hashed (index-AbCd1234.js) and must be
+    discovered dynamically. Returns (None, None) when not found, in which case
+    the template shows a build hint.
 
-    依赖 settings.FRONTEND_DIST（settings.py 已配置：dist 存在则加入
-    STATICFILES_DIRS，Django 会 serve 该目录）。
+    Depends on settings.FRONTEND_DIST (configured in settings.py: when dist
+    exists it is added to STATICFILES_DIRS and Django serves that dir).
     """
     dist = getattr(settings, 'FRONTEND_DIST', None)
     if not dist:
@@ -34,21 +36,23 @@ def _scan_dist_assets():
             js_file = name
         elif name.startswith('index-') and name.endswith('.css') and css_file is None:
             css_file = name
-    # 用 static() 生成 /static/phm_site/dist/assets/xxx URL
+    # Use static() to build the /static/phm_site/dist/assets/xxx URL
     js_url = static(f'phm_site/dist/assets/{js_file}') if js_file else None
     css_url = static(f'phm_site/dist/assets/{css_file}') if css_file else None
     return js_url, css_url
 
 
-@xframe_options_exempt  # 允许 iframe 嵌入（monitor_embed 用）
+@xframe_options_exempt  # allow iframe embedding (for monitor_embed)
 def monitor_view(request):
-    """前台监控大屏入口。
+    """Front-end monitor entry point.
 
-    统一行为（不再依赖 DEBUG 跳转）：扫描 Vue3 dist 产物，有则 serve，
-    无则显示构建提示。开发时若想用 Vite HMR，手动访问 :5173 即可。
+    Unified behaviour (no longer relies on DEBUG to redirect): scans the Vue3
+    dist output and serves it if present, otherwise shows a build hint. For
+    Vite HMR during development, visit :5173 directly.
 
-    历史问题：原逻辑 DEBUG=True 时 302 跳 :5173，但 start_admin 模式
-    不启动 Vue3 dev server（5173 不可达），导致 /monitor/ 白屏打不开。
+    History: the original logic 302'd to :5173 when DEBUG=True, but start_admin
+    mode does not start the Vue3 dev server (5173 is unreachable), which left
+    /monitor/ on a blank screen.
     """
     js_url, css_url = _scan_dist_assets()
     template = loader.get_template('phm_site/monitor.html')

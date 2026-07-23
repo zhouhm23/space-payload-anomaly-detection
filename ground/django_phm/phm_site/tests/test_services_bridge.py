@@ -1,12 +1,14 @@
-"""services_bridge 链路状态机测试。
+"""Tests for the ``services_bridge`` link status state machine.
 
-历史背景（Day20 bug）：``_poll_one`` 把连接失败误判为 success=True，
-导致 ``link_status`` 恒显示 online。修复后（telemetry_service 抛
-``ConnectionError``），``_poll_one`` 的 except 捕获 → success=False →
-``_link_fail_count`` 累计 → 连续 3 次后 status=offline。
+Historical context (Day20 bug): ``_poll_one`` incorrectly reported connection
+failures as ``success=True``, causing ``link_status`` to remain permanently
+``online``. After the fix, ``telemetry_service`` raises ``ConnectionError``,
+which is caught by ``_poll_one``'s except block, yielding ``success=False``.
+The ``_link_fail_count`` then accumulates and flips ``status`` to ``offline``
+after three consecutive failures.
 
-本文件直接测 ``_record_poll_result`` + ``get_link_status`` 的状态机，
-不依赖 Django Container / 真实 socket。
+This file directly tests the ``_record_poll_result`` + ``get_link_status``
+state machine without relying on a real Django Container or live socket.
 """
 from __future__ import annotations
 
@@ -18,38 +20,39 @@ from phm_site import services_bridge
 
 
 class LinkStatusStateMachineTest(TestCase):
-    """``_record_poll_result`` + ``get_link_status`` 状态机。"""
+    """State machine driven by ``_record_poll_result`` + ``get_link_status``."""
 
     def setUp(self):
-        # 每个测试重置模块级链路状态，避免相互污染
+        # Reset module-level link state before each test so cases cannot bleed into one another.
         services_bridge._link_rtt_ms = None
         services_bridge._link_fail_count = 0
         services_bridge._link_last_success_ts = 0.0
 
     def test_initial_state_is_waiting(self):
-        """初始状态：未 poll 过，rtt_ms=None，status='waiting'。"""
+        """Initial state: no poll has been issued yet, so ``rtt_ms`` is ``None`` and ``status`` is ``'waiting'``."""
         status = services_bridge.get_link_status()
         self.assertIsNone(status['rtt_ms'])
         self.assertEqual(status['status'], 'waiting')
 
     def test_success_poll_returns_online(self):
-        """单次成功 poll（rtt < 3000ms）→ online。"""
+        """A single successful poll (RTT < 3000 ms) transitions the status to ``online``."""
         services_bridge._record_poll_result(50.0, success=True)
         status = services_bridge.get_link_status()
         self.assertEqual(status['status'], 'online')
         self.assertEqual(status['rtt_ms'], 50.0)
 
     def test_high_rtt_returns_degraded(self):
-        """RTT ≥ 3000ms → degraded（链路慢但通）。"""
+        """RTT >= 3000 ms transitions the status to ``degraded`` (the link is slow but alive)."""
         services_bridge._record_poll_result(5000.0, success=True)
         status = services_bridge.get_link_status()
         self.assertEqual(status['status'], 'degraded')
         self.assertEqual(status['rtt_ms'], 5000.0)
 
     def test_failure_accumulates_until_offline(self):
-        """连续失败 _LINK_FAIL_THRESHOLD 次后 → offline。
+        """After ``_LINK_FAIL_THRESHOLD`` consecutive failures the status becomes ``offline``.
 
-        这是本 bug 的核心回归测试：连接失败必须被累计，不能被误判为成功。
+        This is the core regression test for the Day20 bug: connection failures
+        must be accumulated and must not be misclassified as successes.
         """
         for _ in range(services_bridge._LINK_FAIL_THRESHOLD):
             services_bridge._record_poll_result(None, success=False)
@@ -58,26 +61,26 @@ class LinkStatusStateMachineTest(TestCase):
         self.assertIsNone(status['rtt_ms'])
 
     def test_failure_below_threshold_still_waiting_or_online(self):
-        """失败次数 < 阈值时不进 offline（容错少量丢包）。"""
+        """Failures below the threshold do not flip the status to ``offline`` (tolerates minor packet loss)."""
         services_bridge._record_poll_result(None, success=False)
         status = services_bridge.get_link_status()
         self.assertNotEqual(status['status'], 'offline')
 
     def test_success_resets_fail_count(self):
-        """成功 poll 重置失败计数（链路恢复立即转 online）。"""
-        # 先累计 2 次失败（阈值 3，未到 offline）
+        """A successful poll resets the failure counter (link recovery immediately goes back to ``online``)."""
+        # Accumulate 2 failures first (threshold is 3, not yet offline)
         services_bridge._record_poll_result(None, success=False)
         services_bridge._record_poll_result(None, success=False)
-        # 再来一次成功
+        # Now deliver one successful poll
         services_bridge._record_poll_result(80.0, success=True)
-        # 此时 fail_count 应为 0，再连续失败 2 次也不应到 offline
+        # fail_count should now be 0, so two more failures must not reach offline
         services_bridge._record_poll_result(None, success=False)
         services_bridge._record_poll_result(None, success=False)
         status = services_bridge.get_link_status()
         self.assertNotEqual(status['status'], 'offline')
 
     def test_min_rtt_kept_across_polls(self):
-        """多传感器并行 poll 取最小 RTT（最快路径）。"""
+        """Multiple concurrent sensor polls keep the minimum RTT (fastest path)."""
         services_bridge._record_poll_result(100.0, success=True)
         services_bridge._record_poll_result(50.0, success=True)
         services_bridge._record_poll_result(80.0, success=True)
@@ -85,24 +88,27 @@ class LinkStatusStateMachineTest(TestCase):
         self.assertEqual(status['rtt_ms'], 50.0)
 
     def test_failure_does_not_overwrite_rtt(self):
-        """失败时 rtt_ms 保持上一次成功值（不写成 None 让显示闪动）。
+        """On failure, ``rtt_ms`` retains the last successful value so the UI does not flicker.
 
-        注：当前实现是失败时不动 _link_rtt_ms，仅累计 fail_count。
-        只有 fail_count ≥ 阈值进 offline 时 get_link_status 才返回 rtt=None。
+        Note: the current implementation leaves ``_link_rtt_ms`` unchanged on failure
+        and only increments ``_link_fail_count``.  ``get_link_status`` returns
+        ``rtt=None`` only when ``fail_count`` reaches the threshold and the status
+        goes ``offline``.
         """
         services_bridge._record_poll_result(100.0, success=True)
-        # 失败一次（未到阈值）
+        # One failure (below threshold)
         services_bridge._record_poll_result(None, success=False)
         status = services_bridge.get_link_status()
-        # rtt 仍保留 100（不到 offline 分支）
+        # RTT is still 100 (offline branch not reached)
         self.assertEqual(status['rtt_ms'], 100.0)
 
 
 class PollOneConnectionErrorTest(TestCase):
-    """``_poll_one`` 在连接失败时返回 (None, False)。
+    """``_poll_one`` returns ``(None, False)`` when the connection fails.
 
-    Day20 bug 修复回归：``telemetry_service._poll_space`` 抛
-    ``ConnectionError`` 后，``_poll_one`` 的 except 捕获并返回失败。
+    Regression for the Day20 bug fix: after ``telemetry_service._poll_space``
+    raises ``ConnectionError``, ``_poll_one`` catches the exception and
+    reports failure.
     """
 
     def setUp(self):
@@ -111,7 +117,7 @@ class PollOneConnectionErrorTest(TestCase):
         services_bridge._link_last_success_ts = 0.0
 
     def test_poll_one_returns_failure_on_connection_error(self):
-        """``telemetry.poll`` 抛 ConnectionError → ``_poll_one`` 返回 (None, False)。"""
+        """``telemetry.poll`` raises ``ConnectionError``, so ``_poll_one`` returns ``(None, False)``."""
         container = mock.Mock()
         container.telemetry.poll.side_effect = ConnectionError("space unreachable")
         rtt, success = services_bridge._poll_one(container, 'file:fake/source')
@@ -119,17 +125,17 @@ class PollOneConnectionErrorTest(TestCase):
         self.assertIsNone(rtt)
 
     def test_poll_one_returns_success_on_normal_poll(self):
-        """``telemetry.poll`` 正常返回 → ``_poll_one`` 返回 (rtt, True)。"""
+        """``telemetry.poll`` returns normally, so ``_poll_one`` returns ``(rtt, True)``."""
         container = mock.Mock()
         container.telemetry.poll.return_value = {'channels': {}, 'total': 0}
         rtt, success = services_bridge._poll_one(container, 'file:fake/source')
         self.assertTrue(success)
-        # rtt 是 wall-clock 耗时，应该是几毫秒（mock 几乎瞬时）
+        # RTT is wall-clock duration, typically a few milliseconds in this mock (nearly instant)
         self.assertIsNotNone(rtt)
         self.assertGreaterEqual(rtt, 0.0)
 
     def test_poll_one_returns_failure_on_any_exception(self):
-        """任何异常都应被捕获返回失败（不让 auto-poll 线程崩）。"""
+        """Any exception should be caught and reported as a failure so the auto-poll thread does not crash."""
         container = mock.Mock()
         container.telemetry.poll.side_effect = RuntimeError("unexpected")
         rtt, success = services_bridge._poll_one(container, 'file:fake/source')
@@ -137,21 +143,24 @@ class PollOneConnectionErrorTest(TestCase):
         self.assertIsNone(rtt)
 
     def test_link_status_goes_offline_when_space_always_unreachable(self):
-        """端到端 bug 回归：模拟 space 持续不可达，3 轮 poll 后 status 转 offline。
+        """End-to-end bug regression: simulate a permanently unreachable space and verify status goes ``offline`` after 3 poll rounds.
 
-        Day20 bug 现场：space 没启动，但 link_status 恒显示 online（2000ms RTT）。
-        修复后：telemetry_service._poll_space 检查 GroundClient.connected 标志，
-        连不上抛 ConnectionError → _poll_one 返回 (None, False) →
-        _record_poll_result 累计 fail_count → 阈值后 get_link_status 返回 offline。
+        Day20 bug scenario: space was not running but ``link_status`` remained stuck
+        at ``online`` with an RTT of 2000 ms.  After the fix,
+        ``telemetry_service._poll_space`` checks the ``GroundClient.connected``
+        flag and raises ``ConnectionError`` when disconnected.  ``_poll_one`` then
+        returns ``(None, False)``, ``_record_poll_result`` accumulates
+        ``_link_fail_count``, and once the threshold is reached
+        ``get_link_status`` returns ``offline``.
         """
-        # telemetry.poll 在 connected=False 时应抛 ConnectionError
-        # （mock 直接模拟这个抛点，不依赖 GroundClient 真实代码）
+        # When connected=False, telemetry.poll is expected to raise ConnectionError.
+        # We mock that raise point directly rather than depending on real GroundClient code.
         container = mock.Mock()
         container.telemetry.poll.side_effect = ConnectionError("space unreachable")
         for _ in range(services_bridge._LINK_FAIL_THRESHOLD):
             services_bridge._poll_one(container, 'file:fake/source')
-            # _poll_one 内部不调 _record_poll_result（那是 _auto_poll_loop 的事），
-            # 这里手动调一次模拟 auto-poll 循环
+            # _poll_one does not call _record_poll_result internally (that is
+            # _auto_poll_loop's job), so we call it manually to emulate the loop.
             services_bridge._record_poll_result(None, success=False)
         status = services_bridge.get_link_status()
         self.assertEqual(status['status'], 'offline')

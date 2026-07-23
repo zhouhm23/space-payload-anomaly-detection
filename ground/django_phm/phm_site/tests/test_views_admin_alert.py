@@ -1,10 +1,12 @@
-"""第 4 页：告警和预警管理测试。
+"""Page 4: alert and warning management tests.
 
-覆盖：
-  (a) Helper 纯函数：_parse_alert_filters / _parse_iso_or_float / _parse_alert_limit
-  (b) 视图访问：匿名跳登录 / staff 可读 / 超管可改 / Container 未就绪占位页
-  (c) AJAX 端点：detail / annotate / delete / diagnose / diagnose_status / export / create
-      覆盖权限（403/302）+ 业务逻辑（成功/空 ids/类型校验/服务未就绪）
+Coverage:
+  (a) Pure helpers: _parse_alert_filters / _parse_iso_or_float / _parse_alert_limit
+  (b) View access: anonymous redirects to login / staff read / superuser write /
+      Container-not-ready placeholder page
+  (c) AJAX endpoints: detail / annotate / delete / diagnose / diagnose_status /
+      export / create — covering permissions (403/302) + business logic
+      (success / empty ids / type validation / service not ready)
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ from phm_site.views_admin import (
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Helper 纯函数测试
+# Helper pure-function tests
 # ════════════════════════════════════════════════════════════════════════════
 
 class ParseAlertFiltersTest(TestCase):
@@ -46,7 +48,7 @@ class ParseAlertFiltersTest(TestCase):
     def test_channel_strips_and_clips(self):
         f = _parse_alert_filters({'channel': '  C-1  '})
         self.assertEqual(f['channel'], 'C-1')
-        # 超长 channel 截断
+        # Over-long channel is truncated.
         long = 'x' * 100
         f = _parse_alert_filters({'channel': long})
         self.assertEqual(len(f['channel']), 64)
@@ -150,23 +152,24 @@ class BuildPageRangeTest(TestCase):
         self.assertEqual(_build_page_range(1, 0), [])
 
     def test_all_pages_when_small(self):
-        """total_pages ≤ 7 时返回连续 1..N。"""
+        """When total_pages ≤ 7, returns the contiguous range 1..N."""
         self.assertEqual(_build_page_range(1, 1), [1])
         self.assertEqual(_build_page_range(3, 5), [1, 2, 3, 4, 5])
         self.assertEqual(_build_page_range(4, 7), [1, 2, 3, 4, 5, 6, 7])
 
     def test_ellipsis_for_large(self):
-        """total_pages > 7 时中间用省略号。"""
-        # page=1, total=10：[1, 2, 3, '..', 10]
+        """When total_pages > 7, an ellipsis appears in the middle."""
+        # page=1, total=10: [1, 2, 3, '..', 10]
         r = _build_page_range(1, 10)
         self.assertIn(1, r)
         self.assertIn(10, r)
         self.assertIn('..', r)
 
     def test_current_page_in_middle(self):
-        """当前页在中间时，前后各 window 页都显示。"""
+        """When the current page is in the middle, the window pages before and
+        after it are shown."""
         r = _build_page_range(5, 10)
-        # 期望 [1, '..', 3, 4, 5, 6, 7, '..', 10]
+        # Expected [1, '..', 3, 4, 5, 6, 7, '..', 10]
         self.assertIn(5, r)
         self.assertIn(3, r)
         self.assertIn(7, r)
@@ -174,7 +177,7 @@ class BuildPageRangeTest(TestCase):
         self.assertIn(10, r)
 
     def test_no_consecutive_ellipsis(self):
-        """不出现连续两个省略号。"""
+        """No two consecutive ellipses should appear."""
         for page in range(1, 20):
             r = _build_page_range(page, 19)
             for i in range(len(r) - 1):
@@ -183,14 +186,15 @@ class BuildPageRangeTest(TestCase):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 视图访问测试
+# View access tests
 # ════════════════════════════════════════════════════════════════════════════
 
 def _make_mock_container(rows=None, alert_by_id=None, diag_result=None):
-    """构造一个 mock Container，sqlite / config 都配齐。"""
+    """Build a mock Container with sqlite / config fully wired."""
     c = mock.Mock()
     c.sqlite.query_alerts_filtered.return_value = rows or []
-    # count_alerts_filtered 默认返回 0（与 rows=[] 一致），分页测试可单独覆盖
+    # count_alerts_filtered defaults to 0 (consistent with rows=[]); pagination
+    # tests override this separately.
     c.sqlite.count_alerts_filtered.return_value = len(rows or [])
     c.sqlite.get_alert_by_id.return_value = alert_by_id
     c.sqlite.get_diagnosis.return_value = diag_result
@@ -204,7 +208,7 @@ def _make_mock_container(rows=None, alert_by_id=None, diag_result=None):
 
 
 def _patch_container(c):
-    """patch services_bridge.get_container / get_state，让三态机走 ready 分支。"""
+    """Patch services_bridge.get_container / get_state so the three-state machine takes the ready branch."""
     return (
         mock.patch('phm_site.services_bridge.get_container', return_value=c),
         mock.patch('phm_site.services_bridge.get_state', return_value='ready'),
@@ -212,7 +216,7 @@ def _patch_container(c):
 
 
 class AlertViewAccessTest(TestCase):
-    """GET /admin/phm_site/alert/ 访问权限与渲染。"""
+    """Access control and rendering for GET /admin/phm_site/alert/."""
 
     def setUp(self):
         self.client = Client()
@@ -250,17 +254,17 @@ class AlertViewAccessTest(TestCase):
         self.client.force_login(self.staff)
         with mock.patch('phm_site.services_bridge.get_state', return_value='initializing'):
             resp = self.client.get(self.url)
-        # _state.html 应包含"初始化中"提示
+        # _state.html should include an "initialising" hint.
         self.assertEqual(resp.status_code, 200)
 
     def test_filter_params_forwarded_to_query(self):
-        """channel/type/llm_verdict 等筛选参数应被传给 sqlite.query_alerts_filtered。"""
+        """channel/type/llm_verdict etc. filter params should be forwarded to sqlite.query_alerts_filtered."""
         self.client.force_login(self.staff)
         c = _make_mock_container()
         p1, p2 = _patch_container(c)
         with p1, p2:
             self.client.get(self.url + '?channel=C-1&verdict=real&llm_verdict=none&limit=10')
-        # 验证调用参数
+        # Verify the call arguments.
         args, kwargs = c.sqlite.query_alerts_filtered.call_args
         self.assertEqual(kwargs.get('channel'), 'C-1')
         self.assertEqual(kwargs.get('verdict'), 'real')
@@ -268,10 +272,10 @@ class AlertViewAccessTest(TestCase):
         self.assertEqual(kwargs.get('limit'), 10)
 
     def test_offset_passed_to_query(self):
-        """?page=2 应算出 offset=limit 传给 query_alerts_filtered。"""
+        """?page=2 should compute offset=limit and pass it to query_alerts_filtered."""
         self.client.force_login(self.staff)
         c = _make_mock_container()
-        c.sqlite.count_alerts_filtered.return_value = 100  # 100 条，limit=50 → 2 页
+        c.sqlite.count_alerts_filtered.return_value = 100  # 100 rows, limit=50 → 2 pages
         p1, p2 = _patch_container(c)
         with p1, p2:
             self.client.get(self.url + '?page=2&limit=50')
@@ -279,7 +283,8 @@ class AlertViewAccessTest(TestCase):
         self.assertEqual(kwargs.get('offset'), 50)
 
     def test_chinese_labels_in_decorated_rows(self):
-        """数据行应带中文 label（避免 SSR 显示英文 measured/real/active）。"""
+        """Data rows should carry Chinese labels (so SSR does not show the raw
+        English measured/real/active values)."""
         self.client.force_login(self.staff)
         rows = [{
             'id': 1, 'channel': 'C-1', 'alert_type': 'measured', 'score': 0.6,
@@ -297,12 +302,12 @@ class AlertViewAccessTest(TestCase):
         self.assertEqual(item['llm_verdict_label'], '实警')
         self.assertEqual(item['human_verdict_label'], '虚警')
         self.assertEqual(item['final_status_label'], '实警')
-        # 页面渲染应含中文（不含英文 measured）
+        # The rendered page should contain Chinese (not the English "measured").
         self.assertContains(resp, '实测告警')
         self.assertNotContains(resp, '>measured<')
 
     def test_joint_alert_type_label(self):
-        """联合告警 alert_type_label 应为中文「联合告警」。"""
+        """A joint alert's alert_type_label should be the Chinese "联合告警"."""
         self.client.force_login(self.staff)
         rows = [{
             'id': 2, 'channel': 'SUB:数据集', 'alert_type': 'joint', 'score': 0.7,
@@ -320,7 +325,7 @@ class AlertViewAccessTest(TestCase):
 
 
 class AlertViewPaginationTest(TestCase):
-    """alert_view 分页逻辑测试。"""
+    """alert_view pagination logic tests."""
 
     def setUp(self):
         self.client = Client()
@@ -330,7 +335,7 @@ class AlertViewPaginationTest(TestCase):
         )
 
     def _make_rows(self, n):
-        """造 n 条 mock alert 行。"""
+        """Build n mock alert rows."""
         return [
             {'id': i, 'channel': 'C-1', 'alert_type': 'measured', 'score': 0.5,
              'created_at': 1700000000 + i, 'status': 'active',
@@ -342,7 +347,7 @@ class AlertViewPaginationTest(TestCase):
         ]
 
     def test_default_page_is_1(self):
-        """无 ?page= 参数时默认第 1 页。"""
+        """Without a ?page= param, the default page is 1."""
         self.client.force_login(self.staff)
         c = _make_mock_container(self._make_rows(3))
         c.sqlite.count_alerts_filtered.return_value = 3
@@ -355,30 +360,30 @@ class AlertViewPaginationTest(TestCase):
         self.assertEqual(resp.context['total_count'], 3)
 
     def test_total_pages_calculation(self):
-        """total_pages = ceil(total_count / limit)。"""
+        """total_pages = ceil(total_count / limit)."""
         self.client.force_login(self.staff)
         c = _make_mock_container(self._make_rows(50))
-        c.sqlite.count_alerts_filtered.return_value = 120  # limit=50 → 3 页
+        c.sqlite.count_alerts_filtered.return_value = 120  # limit=50 → 3 pages
         p1, p2 = _patch_container(c)
         with p1, p2:
             resp = self.client.get(self.url + '?limit=50')
         self.assertEqual(resp.context['total_pages'], 3)
 
     def test_page_beyond_last_clamped(self):
-        """page 超出 total_pages 时兜底到最后一页。"""
+        """When page exceeds total_pages, it is clamped to the last page."""
         self.client.force_login(self.staff)
         c = _make_mock_container(self._make_rows(10))
-        c.sqlite.count_alerts_filtered.return_value = 55  # limit=50 → 2 页
+        c.sqlite.count_alerts_filtered.return_value = 55  # limit=50 → 2 pages
         p1, p2 = _patch_container(c)
         with p1, p2:
             resp = self.client.get(self.url + '?page=99&limit=50')
-        self.assertEqual(resp.context['page'], 2)  # 兜底到最后一页
-        # offset 应是 (2-1)*50 = 50
+        self.assertEqual(resp.context['page'], 2)  # Clamped to the last page.
+        # offset should be (2-1)*50 = 50.
         args, kwargs = c.sqlite.query_alerts_filtered.call_args
         self.assertEqual(kwargs.get('offset'), 50)
 
     def test_zero_results_total_pages_is_1(self):
-        """无数据时 total_pages=1（不显示分页栏）。"""
+        """With no data, total_pages=1 (the pagination bar is not shown)."""
         self.client.force_login(self.staff)
         c = _make_mock_container([])
         c.sqlite.count_alerts_filtered.return_value = 0
@@ -389,7 +394,7 @@ class AlertViewPaginationTest(TestCase):
         self.assertEqual(resp.context['total_count'], 0)
 
     def test_pagination_not_rendered_when_one_page(self):
-        """只有 1 页时不渲染分页控件。"""
+        """When there is only one page, the pagination control is not rendered."""
         self.client.force_login(self.staff)
         c = _make_mock_container(self._make_rows(3))
         c.sqlite.count_alerts_filtered.return_value = 3
@@ -399,10 +404,10 @@ class AlertViewPaginationTest(TestCase):
         self.assertNotContains(resp, 'phm-pagination')
 
     def test_pagination_rendered_when_multiple_pages(self):
-        """多页时渲染分页控件 + 页码。"""
+        """With multiple pages, the pagination control + page numbers are rendered."""
         self.client.force_login(self.staff)
         c = _make_mock_container(self._make_rows(50))
-        c.sqlite.count_alerts_filtered.return_value = 150  # 3 页
+        c.sqlite.count_alerts_filtered.return_value = 150  # 3 pages
         p1, p2 = _patch_container(c)
         with p1, p2:
             resp = self.client.get(self.url + '?limit=50')
@@ -410,7 +415,7 @@ class AlertViewPaginationTest(TestCase):
         self.assertContains(resp, '第 1/3 页')
 
     def test_page_size_options_in_context(self):
-        """context 含 page_size_options（供每页数量下拉渲染）。"""
+        """The context carries page_size_options (for the page-size dropdown render)."""
         self.client.force_login(self.staff)
         c = _make_mock_container(self._make_rows(3))
         c.sqlite.count_alerts_filtered.return_value = 3
@@ -419,11 +424,11 @@ class AlertViewPaginationTest(TestCase):
             resp = self.client.get(self.url)
         opts = resp.context['page_size_options']
         self.assertEqual(opts, [20, 50, 100, 200])
-        # 当前 limit=50 应被选中（HTML 含 selected）
+        # The current limit=50 should be selected (HTML contains "selected").
         self.assertContains(resp, 'phm-page-size-select')
 
     def test_page_size_select_renders_all_options(self):
-        """每页数量下拉渲染所有候选值。"""
+        """The page-size dropdown renders every candidate value."""
         self.client.force_login(self.staff)
         c = _make_mock_container(self._make_rows(3))
         c.sqlite.count_alerts_filtered.return_value = 3
@@ -434,7 +439,7 @@ class AlertViewPaginationTest(TestCase):
             self.assertContains(resp, 'value="{}"'.format(n))
 
     def test_page_jump_input_renders_when_multiple_pages(self):
-        """多页时渲染跳转输入框。"""
+        """With multiple pages, the jump-to-page input is rendered."""
         self.client.force_login(self.staff)
         c = _make_mock_container(self._make_rows(50))
         c.sqlite.count_alerts_filtered.return_value = 150
@@ -447,7 +452,7 @@ class AlertViewPaginationTest(TestCase):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# AJAX 端点测试
+# AJAX endpoint tests
 # ════════════════════════════════════════════════════════════════════════════
 
 class AlertDetailApiTest(TestCase):
@@ -602,7 +607,7 @@ class AlertDiagnoseApiTest(TestCase):
         )
 
     def test_staff_can_trigger(self):
-        """LLM 诊断是只读语义，staff 可触发（不是 _require_superuser）。"""
+        """LLM diagnosis has read-only semantics; staff can trigger it (not gated by _require_superuser)."""
         self.client.force_login(self.staff)
         alert = {'id': 1, 'channel': 'C-1', 'alert_type': 'measured',
                  'created_at': 1700000000}
@@ -630,7 +635,7 @@ class AlertDiagnoseApiTest(TestCase):
 
 
 class AlertDiagnoseOneApiTest(TestCase):
-    """单条同步诊断 API（抽屉内「诊断/重新诊断」按钮用）。"""
+    """Single synchronous diagnosis API (used by the drawer's "Diagnose / Re-diagnose" button)."""
 
     def setUp(self):
         self.client = Client()
@@ -642,14 +647,14 @@ class AlertDiagnoseOneApiTest(TestCase):
         return reverse('phm_admin_alert_diagnose_one', args=[aid])
 
     def test_staff_can_trigger_sync_diagnose(self):
-        """单条同步诊断：staff 可触发，返回诊断文本与 verdict。"""
+        """Single synchronous diagnosis: staff can trigger; returns diagnosis text and verdict."""
         self.client.force_login(self.staff)
         alert = {'id': 5, 'channel': 'C-1', 'alert_type': 'measured',
                  'created_at': 1700000000, 'llm_verdict': 'real', 'final_status': 'real'}
         fresh_alert = dict(alert, llm_verdict='real', final_status='real')
         c = _make_mock_container(alert_by_id=alert)
         c.diagnosis = mock.Mock()
-        # diagnose() 返回结果 dict（与 DiagnosisService.diagnose 签名一致）
+        # diagnose() returns a result dict (matching DiagnosisService.diagnose's signature).
         c.diagnosis.diagnose.return_value = {
             'diagnosis': '该传感器存在异常漂移',
             'llm_verdict': 'real',
@@ -657,7 +662,7 @@ class AlertDiagnoseOneApiTest(TestCase):
             'elapsed_sec': 1.23,
             'cached': False,
         }
-        # 二次 get_alert_by_id（API 内部重读最新行拿 verdict）
+        # Two get_alert_by_id calls (the API re-reads the latest row to pick up the verdict).
         c.sqlite.get_alert_by_id.side_effect = [alert, fresh_alert]
         p1, p2 = _patch_container(c)
         with p1, p2:
@@ -673,18 +678,19 @@ class AlertDiagnoseOneApiTest(TestCase):
         self.assertEqual(body['llm_verdict'], 'real')
         self.assertEqual(body['final_status'], 'real')
         self.assertEqual(body['elapsed_sec'], 1.23)
-        # 验证 diagnosis service 被正确调用
+        # Verify the diagnosis service was called correctly.
         c.diagnosis.diagnose.assert_called_once()
         call_args = c.diagnosis.diagnose.call_args
-        # channel 是位置参数（views_admin: diag.diagnose(row['channel'], alert_type=..., ...))
+        # channel is a positional arg (views_admin: diag.diagnose(row['channel'], alert_type=..., ...)).
         self.assertEqual(call_args.args[0], 'C-1')
         self.assertEqual(call_args.kwargs.get('alert_type'), 'measured')
         self.assertTrue(call_args.kwargs.get('force_refresh'))
 
     def test_non_numeric_id_not_matched(self):
-        """非数字 id 在路由层就被拒（URL 用 <int:>，不匹配 → 404，不到视图）。"""
+        """A non-numeric id is rejected at the routing layer (the URL uses <int:>;
+        no match → 404, the view is never reached)."""
         self.client.force_login(self.staff)
-        # 直接拼 URL（reverse 不接受非数字），验证路由不匹配
+        # Build the URL directly (reverse rejects non-numeric) to verify the route does not match.
         resp = self.client.post(
             '/admin/phm_site/alert/api/diagnose_one/abc/',
             content_type='application/json',
@@ -705,12 +711,12 @@ class AlertDiagnoseOneApiTest(TestCase):
         self.assertEqual(resp.status_code, 404)
 
     def test_diagnosis_service_missing_returns_503(self):
-        """container 没有 diagnosis 属性 → 503。"""
+        """When the container has no diagnosis attribute → 503."""
         self.client.force_login(self.staff)
         alert = {'id': 5, 'channel': 'C-1', 'alert_type': 'measured',
                  'created_at': 1700000000}
         c = _make_mock_container(alert_by_id=alert)
-        # 不设置 c.diagnosis（Mock 默认会自动生成，用 del 模拟缺失）
+        # Do not set c.diagnosis (Mock auto-generates it by default; use del to simulate absence).
         del c.diagnosis
         p1, p2 = _patch_container(c)
         with p1, p2:

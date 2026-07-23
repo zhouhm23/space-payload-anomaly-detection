@@ -59,11 +59,12 @@ def _build_alert_where_clause(
     start_ts: float | None = None,
     end_ts: float | None = None,
 ) -> tuple[str, list]:
-    """构建 alert_records 的 WHERE 子句片段 + 参数列表。
+    """Build a WHERE-clause fragment + parameter list for alert_records.
 
-    供 ``query_alerts_filtered`` 和 ``count_alerts_filtered`` 共用，避免筛选
-    逻辑在两处重复维护。返回的 sql 片段以 ``AND`` 开头（拼到
-    ``WHERE is_deleted = 0`` 之后），参数顺序与占位符一致。
+    Shared by ``query_alerts_filtered`` and ``count_alerts_filtered`` so the
+    filter logic is maintained in one place. The returned sql fragment starts
+    with ``AND`` (appended after ``WHERE is_deleted = 0``); params follow the
+    placeholder order.
     """
     parts: list[str] = []
     params: list = []
@@ -1226,17 +1227,17 @@ class SQLiteStore:
             return False
 
     # ───────────────────────────────────────────────────────────────────
-    # 后台管理扩展（Day21 第 3/4 页共用前置）
+    # Admin-management extensions (shared preamble for Day21 pages 3/4)
     # ───────────────────────────────────────────────────────────────────
-    # 设计要点：
-    #   - table 白名单（防 SQL 注入，所有 table 列均来自硬编码 frozenset）
-    #   - ids 空列表短路返回 0（避免空 IN (...) 报错）
-    #   - 全部复用 _write_lock，try/except 降级，绝不向上抛
-    #   - 零行为变化：现有 delete_*/purge_deleted/update_alert_verdict 不动
+    # Design notes:
+    #   - table whitelist (SQL-injection defence; every table name comes from a hardcoded frozenset)
+    #   - empty ids short-circuits to 0 (avoids an empty IN (...) error)
+    #   - everything reuses _write_lock with try/except degradation; never propagates
+    #   - zero behaviour change: existing delete_*/purge_deleted/update_alert_verdict are untouched
     _ADMIN_TABLES = frozenset({"detection_results", "alert_records", "diagnosis_records"})
 
     def _sanitize_ids(self, ids: list[int]) -> list[int]:
-        """把外部传入的 id 列表规整成「去重 + 正整数」安全形式。"""
+        """Normalise an externally-supplied id list into a deduped, positive-integer safe form."""
         seen: set[int] = set()
         out: list[int] = []
         for v in ids or []:
@@ -1250,19 +1251,19 @@ class SQLiteStore:
         return out
 
     def _placeholders(self, n: int) -> str:
-        """生成 ``?,?,?`` 形式的占位符串（sqlite3 不接受列表直接展开）。"""
+        """Generate a ``?,?,?`` placeholder string (sqlite3 does not accept a list expanded inline)."""
         return ",".join(["?"] * max(n, 1))
 
     def query_deleted(self, table: str, limit: int = 200, offset: int = 0) -> list[dict]:
-        """返回某张表的**已软删**记录（回收站列表用）。
+        """Return the **soft-deleted** rows of a table (for the recycle-bin list).
 
         Args:
-            table: 必须是 ``_ADMIN_TABLES`` 之一。
-            limit: 返回上限，按 ``deleted_at DESC`` 排序。
-            offset: 跳过前 N 条（分页用），offset=0 向后兼容。
+            table: must be one of ``_ADMIN_TABLES``.
+            limit: return cap, ordered by ``deleted_at DESC``.
+            offset: skip the first N rows (for paging); offset=0 is backward compatible.
 
-        返回字段尽量与 ``query_alerts`` / ``query_detection`` 对齐，
-        便于前端表格复用列定义。失败返回 ``[]``。
+        The returned fields are aligned with ``query_alerts`` / ``query_detection``
+        so the front-end can reuse the column definitions. Returns ``[]`` on failure.
         """
         if not self.enabled or self._conn is None:
             return []
@@ -1288,7 +1289,7 @@ class SQLiteStore:
                 rows = cur.fetchall()
                 out = []
                 for r in rows:
-                    # raw_snapshot 末点 = 告警时刻的遥测值（需求书 §后台「遥测值」列）
+                    # raw_snapshot's last point = the telemetry value at the alert time (spec admin-section "telemetry value" column)
                     raw_snap = None
                     raw_value = None
                     if r[10]:
@@ -1347,12 +1348,12 @@ class SQLiteStore:
             return []
 
     def count_deleted(self, table: str) -> int:
-        """返回某张表的已软删记录总数（回收站分页计数用）。
+        """Return the total number of soft-deleted rows in a table (recycle-bin paging count).
 
         Args:
-            table: 必须是 ``_ADMIN_TABLES`` 之一。
+            table: must be one of ``_ADMIN_TABLES``.
 
-        返回 ``SELECT COUNT(*) FROM {table} WHERE is_deleted=1``，失败返回 0。
+        Returns ``SELECT COUNT(*) FROM {table} WHERE is_deleted=1``; 0 on failure.
         """
         if not self.enabled or self._conn is None:
             return 0
@@ -1369,11 +1370,11 @@ class SQLiteStore:
             return 0
 
     def delete_by_ids(self, table: str, ids: list[int]) -> int:
-        """按 id 列表**软删**（移到回收站）。
+        """**Soft-delete** by id list (move to the recycle bin).
 
         ``UPDATE ... SET is_deleted=1, deleted_at=unixepoch()
-           WHERE id IN (...) AND is_deleted=0``。
-        返回实际命中的行数（已在回收站的不会重复计）。
+           WHERE id IN (...) AND is_deleted=0``.
+        Returns the number of rows actually hit (rows already in the bin are not re-counted).
         """
         if not self.enabled or self._conn is None:
             return 0
@@ -1395,11 +1396,11 @@ class SQLiteStore:
             return 0
 
     def restore(self, table: str, ids: list[int]) -> int:
-        """按 id 列表**恢复**软删（回收站「恢复」按钮）。
+        """**Restore** soft-deleted rows by id list (recycle-bin "restore" button).
 
         ``UPDATE ... SET is_deleted=0, deleted_at=NULL
-           WHERE id IN (...) AND is_deleted=1``。
-        返回实际恢复的行数。
+           WHERE id IN (...) AND is_deleted=1``.
+        Returns the number of rows actually restored.
         """
         if not self.enabled or self._conn is None:
             return 0
@@ -1421,11 +1422,12 @@ class SQLiteStore:
             return 0
 
     def purge_by_ids(self, table: str, ids: list[int]) -> int:
-        """按 id 列表**物理删除**（回收站「永久删除」按钮）。
+        """**Physically delete** by id list (recycle-bin "permanent delete" button).
 
-        与 ``purge_deleted(table, older_than)`` 不同——后者是按时间窗批量清，
-        本方法是按精确 id 列表删。仅对**已软删**行生效，避免误删活跃数据。
-        返回实际物理删除的行数。
+        Unlike ``purge_deleted(table, older_than)`` — which batch-clears by a
+        time window — this method deletes by an exact id list. It only affects
+        rows that are **already soft-deleted**, so active data cannot be purged
+        by mistake. Returns the number of rows physically deleted.
         """
         if not self.enabled or self._conn is None:
             return 0
@@ -1448,10 +1450,10 @@ class SQLiteStore:
 
     def update_alert_verdict_by_ids(self, ids: list[int], verdict: str,
                                     *, is_llm: bool = False) -> int:
-        """按 id 列表批量写 verdict（告警管理页「批量标注」用）。
+        """Batch-write verdicts by id list (alert-management page "batch annotate").
 
-        ``UPDATE alert_records SET <col>=? WHERE id IN (...) AND is_deleted=0``。
-        不会动已软删的行。返回实际更新行数。
+        ``UPDATE alert_records SET <col>=? WHERE id IN (...) AND is_deleted=0``.
+        Soft-deleted rows are untouched. Returns the number of rows actually updated.
         """
         if not self.enabled or self._conn is None:
             return 0
@@ -1474,10 +1476,10 @@ class SQLiteStore:
             return 0
 
     def get_alert_by_id(self, alert_id: int) -> dict | None:
-        """按 id 查单条告警（含 raw_snapshot/score_snapshot 解析）。
+        """Fetch a single alert by id (parses raw_snapshot/score_snapshot).
 
-        告警详情抽屉用。返回字段与 ``query_alerts_filtered`` 一致；
-        未命中返回 None。
+        Used by the alert detail drawer. The returned fields match
+        ``query_alerts_filtered``; returns None on miss.
         """
         if not self.enabled or self._conn is None:
             return None
@@ -1532,10 +1534,10 @@ class SQLiteStore:
         start_ts: float | None = None,
         end_ts: float | None = None,
     ) -> int:
-        """统计符合筛选条件的 alert_records 总行数（分页计算总页数用）。
+        """Count the alert_records rows matching the filters (for paging total-page calc).
 
-        筛选参数与 ``query_alerts_filtered`` 完全一致（不含 limit/offset）。
-        失败返回 0。
+        The filter params are identical to ``query_alerts_filtered`` (without limit/offset).
+        Returns 0 on failure.
         """
         if not self.enabled or self._conn is None:
             return 0
@@ -1566,15 +1568,15 @@ class SQLiteStore:
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict]:
-        """筛选查询 alert_records（告警管理页列表用）。
+        """Filtered query over alert_records (for the alert-management page list).
 
-        所有参数可选，None 表示不过滤。
-          - ``verdict``：综合（llm_verdict 或 human_verdict 任一相等即命中）
-          - ``llm_verdict``：单独过滤 LLM 诊断；'none' 表示未诊断（IS NULL）
-          - ``human_verdict``：同上
-          - ``offset``：分页偏移（默认 0，向后兼容）。配合 ``limit`` 实现翻页。
-        返回字段与 ``query_alerts`` 一致，外加 ``ingested_at``。
-        失败返回 ``[]``。
+        All params optional; None means "no filter".
+          - ``verdict``: combined (matches if llm_verdict or human_verdict equals it)
+          - ``llm_verdict``: filter on the LLM diagnosis alone; 'none' means undiagnosed (IS NULL)
+          - ``human_verdict``: same as above
+          - ``offset``: paging offset (default 0, backward compatible). Combined with ``limit`` for paging.
+        The returned fields match ``query_alerts`` plus ``ingested_at``.
+        Returns ``[]`` on failure.
         """
         if not self.enabled or self._conn is None:
             return []
@@ -1639,11 +1641,11 @@ class SQLiteStore:
         score_snapshot: list | None = None,
         status: str = "active",
     ) -> int | None:
-        """人工补录一条告警记录（告警管理页「新增」按钮用）。
+        """Manually insert an alert record (alert-management page "create" button).
 
-        默认 ``alert_type='measured'``、``status='active'``（后续可在页内 PATCH）。
-        同步插入 + 立即 commit（不入后台队列，保证返回 id 可用）。
-        返回新行 id；失败返回 None。
+        Defaults to ``alert_type='measured'`` and ``status='active'`` (can be PATCHed on the page afterwards).
+        Synchronous insert + immediate commit (not queued, so the returned id is usable).
+        Returns the new row id; None on failure.
         """
         if not self.enabled or self._conn is None:
             return None

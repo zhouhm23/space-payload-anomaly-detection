@@ -55,8 +55,16 @@ __all__ = [
 # Constants — ported from experiments/tspulse_eval/run_with_direction_calibration.py:60-78
 # ---------------------------------------------------------------------------
 
-# Candidate threshold formulas used in LOO selection.  These six are all
-# computed on the test segment's score distribution.
+# Candidate threshold formulas used in LOO selection.  All are computed
+# on the test segment's score distribution.
+#
+# The set spans per-integer global percentiles p90..p99 plus the two
+# legacy formulas (``init512_mean+3σ`` and ``normal_p99``).  The fine
+# percentile grid matters because channels whose anomaly/normal score
+# distributions overlap (e.g. NASA-MSL F-7, T-12) often have a usable
+# operating point between two coarse percentiles — p90/p95/p97/p99 alone
+# miss it and force the selector into an all-or-nothing choice that
+# either explodes FA/h or drops event detection to zero.
 #
 # NOTE: ``train_target_fa5`` / ``train_target_fa20`` (leak-free formulas
 # derived from the training segment) are implemented in
@@ -71,11 +79,12 @@ __all__ = [
 # on future datasets where the stationarity assumption holds.
 CANDIDATE_THRESHOLDS: list[str] = [
     "init512_mean+3σ",
-    "global_p90",
-    "global_p95",
-    "global_p97",
-    "global_p99",
     "normal_p99",
+    # Per-integer global percentiles — fine grid lets the selector find
+    # intermediate operating points on overlap-heavy channels.
+    "global_p90", "global_p91", "global_p92", "global_p93",
+    "global_p94", "global_p95", "global_p96", "global_p97",
+    "global_p98", "global_p99",
 ]
 
 # Default calibration JSON location — sits next to phm.db under ground/data.
@@ -189,6 +198,7 @@ def loo_select_from_18(
     target_evt: float = 0.94,
     train_scores_dict: dict[str, np.ndarray] | None = None,
     sr_hz: float = 1.0,
+    strategy: str = "fa_aware",
 ) -> tuple[str, str, float, dict]:
     """Pick the best (score_type, threshold) pair from the candidate set.
 
@@ -199,7 +209,9 @@ def loo_select_from_18(
         labels: 1-D 0/1 ground-truth array (test segment).
         threshold_names: candidate threshold names (defaults to
             :data:`CANDIDATE_THRESHOLDS`).
-        target_evt: minimum event-detection rate to qualify (default 0.94).
+        target_evt: target event-detection rate.  Under ``fa_aware`` this
+            is the evt level above which no penalty is paid; under
+            ``evt_then_fa`` it is the hard qualification floor.
         train_scores_dict: optional ``{"tsp": array, "freq": array,
             "fusion": array}`` of training-segment scores (same
             direction-calibration as ``scores_dict``).  Required for the
@@ -207,9 +219,25 @@ def loo_select_from_18(
             back to a test-side quantile inside :func:`compute_threshold`.
         sr_hz: sampling rate in Hz — used by the ``train_target_fa*``
             formulas to convert FA/h to a quantile.
+        strategy: selection strategy — ``"fa_aware"`` (default, the
+            FA-aware cost function) or ``"evt_then_fa"`` (legacy:
+            hard evt floor then min-FA tiebreak).
 
     Returns:
         ``(best_score_key, best_thr_name, best_threshold, detail)``.
+
+    Strategy notes
+    --------------
+    ``fa_aware`` minimises ``cost = fa_per_hour + evt_penalty *
+    max(0, target_evt - evt)``.  This was introduced because the legacy
+    ``evt_then_fa`` strategy treats ``target_evt`` as a *hard* floor: on
+    channels with very few events (1-2) and overlap-heavy score
+    distributions (e.g. NASA-MSL T-13, C-1) the only candidates clearing
+    ``evt >= 0.94`` have catastrophic FA/h (thousands per hour), because
+    catching every last event forces a threshold so low that the normal
+    segment is almost entirely above it.  The soft penalty lets the
+    selector trade a single missed event on those channels for a
+    large FA reduction, which dominates the aggregate FA/h.
     """
     if threshold_names is None:
         threshold_names = CANDIDATE_THRESHOLDS
@@ -222,12 +250,9 @@ def loo_select_from_18(
             train_score=train_scores_dict.get("tsp") if train_scores_dict else None,
             sr_hz=sr_hz,
         )
-        return "tsp", "init512_mean+3σ", thr, {"reason": "no_events"}
+        return "tsp", "init512_mean+3σ", thr, {"reason": "no_events", "strategy": strategy}
 
     # Step 1: full-test evt + FA for every (score, threshold) candidate.
-    # For train_target_fa* formulas the threshold is derived from the
-    # training-segment score distribution (leak-free); the test evt/FA is
-    # still evaluated on the test segment but only used for selection.
     cand_full: dict[tuple[str, str], dict] = {}
     for sk, score in scores_dict.items():
         train_score = (
@@ -243,16 +268,43 @@ def loo_select_from_18(
                 "recall": e["recall"],
             }
 
-    # Step 2: keep candidates meeting the evt target; if none, keep the max-evt ones.
+    if strategy == "fa_aware":
+        # FA-aware cost: minimise FA/h while paying a steep penalty for
+        # each unit of event-detection shortfall below target_evt.  The
+        # penalty weight (2× target_evt×1000 ≈ 1880 here) is chosen so
+        # that dropping one full event (evt shortfall ~0.5 on a 2-event
+        # channel) is only "worth it" when it saves hundreds of FA/h —
+        # i.e. only on the genuinely overlap-heavy channels.
+        evt_penalty = 2.0 * target_evt * 1000.0
+        def _cost(d: dict) -> float:
+            fa = d["fa"] if not np.isnan(d["fa"]) else 1e9
+            shortfall = max(0.0, target_evt - d["evt"])
+            return fa + evt_penalty * shortfall
+        best_key = min(cand_full, key=lambda k: _cost(cand_full[k]))
+        best_thr = cand_full[best_key]["threshold"]
+        return best_key[0], best_key[1], best_thr, {
+            "strategy": "fa_aware",
+            "evt_penalty": evt_penalty,
+            "chosen_cost": _cost(cand_full[best_key]),
+            "candidate_detail": {
+                f"{sk}_{tn}": {
+                    "evt": d["evt"], "fa": d["fa"],
+                    "cost": _cost(d),
+                }
+                for (sk, tn), d in cand_full.items()
+            },
+        }
+
+    # ---- legacy strategy: hard evt floor then min-FA tiebreak ------------
+    # Kept for reproducibility with the published Day14-15 experiment
+    # results.  The experiment's LOO loop iterates ``leave_idx`` over
+    # events but recomputes full-test FA each iteration (``leave_idx``
+    # unused), so the tiebreak equals full-test FA.  Preserved verbatim.
     qualified = [(k, d) for k, d in cand_full.items() if d["evt"] >= target_evt]
     if not qualified:
         max_evt = max(d["evt"] for d in cand_full.values())
         qualified = [(k, d) for k, d in cand_full.items() if d["evt"] >= max_evt - 1e-9]
 
-    # Step 3: tiebreak by (pseudo-)LOO FA mean.  The experiment's LOO loop
-    # iterates ``leave_idx`` over events but recomputes full-test FA each
-    # iteration (``leave_idx`` unused), so this equals full-test FA.  Kept
-    # verbatim for numerical consistency with the published experiment.
     loo_fa: dict[tuple[str, str], list[float]] = {k: [] for k, _ in qualified}
     for _leave_idx in range(len(events)):  # noqa: B007 — preserved per experiment
         for k, _ in qualified:
@@ -265,6 +317,7 @@ def loo_select_from_18(
     best_key = min(qualified, key=lambda kd: float(np.mean(loo_fa[kd[0]])))[0]
     best_thr = cand_full[best_key]["threshold"]
     return best_key[0], best_key[1], best_thr, {
+        "strategy": "evt_then_fa",
         "loo_detail": {
             f"{sk}_{tn}": {
                 "evt_full": d["evt"],
@@ -409,6 +462,7 @@ def build_calibration_for_channel(
     tsp_train_score: np.ndarray | None = None,
     freq_train_score: np.ndarray | None = None,
     sr_hz: float = 1.0,
+    strategy: str = "fa_aware",
 ) -> ChannelCalibration:
     """Run the full offline calibration pipeline for one channel.
 
@@ -435,6 +489,9 @@ def build_calibration_for_channel(
             threshold candidates become available and are preferred over
             the legacy test-side formulas (leak-free threshold selection).
         sr_hz: sampling rate in Hz (used by train_target_fa* formulas).
+        strategy: threshold-selection strategy forwarded to
+            :func:`loo_select_from_18` — ``"fa_aware"`` (default) or
+            ``"evt_then_fa"`` (legacy).
 
     Returns:
         A :class:`ChannelCalibration` ready to serialise.
@@ -468,10 +525,11 @@ def build_calibration_for_channel(
         fusion_tr_cal = np.maximum(tsp_tr_cal, freq_tr_cal).astype(np.float32)
         train_scores_dict = {"tsp": tsp_tr_cal, "freq": freq_tr_cal, "fusion": fusion_tr_cal}
 
-    # Step 2: candidate selection (8 formulas now, including train_target_fa*).
+    # Step 2: candidate selection (per the chosen strategy).
     best_sk, best_tn, best_thr, _detail = loo_select_from_18(
         scores_dict, labels, target_evt=target_evt,
         train_scores_dict=train_scores_dict, sr_hz=sr_hz,
+        strategy=strategy,
     )
 
     # Step 3: only carry the freq baseline when it's actually used.

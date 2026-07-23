@@ -1,26 +1,26 @@
 /**
- * 轮询 composable
+ * Polling composable.
  *
- * 用法：
+ * Usage:
  *   const { data, error, isReady } = usePoll(() => api.alerts(20), 3000, { autoStart: true })
  *
- * 设计要点：
- * - 支持 start/stop/pause/resume
- * - 后端 503（未就绪）时降速重试（避免空转打爆 CPU）
- * - 组件卸载自动清理
- * - 请求并发去重（同一 fetcher 不会并发）
+ * Design notes:
+ * - Supports start/stop/pause/resume.
+ * - On a 503 (backend not ready) it backs off (avoids busy-looping the CPU).
+ * - Cleans itself up on component unmount.
+ * - De-duplicates concurrent requests (a fetcher never runs twice in parallel).
  */
 import { ref, onUnmounted, type Ref } from 'vue'
 import { BackendNotReadyError } from '@/api'
 
 interface PollOptions<T> {
-  /** 立即触发一次 */
+  /** Fire once immediately. */
   immediate?: boolean
-  /** 自动启动定时器 */
+  /** Start the interval timer automatically. */
   autoStart?: boolean
-  /** 后端未就绪时的降速间隔（默认 3s） */
+  /** Back-off interval while the backend is not ready (default 3s). */
   notReadyInterval?: number
-  /** 错误回调（不影响下次轮询） */
+  /** Error callback (does not stop the next poll). */
   onError?: (err: unknown) => void
 }
 
@@ -34,14 +34,14 @@ export function usePoll<T>(
   const data: Ref<T | null> = ref(null)
   const error: Ref<unknown> = ref(null)
   const loading = ref(false)
-  const isReady = ref(false) // 数据首次成功拉到后置 true
+  const isReady = ref(false) // flipped true after the first successful fetch
   const failCount = ref(0)
 
   let timer: ReturnType<typeof setInterval> | null = null
   let inflight: Promise<T | null> | null = null
 
   async function tick(): Promise<T | null> {
-    // 并发去重：上一次还没回来就跳过
+    // De-duplicate: if the previous call is still pending, skip
     if (inflight) return inflight
     loading.value = true
     inflight = fetcher()
@@ -56,7 +56,7 @@ export function usePoll<T>(
         error.value = err
         failCount.value++
         onError?.(err)
-        // 后端未就绪 → 暂时降速（重新调度）
+        // Backend not ready → back off (reschedule at the slower interval)
         if (err instanceof BackendNotReadyError) {
           restartTimer(notReadyInterval)
         }
@@ -86,12 +86,12 @@ export function usePoll<T>(
     timer = setInterval(tick, newInterval)
   }
 
-  /** 暂时暂停（如模态打开时） */
+  /** Pause temporarily (e.g. while a modal is open). */
   function pause() {
     stop()
   }
 
-  /** 恢复（如模态关闭），并立即触发一次 */
+  /** Resume (e.g. on modal close) and fire once immediately. */
   function resume() {
     tick()
     start()

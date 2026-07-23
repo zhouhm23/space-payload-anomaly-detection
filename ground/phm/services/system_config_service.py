@@ -99,10 +99,11 @@ _READONLY_KEYS = frozenset({
     "llm.timeout_sec",  # API key / base_url / model_name come from .env
 })
 
-# 中文展示名映射（后台「系统设置」页用）。结构：
-#   {section: {"_doc": "<section 中文标题>", "<key>": "<中文展示名>"}}
-# 与 data/system_config.json 的 _doc 字段互补——_doc 是悬浮说明，这里是
-# 列表里的中文 label。两者一起在 UI 上呈现：中文名 + (悬浮) 描述。
+# Chinese display-name mapping (used by the admin "System Settings" page).
+# Structure: {section: {"_doc": "<section label>", "<key>": "<display name>"}}.
+# Complementary to the _doc field in data/system_config.json — _doc provides
+# hover tooltips, while these values serve as list labels.  Both render in the
+# UI together: display name + (hover) description.
 _DISPLAY_NAMES: dict[str, dict[str, str]] = {
     "network": {
         "_doc": "网络配置",
@@ -241,12 +242,12 @@ class SystemConfigService:
         return self._cfg.get(section, {}).get(key, default)
 
     def is_readonly(self, section: str, key: str) -> bool:
-        """该 key 是否只读（环境变量管理等场景，UI 应灰显）。"""
+        """Return whether this key is read-only (e.g. managed by env vars; UI should grey it out)."""
         return f"{section}.{key}" in _READONLY_KEYS
 
     @staticmethod
     def display_names() -> dict[str, dict[str, str]]:
-        """返回中文展示名映射（后台 UI 用）。"""
+        """Return the display-name mapping for the admin UI."""
         return _DISPLAY_NAMES
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
@@ -263,14 +264,16 @@ class SystemConfigService:
     # ── Back-office write support (settings page) ──────────────────────
 
     def raw_with_docs(self) -> dict[str, dict[str, Any]]:
-        """读取磁盘 JSON **原文**（含 ``_doc`` 字段），供后台 UI 渲染悬浮描述。
+        """Read the on-disk JSON **verbatim** (including ``_doc`` fields) for admin UI hover descriptions.
 
-        与 ``snapshot()`` 的区别：snapshot 运行时值（已 strip _doc）；本方法
-        直接 ``open → json.load``，每次调用都从磁盘重新读，保证 UI 看到的
-        是文件最新状态（save 写入后立即可见）。文件缺失时回退到 _DEFAULTS
-        深拷贝（不抛异常）。
+        Unlike ``snapshot()`` which returns runtime values (with _doc stripped),
+        this method reads the file fresh on every call so the UI always reflects
+        the latest on-disk state (visible immediately after a save).  Falls back
+        to a deep copy of ``_DEFAULTS`` when the file is missing (never raises).
 
-        返回结构：与原始 JSON 同构，每个 section 是 ``{_doc: str, key: value, ...}``。
+        Returns:
+            A dict with the same structure as the raw JSON.  Each section is
+            ``{_doc: str, key: value, ...}``.
         """
         try:
             with open(self.config_path, encoding="utf-8") as f:
@@ -282,7 +285,7 @@ class SystemConfigService:
         except Exception:
             logger.warning("failed to read raw system config %s — using defaults",
                            self.config_path, exc_info=True)
-        # 回退：合并 _DEFAULTS + _DISPLAY_NAMES 的 _doc（保证 UI 仍能渲染）
+        # Fallback: merge _DEFAULTS + _DISPLAY_NAMES _doc so the UI can still render labels.
         out: dict[str, dict[str, Any]] = {}
         for section, values in _DEFAULTS.items():
             entry: dict[str, Any] = {}
@@ -294,20 +297,20 @@ class SystemConfigService:
         return out
 
     def save(self, section: str, key: str, value: Any) -> dict[str, Any]:
-        """更新单个 key 的值，写回 JSON 并热生效（重新 load）。
+        """Update a single key, write back to JSON, and hot-reload (re-load).
 
         Args:
-            section: 顶层 section 名（如 ``"thresholds"``）。
-            key: section 下的 key（如 ``"anomaly"``）。
-            value: 新值。类型必须与 _DEFAULTS[section][key] 一致（int/float/
-                bool/str），否则返回 ``type_mismatch``。
+            section: Top-level section name (e.g. ``"thresholds"``).
+            key: Key within the section (e.g. ``"anomaly"``).
+            value: New value.  Type must match ``_DEFAULTS[section][key]``
+                (int/float/bool/str), otherwise a ``type_mismatch`` is returned.
 
         Returns:
-            ``{"status": "ok", "old": ..., "new": ...}`` 成功；
-            ``{"status": "error", "message": ...}`` 失败（未知 section/key、
-            类型不匹配、写盘失败、只读 key）。
+            ``{"status": "ok", "old": ..., "new": ...}`` on success;
+            ``{"status": "error", "message": ...}`` on failure (unknown
+            section/key, type mismatch, write failure, or read-only key).
         """
-        # 1) 合法性校验
+        # 1) Validate inputs
         if section in _DOC_KEYS or not isinstance(section, str) or not section:
             return {"status": "error", "message": f"非法 section：{section!r}"}
         if key in _DOC_KEYS or not isinstance(key, str) or not key:
@@ -319,7 +322,7 @@ class SystemConfigService:
             return {"status": "error",
                     "message": f"未知配置项：{section}.{key}（不在 _DEFAULTS 中）"}
 
-        # 2) 类型校验（按 _DEFAULTS 推断期望类型；bool 必须严格匹配，不能是 int）
+        # 2) Type check (infer expected type from _DEFAULTS; bool must match strictly, not int)
         expected = defaults_section[key]
         if isinstance(expected, bool):
             if not isinstance(value, bool):
@@ -338,11 +341,11 @@ class SystemConfigService:
                 return {"status": "error",
                         "message": f"{section}.{key} 期望 str，实际 {type(value).__name__}"}
         else:
-            # 其他类型（list/dict 等）暂不支持网页编辑，统一拒绝
+            # Other types (list/dict etc.) are not yet editable via the web UI; reject all.
             return {"status": "error",
                     "message": f"{section}.{key} 类型 {type(expected).__name__} 暂不支持网页编辑"}
 
-        # 3) 读原文（保留 _doc），覆盖单 key，原子写回
+        # 3) Read raw (preserving _doc), overwrite the single key, atomic write-back
         try:
             raw = self.raw_with_docs()
             sec = raw.setdefault(section, {})
@@ -353,7 +356,7 @@ class SystemConfigService:
             logger.warning("system_config save failed: %s", e, exc_info=True)
             return {"status": "error", "message": f"写盘失败：{e}"}
 
-        # 4) 热生效：重新 load 让运行时属性（self.thresholds 等）同步更新
+        # 4) Hot-reload: re-load so runtime properties (self.thresholds etc.) stay in sync
         try:
             self.load()
         except Exception as e:
@@ -363,10 +366,11 @@ class SystemConfigService:
                 "old": old_value, "new": value}
 
     def _atomic_write(self, data: dict[str, Any]) -> None:
-        """原子写回 JSON：写临时文件 → os.replace 覆盖。
+        """Atomic JSON write-back: write to a temp file then ``os.replace``.
 
-        os.replace 在同一文件系统上是原子的（POSIX rename / Win MoveFileEx），
-        避免写一半进程崩溃导致配置文件损坏。同一目录保证同盘。
+        ``os.replace`` is atomic on the same filesystem (POSIX rename /
+        Win MoveFileEx), preventing a half-written file if the process crashes
+        mid-write.  Using the same directory guarantees the same disk.
         """
         d = os.path.dirname(self.config_path) or "."
         os.makedirs(d, exist_ok=True)
@@ -375,10 +379,10 @@ class SystemConfigService:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
                 f.write("\n")
-            # Windows 上 os.replace 也能覆盖已存在文件（Python 3.3+）
+            # On Windows, os.replace also overwrites existing files (Python 3.3+)
             os.replace(tmp_path, self.config_path)
         except Exception:
-            # 清理临时文件，避免垃圾堆积
+            # Clean up the temp file to avoid garbage accumulation
             try:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)

@@ -1,4 +1,4 @@
-"""In-memory early-warning (预警) store with lifecycle state machine.
+"""In-memory early-warning store with lifecycle state machine.
 
 Each warning entry represents a *predicted* anomaly — the ground-side
 forecast+detect pipeline predicted that a future window would exceed the

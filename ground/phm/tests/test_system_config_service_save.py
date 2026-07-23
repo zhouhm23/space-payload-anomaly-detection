@@ -1,13 +1,14 @@
-"""SystemConfigService / ThemeService 后台 save 能力单测。
+"""Unit tests for SystemConfigService / ThemeService admin save capability.
 
-脱离 Django（纯 Python 测试），覆盖：
-  - raw_with_docs：返回含 _doc 的磁盘原文
-  - save：类型校验 / 未知 section/key 拒绝 / 写盘 + 热生效
-  - _doc 字段保留：save 后再 raw_with_docs 仍能看到 _doc
-  - 只读 key 拒绝（SystemConfigService.llm.timeout_sec）
-  - 嵌套对象 key 拒绝（ThemeService.chart.padding）
+Django-free (pure Python) tests covering:
+  - raw_with_docs: returns the on-disk original including _doc keys
+  - save: type validation / unknown section/key rejection /
+    disk write + hot reload
+  - _doc field preservation: raw_with_docs still shows _doc after save
+  - readonly-key rejection (SystemConfigService.llm.timeout_sec)
+  - nested-object key rejection (ThemeService.chart.padding)
 
-使用 tmp_path 隔离真实 JSON，避免污染仓库配置。
+Uses tmp_path to isolate the real JSON and avoid polluting repo config.
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ from phm.services.theme_service import ThemeService, reset_theme
 
 @pytest.fixture
 def tmp_system_config(tmp_path: Path) -> Path:
-    """构造一份完整的 system_config.json（含 _doc），位于 tmp_path。"""
+    """Build a complete system_config.json (including _doc) under tmp_path."""
     data = {
         "_doc": "top-level doc",
         "thresholds": {
@@ -88,11 +89,11 @@ class TestSystemConfigSave:
         assert result["status"] == "ok"
         assert result["old"] == 0.5
         assert result["new"] == 0.42
-        # 热生效：load() 后属性同步
+        # Hot reload: after load() the attribute is in sync.
         assert svc.thresholds["anomaly"] == 0.42
 
     def test_save_preserves_doc(self, tmp_system_config):
-        """save 不能丢掉 _doc。"""
+        """save must not drop _doc."""
         svc = SystemConfigService(str(tmp_system_config))
         svc.save("thresholds", "anomaly", 0.42)
         raw = svc.raw_with_docs()
@@ -113,20 +114,20 @@ class TestSystemConfigSave:
 
     def test_save_rejects_type_mismatch(self, tmp_system_config):
         svc = SystemConfigService(str(tmp_system_config))
-        # anomaly 期望 float，传 str
+        # anomaly expects float; pass a str.
         r = svc.save("thresholds", "anomaly", "high")
         assert r["status"] == "error"
         assert "期望 float" in r["message"]
 
     def test_save_rejects_bool_for_int(self, tmp_system_config):
         svc = SystemConfigService(str(tmp_system_config))
-        # ring_buffer_max 期望 int，bool 应被拒绝（避免 True == 1 误接受）
+        # ring_buffer_max expects int; bool should be rejected (avoid True == 1 mis-acceptance).
         r = svc.save("storage", "ring_buffer_max", True)
         assert r["status"] == "error"
 
     def test_save_rejects_readonly_key(self, tmp_system_config):
         svc = SystemConfigService(str(tmp_system_config))
-        # llm.timeout_sec 标记为只读
+        # llm.timeout_sec is flagged read-only.
         r = svc.save("llm", "timeout_sec", 60.0)
         assert r["status"] == "error"
         assert "只读" in r["message"]
@@ -134,10 +135,10 @@ class TestSystemConfigSave:
     def test_save_persists_to_disk(self, tmp_system_config):
         svc = SystemConfigService(str(tmp_system_config))
         svc.save("storage", "ring_buffer_max", 40000)
-        # 直接读文件验证
+        # Verify by reading the file directly.
         on_disk = json.loads(tmp_system_config.read_text(encoding="utf-8"))
         assert on_disk["storage"]["ring_buffer_max"] == 40000
-        # _doc 仍在
+        # _doc is still present.
         assert on_disk["storage"]["_doc"] == "storage section doc"
 
     def test_save_invalid_section_type(self, tmp_system_config):
@@ -172,7 +173,7 @@ class TestThemeServiceSave:
         assert r["status"] == "ok"
         assert r["old"] == "#2d8cf0"
         assert r["new"] == "#abcdef"
-        # as_dict 反映新值
+        # as_dict reflects the new value.
         assert svc.as_dict()["colors"]["blue"] == "#abcdef"
 
     def test_save_preserves_doc(self, tmp_theme):
@@ -183,13 +184,13 @@ class TestThemeServiceSave:
 
     def test_save_rejects_nested_key(self, tmp_theme):
         svc = ThemeService(str(tmp_theme))
-        # chart.padding 是嵌套对象，应被拒绝
+        # chart.padding is a nested object; should be rejected.
         r = svc.save("chart", "padding", {"top": 99})
         assert r["status"] == "error"
 
     def test_save_rejects_type_mismatch(self, tmp_theme):
         svc = ThemeService(str(tmp_theme))
-        # chart.cacheCount 期望 int，传 str
+        # chart.cacheCount expects int; pass a str.
         r = svc.save("chart", "cacheCount", "lots")
         assert r["status"] == "error"
 
@@ -206,9 +207,9 @@ class TestThemeServiceSave:
 
     def test_is_readonly_for_nested_parent(self, tmp_theme):
         svc = ThemeService(str(tmp_theme))
-        # chart.padding 整体只读
+        # chart.padding is read-only as a whole.
         assert svc.is_readonly("chart", "padding") is True
-        # chart.cacheCount 标量 → 可编辑
+        # chart.cacheCount is a scalar → editable.
         assert svc.is_readonly("chart", "cacheCount") is False
 
     def test_display_names_returns_dict(self, tmp_theme):

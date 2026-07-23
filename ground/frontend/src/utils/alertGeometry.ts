@@ -1,56 +1,61 @@
 /**
- * 告警点几何计算（纯函数，无 Canvas 依赖，可单测）。
+ * Alert-point geometry (pure functions, no Canvas dependency, unit-testable).
  *
- * 从 TelemetryCanvas.drawChart 抽出，便于用编造的测试数据断言
- * "给定告警点 + 时间轴 → 应该画在哪个 X、对应哪个数据点"。
+ * Extracted from TelemetryCanvas.drawChart so that, given fabricated test
+ * data, we can assert "for these alert points + this time axis → the red
+ * dot should land at this X and align with this data point".
  *
- * Canvas 绘制本身（fillRect/arc 调用）不可测也不必测；这里聚焦
- * 数据→坐标的映射逻辑，这是红点对齐正确性的核心。
+ * The Canvas drawing itself (fillRect/arc calls) is neither testable nor
+ * worth testing; this module focuses on the data→coordinate mapping,
+ * which is the crux of red-dot alignment correctness.
  */
 
-/** 单个数据点（遥测窗口的一行，字段对齐 /api/v2/window 返回） */
+/** A single data point (one row of the telemetry window, fields aligned with /api/v2/window). */
 export interface TelemetryPoint {
-  timestamp: number  // 秒（epoch）
+  timestamp: number  // seconds (epoch)
   raw_value?: number | null
   predicted_value?: number | null
   anomaly_score?: number | null
   predicted_anomaly_score?: number | null
 }
 
-/** 告警点（对齐 /api/v2/alert-points 的 red_points/yellow_points） */
+/** An alert point (aligned with /api/v2/alert-points red_points/yellow_points). */
 export interface AlertPoint {
   channel: string
-  timestamp: number  // 秒（epoch），应为真实采样时刻（acq_ts）
+  timestamp: number  // seconds (epoch); should be the real sample time (acq_ts)
   score?: number | null
   type: 'measured' | 'predicted'
 }
 
-/** 时间轴上一段连续无 gap 的区间（用于 gap 折叠后的 X 映射）。
- *  ★ 单位约定：tsStart/tsEnd 用【毫秒】（与 computeRedDots 内部的
- *    tsMsAp = timestamp * 1000 一致）。TelemetryCanvas 构建 segments 时
- *    也是从 tsMs（毫秒）取值，保持全链路毫秒统一。 */
+/** A contiguous gap-free interval on the time axis (used for gap-collapsed X mapping).
+ *  ★ Unit convention: tsStart/tsEnd are in **milliseconds** (consistent with
+ *    computeRedDots' internal tsMsAp = timestamp * 1000). TelemetryCanvas also
+ *    builds its segments from tsMs (milliseconds), keeping the whole pipeline
+ *    in milliseconds. */
 export interface TsSegment {
-  tsStart: number  // 毫秒
-  tsEnd: number    // 毫秒
-  xStart: number   // 像素
-  xEnd: number     // 像素
+  tsStart: number  // milliseconds
+  tsEnd: number    // milliseconds
+  xStart: number   // pixels
+  xEnd: number     // pixels
 }
 
 /**
- * 构建时间戳(毫秒) → X 像素的映射函数（含 gap 折叠）。
+ * Build a timestamp(milliseconds) → X-pixel mapping (with gap collapsing).
  *
- * gap 折叠规则：数据被缺口分成多段，每段在 X 轴上等距铺开，
- * 段间用固定 GAP_WIDTH 像素的"折叠带"表示中断。
+ * Gap-collapse rule: the data is split into segments by gaps; each segment
+ * is laid out evenly on the X axis, and a fixed GAP_WIDTH-pixel "collapsed
+ * band" represents the break between segments.
  *
- * 返回的函数接收【毫秒】时间戳，返回 X 像素；时间戳不在任何段内则返回 null。
+ * The returned function takes a **millisecond** timestamp and returns the X
+ * pixel, or null if the timestamp falls outside every segment.
  */
 export function buildTsToX(segments: TsSegment[]): (ts: number) => number | null {
   if (segments.length === 0) return () => null
   return function tsToX(ts: number): number | null {
     for (const seg of segments) {
-      if (ts < seg.tsStart - 1e-9) return null  // 在所有段之前
+      if (ts < seg.tsStart - 1e-9) return null  // before every segment
       if (ts <= seg.tsEnd + 1e-9 || seg.tsEnd === seg.tsStart) {
-        // 落在本段内（或本段是单点）
+        // Inside this segment (or this segment is a single point)
         if (seg.tsEnd === seg.tsStart) return seg.xStart
         const frac = (ts - seg.tsStart) / (seg.tsEnd - seg.tsStart)
         return seg.xStart + frac * (seg.xEnd - seg.xStart)
@@ -61,12 +66,13 @@ export function buildTsToX(segments: TsSegment[]): (ts: number) => number | null
 }
 
 /**
- * 在数据点序列中找最接近给定时间戳的索引（线性扫描）。
+ * Find the index of the data point closest to a given timestamp (linear scan).
  *
- * 用于把告警时刻对齐到最近的遥测采样点，取该点的 raw_value/anomaly_score
- * 作为红点的 Y 坐标来源。
+ * Used to align an alert time to the nearest telemetry sample, taking that
+ * sample's raw_value/anomaly_score as the source of the red dot's Y
+ * coordinate.
  *
- * 返回 -1 表示数据为空。
+ * Returns -1 when the data is empty.
  */
 export function findNearestIndex(tsMs: number[], targetTsMs: number): number {
   if (tsMs.length === 0) return -1
@@ -83,8 +89,8 @@ export function findNearestIndex(tsMs: number[], targetTsMs: number): number {
 }
 
 /**
- * 给定一组告警点和当前通道，过滤出属于该通道的告警点。
- * 对齐 TelemetryCanvas.currentChannelAlertPoints 的计算。
+ * Given a set of alert points and the current channel, filter to the points
+ * belonging to that channel. Mirrors TelemetryCanvas.currentChannelAlertPoints.
  */
 export function filterByChannel(points: AlertPoint[], channel: string): AlertPoint[] {
   if (!channel) return []
@@ -92,13 +98,15 @@ export function filterByChannel(points: AlertPoint[], channel: string): AlertPoi
 }
 
 /**
- * 计算应在遥测图上绘制的红点坐标列表。
+ * Compute the red-dot coordinates to draw on the telemetry chart.
  *
- * 输入：数据点 + 告警点 + 时间轴映射 + Y 映射函数。
- * 输出：每个应画红点的 {x, y, source}（source 说明 Y 来自 raw/pred/score）。
+ * Inputs: data points + alert points + time-axis mapping + Y-mapping funcs.
+ * Output: one {x, y, source} per red dot (source tells whether Y came from
+ * raw/pred/score).
  *
- * 用途：单测时可断言"给定 N 个告警点，应返回 N 个坐标，且 X 与 tsToX 一致"。
- * 这是验证红点对齐正确性的核心断言点。
+ * Use: in a unit test you can assert "given N alert points, return N
+ * coordinates whose X matches tsToX". This is the core assertion point for
+ * red-dot alignment correctness.
  */
 export interface RedDotPosition {
   x: number
@@ -125,12 +133,12 @@ export function computeRedDots(
     const idx = findNearestIndex(tsMs, tsMsAp)
     if (idx < 0) continue
     const d = data[idx]
-    // 遥测区红点
+    // Telemetry-region red dot
     const rv = d.raw_value ?? d.predicted_value
     if (rv != null) {
       out.push({ x, y: yOfRaw(rv), source: d.raw_value != null ? 'raw' : 'predicted' })
     }
-    // 分数区红点
+    // Score-region red dot
     const sv = d.anomaly_score ?? d.predicted_anomaly_score
     if (sv != null) {
       out.push({ x, y: yOfScore(sv), source: d.anomaly_score != null ? 'score' : 'predicted_score' })

@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /**
- * 右详情区（需求书 §右详情区）。
+ * Right-detail panel (spec right-detail panel).
  *
- * 上下两部分：
- * - 上半：通道详情（量程、单位、阈值，跟随轮播）
- * - 下半：全通道告警和预警列表（遥测值、异常分数、阈值、综合状态、时间）
- *         告警用红色、预警用黄色，不轮播，仅随数据块更新，最多 20 条按时间倒序
+ * Two parts, top and bottom:
+ * - Top half: channel details (range, unit, threshold; follows the carousel)
+ * - Bottom half: all-channel alert and warning list (telemetry value, anomaly score,
+ *   threshold, comprehensive status, time); alerts in red, warnings in yellow,
+ *   no carousel, updates with data blocks, max 20 items in reverse chronological order
  */
 import { computed, watch } from 'vue'
 import { useSystemStore, type DeviceNode } from '@/stores/system'
@@ -14,7 +15,7 @@ import { usePoll } from '@/composables/usePoll'
 
 const store = useSystemStore()
 
-// 上半：当前通道详情（从 deviceTree 找当前选中的 sensor 节点）
+// Top half: current channel details (find currently selected sensor node from deviceTree)
 interface SensorDetail {
   name: string
   unit: string
@@ -53,28 +54,28 @@ const currentSensor = computed<SensorDetail | null>(() => {
   return findSensor(store.deviceTree.device_tree, store.currentChannel)
 })
 
-// 显示名（设备树里可能没 VS-sine 而是 S1，用 store.displayName 转换）
+// Display name (device tree might have S1 instead of VS-sine; convert via store.displayName)
 const currentDisplayName = computed(() => store.displayName(store.currentChannel))
 
-// 下半：告警预警合并列表（最多 20 条，3s 轮询）
-// 实测告警（红色）+ 预测预警（黄色）
+// Bottom half: alert+warning merged list (max 20, 3s poll)
+// Measured alerts (red) + predicted warnings (yellow)
 const alertsPoll = usePoll(() => api.alerts(20), 3000, { immediate: true, autoStart: true })
 const warningsPoll = usePoll(() => api.warnings(20), 3000, { immediate: true, autoStart: true })
 
 interface AlertRow {
   id: number | string
-  type: 'alert' | 'warning'  // alert=实测告警(红), warning=预测预警(黄)
+  type: 'alert' | 'warning'  // alert=measured alert (red), warning=predicted warning (yellow)
   channel: string
-  // 结构化告警原因：遥测值（最新/触发值）+ 异常分数（可能为空，如常数突变）+ 告警原因文本
-  raw_value: number | null      // 遥测值（来自 raw_window 最后一个点）
-  score: number | null          // 异常分数（null 表示该告警无分数，如常数突变）
-  reason: string                // 告警原因（message，结构化）
-  threshold: number | null      // 阈值（仅在告警由分数触发时显示）
-  final_status: string          // 综合状态
+  // Structured alert reason: telemetry value (latest/trigger value) + anomaly score (may be null, e.g. constant-step change) + alert reason text
+  raw_value: number | null      // telemetry value (from the last point of raw_window)
+  score: number | null          // anomaly score (null means this alert has no score, e.g. constant-step change)
+  reason: string                // alert reason (message, structured)
+  threshold: number | null      // threshold (shown only when the alert was triggered by a score)
+  final_status: string          // comprehensive status
   created_at: number
 }
 
-// 从 raw_window 取最新遥测值
+// Get latest telemetry value from raw_window
 function extractRawValue(rawWindow: any): number | null {
   if (!Array.isArray(rawWindow) || rawWindow.length === 0) return null
   const last = rawWindow[rawWindow.length - 1]
@@ -84,7 +85,7 @@ function extractRawValue(rawWindow: any): number | null {
 const alertRows = computed<AlertRow[]>(() => {
   const rows: AlertRow[] = []
 
-  // 实测告警（来自内存 AlertStore，含 raw_window/message/score）
+  // Measured alerts (from in-memory AlertStore, includes raw_window/message/score)
   const alertsResp = alertsPoll.data.value
   const alerts = alertsResp?.alerts || []
   const threshold = alertsResp?.threshold ?? 0.5
@@ -102,7 +103,7 @@ const alertRows = computed<AlertRow[]>(() => {
     })
   }
 
-  // 预测预警（来自内存 WarningStore）
+  // Predicted warnings (from in-memory WarningStore)
   const warnings = warningsPoll.data.value?.warnings || []
   for (const w of warnings) {
     rows.push({
@@ -152,7 +153,7 @@ function statusClass(s: string): string {
 
 <template>
   <div class="right-detail">
-    <!-- 上半：通道详情 -->
+    <!-- Top half: channel details -->
     <div class="detail-top">
       <div class="section-header">
         <span class="section-title">通道详情</span>
@@ -186,7 +187,7 @@ function statusClass(s: string): string {
       </div>
     </div>
 
-    <!-- 下半：告警预警列表 -->
+    <!-- Bottom half: alert and warning list -->
     <div class="detail-bottom">
       <div class="section-header">
         <span class="section-title">告警 / 预警</span>
@@ -210,11 +211,11 @@ function statusClass(s: string): string {
               {{ statusLabel(row.final_status) }}
             </span>
           </div>
-          <!-- 遥测值（主信息，含单位） -->
+          <!-- Telemetry value (primary info, includes unit) -->
           <div class="row-raw-value">
             遥测值: <span class="value-num">{{ row.raw_value != null ? row.raw_value.toFixed(3) : '—' }}</span>
           </div>
-          <!-- 结构化告警原因（小字） -->
+          <!-- Structured alert reason (small text) -->
           <div class="row-reason" :title="row.reason">{{ row.reason }}</div>
           <div class="row-time mono">{{ fmtTime(row.created_at) }}</div>
         </div>
@@ -231,7 +232,7 @@ function statusClass(s: string): string {
   background: #0f1530;
 }
 
-/* 上半（约 40%） */
+/* Top half (~40%) */
 .detail-top {
   flex: 0 0 40%;
   display: flex;
@@ -240,7 +241,7 @@ function statusClass(s: string): string {
   overflow: hidden;
 }
 
-/* 下半（约 60%） */
+/* Bottom half (~60%) */
 .detail-bottom {
   flex: 1;
   display: flex;

@@ -1,8 +1,8 @@
 """Alert service.
 
 Routes space-side confirmed alerts (score > threshold on measured data)
-into the ``AlertStore``.  This is the *measured-report* (实报) stream —
-distinct from the forecast-derived *early-warning* (预警) stream managed
+into the ``AlertStore``.  This is the *measured-report* stream —
+distinct from the forecast-derived *early-warning* stream managed
 by ``warning_service.py``.
 """
 

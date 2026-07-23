@@ -1,17 +1,17 @@
 """Alert management command.
 
-Agent 友好双通道：与「告警管理」HTTP API 并行的 CLI。
+Agent-friendly dual channel: a CLI parallel to the "alert management" HTTP API.
 
-子命令：
+Subcommands:
   --list      [--channel X --verdict real --status active --from 2026-07-01 --to 2026-07-21]
               [--limit N] [--format json|text]
   --annotate  --ids 1,2,3 --verdict real|false_alarm|uncertain
-  --delete    --ids 1,2,3    （软删，移到回收站）
+  --delete    --ids 1,2,3    (soft delete, moves to recycle bin)
   --create    --channel C-1 --score 0.9 [--message "..."] [--ts "2026-07-21T12:00:00"]
   --export    [--ids 1,2,3 | --channel X --from ... --to ...] [--format csv|json] --out alerts.csv
 
-直调 services_bridge.get_container().sqlite / diagnosis / DiagnosisService，
-不重复业务逻辑。
+Directly calls services_bridge.get_container().sqlite / diagnosis / DiagnosisService.
+Does not duplicate business logic.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from phm_site.views_admin import _parse_alert_filters, _parse_id_list
 
 
 def _ensure_ready():
-    """确保 PHM Container 就绪（CLI 直启 services_bridge）。"""
+    """Ensure the PHM Container is ready (CLI directly starts services_bridge)."""
     if services_bridge.get_state() == 'idle':
         services_bridge.start()
     deadline = time.time() + 60
@@ -52,7 +52,7 @@ class Command(BaseCommand):
         group.add_argument('--create', action='store_true', help='人工补录')
         group.add_argument('--export', action='store_true', help='导出 CSV/JSON')
 
-        # 筛选（--list / --export 通用）
+        # Filters (shared by --list / --export)
         parser.add_argument('--channel', default='', help='按通道过滤')
         parser.add_argument('--alert_type', default='',
                             choices=['', 'measured', 'predicted', 'joint'],
@@ -72,20 +72,20 @@ class Command(BaseCommand):
         parser.add_argument('--page', type=int, default=1,
                             help='--list 页码（默认 1，配合 --limit 翻页）')
 
-        # id 列表（--annotate / --delete / --export 通用）
+        # ID list (shared by --annotate / --delete / --export)
         parser.add_argument('--ids', default='',
                             help='id 列表（逗号分隔），用于 --annotate / --delete / --export')
         parser.add_argument('--verdict_value', default='',
                             choices=['real', 'false_alarm', 'uncertain'],
                             help='--annotate 的 verdict 值')
 
-        # --create 参数
+        # --create arguments
         parser.add_argument('--score', type=float, default=None,
                             help='--create 的异常分数')
         parser.add_argument('--message', default='', help='--create 的描述')
         parser.add_argument('--ts', default='', help='--create 的告警时间（ISO 或 Unix 秒）')
 
-        # --export / --list 输出格式
+        # --export / --list output format
         parser.add_argument('--format', dest='output_format', default='text',
                             choices=['text', 'json', 'csv'],
                             help='输出格式（--list 默认 text；--export 默认 csv）')
@@ -104,15 +104,15 @@ class Command(BaseCommand):
         elif opts['export']:
             self._do_export(opts)
 
-    # ── 子操作 ──────────────────────────────────────────────────
+    # ── Sub-operations ──────────────────────────────────────────────────
 
     def _build_filters(self, opts, *, use_ids=False):
-        """从 opts 构造筛选参数（与 alert_view 共用 _parse_alert_filters）。"""
+        """Build filter parameters from opts (shares _parse_alert_filters with alert_view)."""
         if use_ids and opts.get('ids'):
             ids = _parse_id_list(opts['ids'])
             if ids:
                 return {'_ids': ids}
-        # 复用 view 层 helper
+        # Reuse the view-layer helper
         fake_get = {
             'channel': opts.get('channel') or None,
             'alert_type': opts.get('alert_type') or None,
@@ -127,7 +127,7 @@ class Command(BaseCommand):
         c = _ensure_ready()
         filters = self._build_filters(opts)
         limit = max(1, min(int(opts['limit']), 1000))
-        # 总数 + 分页
+        # Total count + pagination
         total = c.sqlite.count_alerts_filtered(
             channel=filters['channel'], alert_type=filters['alert_type'],
             status=filters['status'], verdict=filters['verdict'],
@@ -194,7 +194,7 @@ class Command(BaseCommand):
         score = opts.get('score')
         if score is None:
             raise CommandError("--create 需要 --score（数字）")
-        # 时间解析
+        # Parse timestamp
         from phm_site.views_admin import _parse_iso_or_float
         created_at = _parse_iso_or_float(opts.get('ts')) if opts.get('ts') else None
         new_id = c.sqlite.insert_alert_manual(
@@ -214,7 +214,7 @@ class Command(BaseCommand):
         c = _ensure_ready()
         fmt = opts['output_format'] if opts['output_format'] != 'text' else 'csv'
 
-        # 优先 ids，否则按筛选
+        # Prefer IDs; otherwise filter
         if opts.get('ids'):
             ids = _parse_id_list(opts['ids'])
             rows = []
@@ -271,7 +271,7 @@ class Command(BaseCommand):
             else:
                 self.stdout.write(payload)
         else:  # csv
-            # 写文件时加 BOM，stdout 不加（避免终端显示问题）
+            # Add BOM when writing to file; skip for stdout (avoids terminal display issues)
             if opts['out']:
                 out_stream.write('\ufeff')  # BOM
             writer = csv.writer(out_stream)

@@ -2,15 +2,16 @@
 
 Implements the user-specified ground data-processing flow:
 
-    实测块 telemetry[N]
-      ① TTM-R3 预测 → prediction[96]
-      ② 拼接联合序列 combined = telemetry[N] + prediction[96]
-      ③ TSPulse 联合检测 scores_all = detect(combined)   # 长 N+96
-      ④ 只取预测段 predict_scores = scores_all[N:]
-      ⑤ max(predict_scores) > threshold → 新增预警 (status=pending)
-      ⑥ 后续实测覆盖预测区间 → 取该区间天基实测分数核验
-         实测超阈值 → status=confirmed (真实/预测准确)
-         否则       → status=false     (虚报/预测误报)
+    Measured block telemetry[N]
+      (1) TTM-R3 forecast  -> prediction[96]
+      (2) Concatenate joint sequence combined = telemetry[N] + prediction[96]
+      (3) TSPulse joint detection scores_all = detect(combined)   # length N+96
+      (4) Take only the prediction segment predict_scores = scores_all[N:]
+      (5) max(predict_scores) > threshold -> create new warning (status=pending)
+      (6) Subsequent measured data covers the prediction interval -> verify with
+         space-segment measured scores in that interval
+         Measured exceeds threshold -> status=confirmed (true positive / accurate prediction)
+         Otherwise                  -> status=false    (false alarm / prediction miss)
 
 The telemetry chart's anomaly-score curve is **not** touched by this
 service — it keeps using the space-side scores stored in the ring buffer,

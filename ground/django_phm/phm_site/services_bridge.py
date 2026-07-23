@@ -1,17 +1,20 @@
 """Bridge between Django and the phm service container.
 
-职责：
-1. 在 Django 启动时初始化 phm.api.deps.Container（含所有 service + 模型预加载）
-2. 管理 3 个后台线程：
-   - auto-poll：2s 周期，从天基 TCP 拉取数据
-   - eval：1s 周期，并行评估所有通道（预测+检测+预警）
-   - auto-diagnosis：按需启动，LLM 批量诊断（DiagnosisService 内部线程）
+Responsibilities:
+1. Initialise phm.api.deps.Container at Django startup (all services + model
+   preloading).
+2. Manage 3 background threads:
+   - auto-poll: 2s cycle, pulls data from the space-segment TCP.
+   - eval: 1s cycle, evaluates all channels in parallel (forecast + detection
+     + warning).
+   - auto-diagnosis: started on demand, batch LLM diagnosis (internal thread
+     of DiagnosisService).
 
-设计要点（v1.1）：
-- Container 初始化耗时数秒（加载 TSPulse + TTM-R3 + RUL 模型）。
-  ready() 不应阻塞 Django 启动，因此初始化放在后台线程。
-- 三态机：'idle' → 'initializing' → 'ready'/'failed'。
-  API 端点根据状态返回 200/503，避免误导前端。
+Design notes (v1.1):
+- Container init takes several seconds (loads TSPulse + TTM-R3 + RUL models).
+  ready() must not block Django startup, so init runs in a background thread.
+- Three-state machine: 'idle' → 'initializing' → 'ready'/'failed'.
+  API endpoints return 200/503 by state so the front-end is not misled.
 """
 from __future__ import annotations
 
@@ -25,7 +28,7 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
-# 状态机：'idle' → 'initializing' → 'ready' / 'failed'
+# State machine: 'idle' → 'initializing' → 'ready' / 'failed'
 _state = 'idle'
 _state_lock = threading.Lock()
 _init_error: Exception | None = None
@@ -36,26 +39,27 @@ _eval_stop = threading.Event()
 _eval_thread: threading.Thread | None = None
 _init_thread: threading.Thread | None = None
 
-_AUTO_POLL_INTERVAL = 2.0  # 秒
-_AUTO_POLL_BLOCK = 512     # 默认块大小
-_MAX_EVAL_WORKERS = 8      # 模型评估并行 worker 上限
+_AUTO_POLL_INTERVAL = 2.0  # seconds
+_AUTO_POLL_BLOCK = 512     # default block size
+_MAX_EVAL_WORKERS = 8      # cap on parallel model-eval workers
 
-# ── 天地链路 RTT 统计 ────────────────────────────────────────────────────────
-# poll_one 内部测量 TCP 往返时延（发请求到收到响应），多传感器取最小值。
-# 这是真实的"天地信号传输延迟"（本地测试应接近 0）。
-_link_rtt_ms: float | None = None           # 最近一次 poll 的最小 RTT
-_link_last_success_ts: float = 0.0           # 最近一次 poll 成功时刻
-_link_fail_count: int = 0                    # 连续失败计数（连续 3 次 → 中断）
-_LINK_FAIL_THRESHOLD = 3                     # 链路中断判定阈值
+# ── Space-ground link RTT statistics ────────────────────────────────────────
+# poll_one measures the TCP round-trip (request sent → response received) and,
+# across multiple sensors, keeps the minimum. This is the real "space-ground
+# signal transmission delay" (should be near 0 in local tests).
+_link_rtt_ms: float | None = None           # min RTT of the most recent poll
+_link_last_success_ts: float = 0.0           # timestamp of the most recent successful poll
+_link_fail_count: int = 0                    # consecutive failures (3 in a row → offline)
+_LINK_FAIL_THRESHOLD = 3                     # link-down threshold
 _link_rtt_lock = threading.Lock()
 
 
 def get_link_status() -> dict:
-    """返回天地链路状态（顶栏用）。
+    """Return the space-ground link status (for the top bar).
 
-    - rtt_ms: 最近一次成功 poll 的最小 RTT（毫秒）
-    - status: 'online'（RTT<3000ms 且连续失败<3）/ 'degraded' / 'offline'
-    - last_success_ts: 最近成功时刻
+    - rtt_ms: min RTT of the most recent successful poll (milliseconds)
+    - status: 'online' (RTT<3000ms and consecutive failures<3) / 'degraded' / 'offline'
+    - last_success_ts: most recent success timestamp
     """
     with _link_rtt_lock:
         rtt = _link_rtt_ms
@@ -71,11 +75,11 @@ def get_link_status() -> dict:
 
 
 def _record_poll_result(rtt_ms: float | None, success: bool) -> None:
-    """记录一次 poll 的结果，更新链路统计。"""
+    """Record one poll's result and update the link statistics."""
     global _link_rtt_ms, _link_fail_count, _link_last_success_ts
     with _link_rtt_lock:
         if success and rtt_ms is not None:
-            # 多传感器并行 poll，取最小 RTT（最快的那条路径）
+            # Sensors are polled in parallel; keep the min RTT (the fastest path)
             if _link_rtt_ms is None or rtt_ms < _link_rtt_ms:
                 _link_rtt_ms = rtt_ms
             _link_fail_count = 0
@@ -85,13 +89,13 @@ def _record_poll_result(rtt_ms: float | None, success: bool) -> None:
 
 
 def get_state() -> str:
-    """返回当前初始化状态：'idle' / 'initializing' / 'ready' / 'failed'."""
+    """Return the current init state: 'idle' / 'initializing' / 'ready' / 'failed'."""
     with _state_lock:
         return _state
 
 
 def get_init_error() -> str | None:
-    """初始化失败时返回错误信息字符串，否则 None。"""
+    """Return the init error string on failure, else None."""
     with _state_lock:
         if _init_error is None:
             return None
@@ -99,21 +103,21 @@ def get_init_error() -> str | None:
 
 
 def start() -> None:
-    """启动 Container 初始化（后台线程，不阻塞）。幂等。"""
+    """Start Container init (background thread, non-blocking). Idempotent."""
     global _state, _init_thread
     with _state_lock:
         if _state in ('initializing', 'ready'):
             return
         _state = 'initializing'
 
-    # 初始化放后台线程（耗时数秒，含模型加载）
+    # Init runs in a background thread (takes seconds, includes model loading)
     if _init_thread is None or not _init_thread.is_alive():
         _init_thread = threading.Thread(target=_init_worker, daemon=True, name='phm-init')
         _init_thread.start()
 
 
 def _init_worker() -> None:
-    """后台初始化 Container + 启动 auto-poll/eval 线程。"""
+    """Background: initialise Container + start the auto-poll/eval threads."""
     global _state, _init_error
     try:
         from phm.api import deps
@@ -136,15 +140,16 @@ def _init_worker() -> None:
 
 
 def get_container():
-    """返回 Container 单例。未就绪时抛 RuntimeError（调用方应先 get_state() 检查）。
+    """Return the Container singleton. Raises RuntimeError when not ready (callers should check get_state() first).
 
-    Lazy-init 兜底：即便 ready() 没在服务进程跑（如 migrate），首次请求也会触发初始化。
+    Lazy-init fallback: even if start() was never run in the serving process
+    (e.g. during migrate), the first request triggers init.
     """
     state = get_state()
     if state == 'failed':
         raise RuntimeError(f"PHM container init failed: {get_init_error()}")
     if state != 'ready':
-        # 未就绪 → 触发初始化（如未启动），并告知调用方等待
+        # Not ready → trigger init (if not started) and tell the caller to wait
         if state == 'idle':
             start()
         raise RuntimeError(f"PHM container not ready (state={state})")
@@ -154,7 +159,7 @@ def get_container():
 
 
 def stop() -> None:
-    """停止后台线程 + flush SQLite。"""
+    """Stop the background threads + flush SQLite."""
     global _init_thread, _auto_poll_thread, _eval_thread
     _stop_background_threads()
     if _init_thread is not None and _init_thread.is_alive():
@@ -171,7 +176,7 @@ def stop() -> None:
     logger.info("PHM services_bridge stopped")
 
 
-# ── Auto-poll 线程 ──────────────────────────────────────────────────────────
+# ── Auto-poll thread ────────────────────────────────────────────────────────
 def _auto_poll_loop() -> None:
     from phm.api import deps
     from phm.services.tree_utils import get_flat_sensors
@@ -187,7 +192,7 @@ def _auto_poll_loop() -> None:
                 continue
             with ThreadPoolExecutor(max_workers=len(sources)) as pool:
                 results = list(pool.map(lambda src: _poll_one(c, src), sources))
-                # 收集本轮所有 poll 结果，更新链路状态
+                # Collect this round's poll results and update the link status
                 if results:
                     min_rtt = min((r[0] for r in results if r[0] is not None), default=None)
                     any_success = any(r[1] for r in results)
@@ -198,7 +203,7 @@ def _auto_poll_loop() -> None:
 
 
 def _poll_one(c, src: str) -> tuple[float | None, bool]:
-    """单传感器 poll，返回 (rtt_ms, success)。"""
+    """Poll a single sensor; return (rtt_ms, success)."""
     try:
         t0 = time.time()
         c.telemetry.poll(src, 100.0, _AUTO_POLL_BLOCK)
@@ -209,16 +214,16 @@ def _poll_one(c, src: str) -> tuple[float | None, bool]:
         return None, False
 
 
-# ── Model-eval 线程 ─────────────────────────────────────────────────────────
+# ── Model-eval thread ───────────────────────────────────────────────────────
 def _eval_loop() -> None:
-    """后台循环：每周期并行评估所有通道（预测+检测+预警）。
+    """Background loop: each cycle evaluates all channels in parallel (forecast + detection + warning).
 
-    两阶段：
-    - Phase A：per-channel eval（forecast → cascade → warning state machine）
-    - Phase B：per-folder co-anomaly consensus（联合告警）
+    Two phases:
+    - Phase A: per-channel eval (forecast → cascade → warning state machine)
+    - Phase B: per-folder co-anomaly consensus (joint alerts)
 
-    历史教训（Day17-续）：串行 4 通道耗时 2.87s > poll 间隔 2s 导致积压。
-    改并行 + torch.no_grad 后 <0.5s。
+    Historical lesson (Day17 follow-up): serial 4-channel eval took 2.87s > the 2s poll
+    interval, causing backlog. Going parallel + torch.no_grad brought it under 0.5s.
     """
     from phm.api import deps
 
@@ -227,7 +232,7 @@ def _eval_loop() -> None:
             c = deps.get()
             channels = c.ring.channels()
             if channels:
-                # Phase A: 并行 per-channel eval
+                # Phase A: parallel per-channel eval
                 n_workers = min(len(channels), _MAX_EVAL_WORKERS)
                 with ThreadPoolExecutor(max_workers=n_workers) as pool:
                     futures = {
@@ -240,7 +245,7 @@ def _eval_loop() -> None:
                         except Exception:
                             logger.debug("Eval failed for %s", futures[fut], exc_info=True)
 
-                # Phase B: per-folder co-anomaly consensus（联合告警）
+                # Phase B: per-folder co-anomaly consensus (joint alerts)
                 try:
                     tree = c.config.load().get("device_tree", [])
                     joint_alerts = c.warning_service.evaluate_all_folders(tree)

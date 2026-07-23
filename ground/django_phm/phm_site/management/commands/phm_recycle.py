@@ -1,19 +1,22 @@
-""" recycle bin management command.
+"""Recycle bin management command.
 
-提供 Agent/CLI 友好的回收站操作通道（HTTP API 之外的另一条路径，
-对齐 AGENTS.md §结构化设计规范 第 5 条「Agent 友好双通道」）。
+Provides an Agent/CLI-friendly recycle bin operation channel (the path
+parallel to the HTTP API, per AGENTS.md §Structured Design Spec item 5
+"Agent-friendly dual channel").
 
-子命令：
+Subcommands:
   --list   --table alerts|detections|diagnoses [--limit N] [--format json|text]
   --restore --table alerts|detections|diagnoses --ids 1,2,3
   --purge  --table alerts|detections|diagnoses --ids 1,2,3
 
-直调 services_bridge.get_container().sqlite，不重复业务逻辑。
+Directly calls services_bridge.get_container().sqlite. Does not duplicate
+business logic.
 
-注意：CLI 默认不经过 Django auth，因此**不校验超管**。生产环境部署时
-请确保只在受信环境运行（与 manage.py 的常规假设一致）。
+Note: the CLI does not go through Django auth by default, so it does **not**
+verify super-admin status. In production, ensure this is only run in a
+trusted environment (consistent with the usual manage.py assumptions).
 
-示例：
+Examples:
   python manage.py phm_recycle --list --table alerts --format json
   python manage.py phm_recycle --restore --table alerts --ids 12,34
   python manage.py phm_recycle --purge --table diagnoses --ids 56
@@ -35,7 +38,7 @@ class Command(BaseCommand):
     help = "回收站：列出 / 恢复 / 永久删除已软删的告警/检测/诊断记录"
 
     def add_arguments(self, parser):
-        # 互斥的动作组（三个三选一）
+        # Mutually exclusive action group (pick one of three)
         group = parser.add_mutually_exclusive_group(required=True)
         group.add_argument('--list', action='store_true', help='列出已软删记录')
         group.add_argument('--restore', action='store_true', help='恢复软删记录（is_deleted→0）')
@@ -61,9 +64,10 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **opts):
-        # 先确保 PHM 服务就绪（CLI 直接启动 services_bridge，不走 WSGI 中间件）
-        # CLI 是独立进程，不能共享 runserver 的 Container，需要自己启一个
-        # （后台初始化含模型加载，最多等 60 秒）
+        # Ensure PHM service is ready first (CLI starts services_bridge directly,
+        # bypassing WSGI middleware). The CLI is a separate process and cannot
+        # share the runserver Container, so it must start its own.
+        # (Background initialisation includes model loading; wait up to 60 s)
         if services_bridge.get_state() == 'idle':
             self.stdout.write(self.style.WARNING(
                 "PHM 服务未启动，正在后台初始化（加载模型，约需 10-30 秒）…"
@@ -92,7 +96,7 @@ class Command(BaseCommand):
         elif opts['purge']:
             self._do_mutation(c.sqlite.purge_by_ids, sql_table, table_key, label, opts, action='purge')
 
-    # ── 子操作 ──────────────────────────────────────────────────
+    # ── Sub-operations ──────────────────────────────────────────────────
 
     def _do_list(self, c, sql_table, table_key, label, opts):
         limit = max(1, min(int(opts['limit']), 1000))
@@ -107,7 +111,7 @@ class Command(BaseCommand):
             ))
             if not rows:
                 return
-            # 文本模式：简表
+            # Text mode: compact table
             for r in rows:
                 rid = r.get('id')
                 channel = r.get('channel', '—')

@@ -1,50 +1,59 @@
 """Signal-generator ↔ DAQ-card IPC protocol (localhost TCP RPC).
 
-架构上下文
-==========
-M1.2 把原本同进程的 SensorSource 调用拆成了两个独立进程：
+Architectural context
+=====================
+M1.2 splits the originally in-process SensorSource calls into two separate
+processes:
 
-- 进程 A：信号发生器（``signal_generator.py``），持有 SensorSource 实例
-- 进程 B：采集卡（``main.py``），通过本模块向信号发生器请求数据
+- Process A: the signal generator (``signal_generator.py``), holding the
+  SensorSource instances.
+- Process B: the DAQ card (``main.py``), which requests data from the signal
+  generator through this module.
 
-为什么不用 ``comm.SpaceServer`` / ``GroundClient``：
-- SpaceServer 是「push 缓存 + client drain」模型（采集卡攒好数据，地基来取）
-- IPC 需要的是「RPC 请求-响应」模型（采集卡按需拉，信号发生器现场生成）
-- 协议骨架（JSON line + ``END\\n`` + ``_NumpyEncoder``）相同，但服务端处理逻辑完全不同
+Why not ``comm.SpaceServer`` / ``GroundClient``:
+- SpaceServer is a "push buffer + client drain" model (the DAQ card buffers
+  data, the ground comes to fetch it).
+- IPC needs an "RPC request-response" model (the DAQ card pulls on demand,
+  the signal generator produces on the fly).
+- The protocol skeleton (JSON line + ``END\\n`` + ``_NumpyEncoder``) is shared,
+  but the server-side handling logic is entirely different.
 
-协议规范
-========
-传输：TCP 127.0.0.1（**绝不开 0.0.0.0**——IPC 是本机的，不能让外部访问）
-方向：采集卡（client）→ 信号发生器（server），单连接一次请求-响应
+Protocol spec
+=============
+Transport: TCP 127.0.0.1 only (binding the wildcard address is forbidden —
+IPC is local and must not be reachable from outside).
+Direction: DAQ card (client) → signal generator (server); a single connection
+does one request-response.
 
-请求（client → server，单行 JSON + ``\\n``）::
+Request (client → server, single JSON line + ``\\n``)::
 
     {"channel": "C-1", "n": 512}
 
-响应（server → client，单行 JSON + ``END\\n``）::
+Response (server → client, single JSON line + ``END\\n``)::
 
     {"channel": "C-1", "n": 512,
-     "raw_values": [<float>, ...],     # 长度 == n（或 < n 若源已耗尽）
-     "exhausted": false,                # FileSource 非 loop 模式才会 true
+     "raw_values": [<float>, ...],     # length == n (or < n if the source is exhausted)
+     "exhausted": false,                # only true for a non-looping FileSource
      "sample_rate": 100.0}
     END
 
-错误响应::
+Error response::
 
     {"error": "unknown channel: X", "channel": "X"}
     END
 
-并发模型
-========
-信号发生器主循环**单线程顺序处理**（accept → handle → close → 下一个）。
-原因：SensorSource 实例是不可重入的状态机（FileSource 的 ``_pos`` 游标、
-VirtualSensorSource 的 ``_t`` 计数器）。如果同一个 channel 的两个请求
-并发执行，会破坏游标一致性。
+Concurrency model
+=================
+The signal-generator main loop is **single-threaded sequential** (accept →
+handle → close → next). Reason: SensorSource instances are non-reentrant state
+machines (FileSource's ``_pos`` cursor, VirtualSensorSource's ``_t`` counter).
+Two concurrent requests on the same channel would corrupt the cursor.
 
-采集卡侧的 ``ThreadPoolExecutor`` 不会触发并发冲突——它给每个 channel
-一个 worker，每个 worker 只连一次 IPC 发自己的请求，不同 channel 访问
-的是不同的 SensorSource 实例。即使两个 worker 同时连，server 也会顺序
-处理（accept 后单线程执行 _handle_conn）。
+The DAQ-card-side ``ThreadPoolExecutor`` does not trigger a concurrency clash
+— it gives each channel one worker, each worker opens a single IPC connection
+for its own request, and different channels touch different SensorSource
+instances. Even if two workers connect simultaneously, the server still
+handles them sequentially (accept followed by a single-threaded _handle_conn).
 """
 
 from __future__ import annotations
@@ -57,16 +66,17 @@ from typing import Any, Callable
 
 import numpy as np
 
-# 复用 comm 模块已有的 _NumpyEncoder（ndarray / numpy 标量 → JSON）
+# Reuse comm's existing _NumpyEncoder (ndarray / numpy scalars → JSON)
 from comm import _NumpyEncoder  # noqa: E402 — space/comm.py on sys.path
 
 logger = logging.getLogger(__name__)
 
-# IPC 绑定地址强制 127.0.0.1（绝不对开放——契约 C18）
+# IPC bind address is forced to 127.0.0.1 (never exposed externally — contract C18)
 IPC_HOST = "127.0.0.1"
 IPC_DEFAULT_PORT = 9878
 
-# 请求超时（秒）。IPC 本地、延迟 < 1ms，2s 足够覆盖首次 virtual:sine fit 等慢路径
+# Request timeout (seconds). IPC is local with < 1ms latency; 2s is plenty to
+# cover slow paths like the first virtual:sine fit.
 IPC_TIMEOUT = 5.0
 
 
@@ -74,7 +84,8 @@ IPC_TIMEOUT = 5.0
 # Source function signature (used by server)
 # ---------------------------------------------------------------------------
 
-# 信号发生器提供给 server 的回调签名：传 channel + n，返回 (raw_values, exhausted, sample_rate)
+# Callback signature the signal generator hands to the server: takes channel + n,
+# returns (raw_values, exhausted, sample_rate).
 SourceFn = Callable[[str, int], tuple[np.ndarray, bool, float]]
 
 
@@ -94,7 +105,7 @@ class SignalIpcServer:
     """
 
     def __init__(self, source_fn: SourceFn, port: int = IPC_DEFAULT_PORT):
-        # 强制 localhost——契约 C18 禁止对外开放 IPC
+        # Force localhost — contract C18 forbids exposing IPC externally
         self.host = IPC_HOST
         self.port = port
         self._source_fn = source_fn
@@ -146,7 +157,7 @@ class SignalIpcServer:
 
     def _handle_conn(self, sock: socket.socket) -> None:
         """Read one request line → call source_fn → write one response + END."""
-        # 1. 读请求（单行 JSON）
+        # 1. Read the request (single JSON line)
         sock.settimeout(IPC_TIMEOUT)
         buf = b""
         while b"\n" not in buf and len(buf) < 8192:
@@ -171,7 +182,7 @@ class SignalIpcServer:
                              "request must have {channel:str, n:int>0}")
             return
 
-        # 2. 调信号发生器的 source_fn（可能抛异常）
+        # 2. Call the signal generator's source_fn (may raise)
         try:
             raw, exhausted, sample_rate = self._source_fn(channel, n)
         except KeyError:
@@ -182,7 +193,7 @@ class SignalIpcServer:
             self._send_error(sock, channel, f"source error: {e}")
             return
 
-        # 3. 回包
+        # 3. Send the response
         resp = {
             "channel": channel,
             "n": int(len(raw)),
@@ -286,15 +297,15 @@ class SignalIpcClient:
 
         raise SignalIpcError(f"IPC response had no JSON line (channel={channel}): {text!r}")
 
-    # 便捷封装：让调用方像调 SensorSource.read 一样
+    # Convenience wrapper: lets callers use it like SensorSource.read
     def ping(self) -> bool:
         """Quick liveness check. Returns True if server responds (even with error)."""
         try:
-            # 故意发一个非法请求，只要 server 回任何 JSON 就算活着
+            # Deliberately send an invalid request; any JSON reply means the server is alive
             self.read("", 1)
             return True
         except SignalIpcError as e:
-            # 只要错误信息不是连接失败，就说明 server 活着
+            # As long as the error is not a connection failure, the server is alive
             return "IPC read failed" not in str(e)
         except Exception:
             return False

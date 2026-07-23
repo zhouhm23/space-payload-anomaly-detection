@@ -1,14 +1,18 @@
-"""第 2 页：仪表盘测试。
+"""Page 2: Dashboard tests.
 
-覆盖：
-  (a) 匿名访问 302 跳登录
-  (b) staff/superuser 访问 200
-  (c) Container 未就绪时渲染占位页（_state.html，不 500）
-  (d) 三分类逻辑（_classify_verdict）
-  (e) 时间窗边界（_window_bounds：today/7d/30d 各自的桶数与跨度）
-  (f) 桶分配与聚合（_collect_dashboard_metrics：计数 + 桶分布 + 越界丢弃）
+Coverage:
+  (a) Anonymous access returns 302 redirect to login.
+  (b) staff/superuser access returns 200.
+  (c) Renders a placeholder page when the Container is not ready
+      (_state.html, no 500 error).
+  (d) Three-category classification logic (`_classify_verdict`).
+  (e) Time-window boundary calculation (`_window_bounds`: bucket count
+      and span for each of today / 7d / 30d).
+  (f) Bucket assignment and aggregation (`_collect_dashboard_metrics`:
+      counts + bucket distribution + out-of-window discard).
 
-测试用 Django TestCase + force_login。Container 走 mock（不依赖真实 PHM）。
+Tests use Django TestCase plus force_login. The Container is mocked so
+there is no dependency on a real PHM backend.
 """
 from __future__ import annotations
 
@@ -32,14 +36,14 @@ from phm_site.views_admin import (
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 纯函数测试（不依赖 Django DB / Container）
+# Pure-function tests (no Django DB / Container dependency)
 # ════════════════════════════════════════════════════════════════════════════
 
 class ClassifyVerdictTest(TestCase):
-    """_classify_verdict 三分类逻辑。"""
+    """Tests for the three-category classification logic in `_classify_verdict`."""
 
     def test_human_takes_priority(self):
-        """人工标注优先于 LLM（与 AlertRecord.final_status 一致）。"""
+        """Human annotation takes priority over the LLM verdict (consistent with ``AlertRecord.final_status``)."""
         self.assertEqual(_classify_verdict('real', 'false_alarm'), 'human')
         self.assertEqual(_classify_verdict('uncertain', 'real'), 'human')
 
@@ -53,12 +57,12 @@ class ClassifyVerdictTest(TestCase):
         self.assertEqual(_classify_verdict('', None), 'undiagnosed')
 
     def test_empty_string_equals_none(self):
-        """VERDICT_CHOICES 第一项是 ''（未标注），与 None 同义。"""
+        """The first entry in ``VERDICT_CHOICES`` is ``''`` (unannotated), which is synonymous with ``None``."""
         self.assertEqual(_classify_verdict('', 'real'), 'llm')
 
 
 class HealthTierTest(TestCase):
-    """_health_tier 分档逻辑。"""
+    """Tests for the health-tier bucketing logic in `_health_tier`."""
 
     def test_normal_above_80(self):
         tier, text = _health_tier(0.80)
@@ -81,17 +85,17 @@ class HealthTierTest(TestCase):
         self.assertEqual(tier, 'danger')
 
     def test_boundary_values(self):
-        """0.80 归 normal，0.50 归 warning（>= 阈值）。"""
+        """A score of exactly 0.80 maps to *normal*, and 0.50 maps to *warning* (both use >= threshold)."""
         self.assertEqual(_health_tier(0.80)[0], 'normal')
         self.assertEqual(_health_tier(0.50)[0], 'warning')
         self.assertEqual(_health_tier(0.00)[0], 'danger')
 
 
 class WindowBoundsTest(TestCase):
-    """_window_bounds 时间窗计算。"""
+    """Tests for the time-window boundary calculation in `_window_bounds`."""
 
     def setUp(self):
-        # 固定 now：2026-07-21 14:30:00 本地时间
+        # Fixed now: 2026-07-21 14:30:00 local time
         self.now_dt = dt.datetime(2026, 7, 21, 14, 30, 0)
         self.now = self.now_dt.timestamp()
 
@@ -99,7 +103,7 @@ class WindowBoundsTest(TestCase):
         start, end, kind, count = _window_bounds('today', self.now)
         self.assertEqual(kind, 'hour')
         self.assertEqual(count, 24)
-        # start 是今日 00:00:00
+        # start is today at 00:00:00
         start_dt = dt.datetime.fromtimestamp(start)
         self.assertEqual(start_dt.hour, 0)
         self.assertEqual(start_dt.minute, 0)
@@ -111,7 +115,7 @@ class WindowBoundsTest(TestCase):
         self.assertEqual(kind, 'day')
         self.assertEqual(count, 7)
         start_dt = dt.datetime.fromtimestamp(start)
-        # 7d 起点是 7-21 往前推 6 天 = 7-15
+        # 7d start is 6 days before 7-21 = 7-15
         self.assertEqual((start_dt.year, start_dt.month, start_dt.day),
                          (2026, 7, 15))
 
@@ -120,63 +124,63 @@ class WindowBoundsTest(TestCase):
         self.assertEqual(kind, 'day')
         self.assertEqual(count, 30)
         start_dt = dt.datetime.fromtimestamp(start)
-        # 30d 起点是 7-21 往前推 29 天 = 6-22
+        # 30d start is 29 days before 7-21 = 6-22
         self.assertEqual((start_dt.year, start_dt.month, start_dt.day),
                          (2026, 6, 22))
 
     def test_unknown_window_falls_back_to_today(self):
-        """未知 window 值兜底为 today 语义（不抛错）。"""
+        """An unknown window value falls back to 'today' semantics instead of raising."""
         start, _end, kind, count = _window_bounds('invalid', self.now)
         self.assertEqual(kind, 'hour')
         self.assertEqual(count, 24)
 
     def test_end_is_now(self):
-        """end 时间戳应等于传入的 now。"""
+        """The end timestamp should equal the passed-in *now* value."""
         for w in ('today', '7d', '30d'):
             _start, end, _kind, _count = _window_bounds(w, self.now)
             self.assertEqual(end, self.now)
 
 
 class BucketIndexTest(TestCase):
-    """_bucket_index 桶位置计算。"""
+    """Tests for the bucket-position calculation in `_bucket_index`."""
 
     def test_hour_bucket_within_same_day(self):
         today = dt.datetime(2026, 7, 21, 0, 0, 0).timestamp()
-        # 14:30 应落入第 14 桶
+        # 14:30 should land in bucket 14
         ts_1430 = dt.datetime(2026, 7, 21, 14, 30).timestamp()
         self.assertEqual(_bucket_index(ts_1430, today, 'hour'), 14)
 
     def test_day_bucket(self):
-        start = dt.datetime(2026, 6, 22, 0, 0, 0).timestamp()  # 30d 起点
-        # 7-21 应是第 29 桶（6-22 是第 0 桶）
+        start = dt.datetime(2026, 6, 22, 0, 0, 0).timestamp()  # 30d start
+        # 7-21 should be bucket 29 (6-22 is bucket 0)
         ts_0721 = dt.datetime(2026, 7, 21, 12, 0).timestamp()
         self.assertEqual(_bucket_index(ts_0721, start, 'day'), 29)
 
     def test_before_start_returns_negative(self):
-        """越界（早于 start）返回负数——上层用范围检查丢弃。"""
+        """A timestamp before the window start returns a negative index, which the caller discards via range check."""
         today = dt.datetime(2026, 7, 21, 0, 0, 0).timestamp()
         yesterday = dt.datetime(2026, 7, 20, 12, 0).timestamp()
         self.assertLess(_bucket_index(yesterday, today, 'hour'), 0)
 
 
 class FormatBucketLabelTest(TestCase):
-    """_format_bucket_label 短标签（x 轴刻度用，避免截断）。"""
+    """Tests for the short-axis label in `_format_bucket_label` (avoids truncation on the x-axis)."""
 
     def test_hour_label_is_just_hour_number(self):
-        """小时桶只显示纯小时数字（'14' 而非 '14:00'），24 桶不挤。"""
+        """Hour buckets display only the plain hour number ('14' rather than '14:00') to keep 24 buckets legible."""
         today = dt.datetime(2026, 7, 21, 0, 0, 0).timestamp()
         self.assertEqual(_format_bucket_label(14, 'hour', today), '14')
         self.assertEqual(_format_bucket_label(0, 'hour', today), '0')
         self.assertEqual(_format_bucket_label(23, 'hour', today), '23')
 
     def test_day_label_is_just_day_number(self):
-        """天桶只显示纯日数字（'21' 而非 '07-21'）。"""
+        """Day buckets display only the plain day number ('21' rather than '07-21')."""
         start = dt.datetime(2026, 6, 22, 0, 0, 0).timestamp()
         self.assertEqual(_format_bucket_label(0, 'day', start), '22')   # 6-22
         self.assertEqual(_format_bucket_label(29, 'day', start), '21')  # 7-21
 
     def test_hour_label_short_enough_no_truncation(self):
-        """短标签长度 ≤ 2 字符，24 桶也能完整显示不出现 '...'。"""
+        """Short labels are at most 2 characters long so that even 24 buckets display without truncation ('...')."""
         today = dt.datetime(2026, 7, 21, 0, 0, 0).timestamp()
         for i in range(24):
             label = _format_bucket_label(i, 'hour', today)
@@ -184,7 +188,7 @@ class FormatBucketLabelTest(TestCase):
 
 
 class FormatBucketTitleTest(TestCase):
-    """_format_bucket_title 悬停 title（完整时间）。"""
+    """Tests for the hover tooltip title in `_format_bucket_title` (full date/time)."""
 
     def test_hour_title_full_datetime(self):
         today = dt.datetime(2026, 7, 21, 0, 0, 0).timestamp()
@@ -198,10 +202,10 @@ class FormatBucketTitleTest(TestCase):
 
 
 class CollectDashboardMetricsTest(TestCase):
-    """_collect_dashboard_metrics 聚合（用鸭子类型告警）。"""
+    """Tests for the aggregation logic in `_collect_dashboard_metrics` (using duck-typed alert objects)."""
 
     def _make_alert(self, ts, human=None, llm=None):
-        """构造一个最小告警对象（只需 created_at/human_verdict/llm_verdict）。"""
+        """Construct a minimal alert object (only needs ``created_at``, ``human_verdict``, ``llm_verdict``)."""
         m = mock.Mock()
         m.created_at = ts
         m.human_verdict = human
@@ -209,29 +213,32 @@ class CollectDashboardMetricsTest(TestCase):
         return m
 
     def setUp(self):
-        # 固定 now：2026-07-21 14:30
+        # Fixed now: 2026-07-21 14:30
         self.now = dt.datetime(2026, 7, 21, 14, 30).timestamp()
 
     def test_empty_alerts_returns_zero_counts_and_buckets(self):
         m = _collect_dashboard_metrics('today', [], )
-        # _collect_dashboard_metrics 内部用真实 now，但我们这里不传 now 参数；
-        # 用 today 窗口，告警空时三计数全 0，桶长 24。
+        # `_collect_dashboard_metrics` internally calls the real ``now``, but we do
+        # not pass a ``now`` parameter here; with the 'today' window and empty alerts,
+        # all three counts should be zero and the bucket list should have 24 entries.
         self.assertEqual(m['counts'], {'human': 0, 'llm': 0, 'undiagnosed': 0, 'total': 0})
         self.assertEqual(len(m['buckets']), 24)
         self.assertTrue(all(b['count'] == 0 for b in m['buckets']))
 
     def test_classification_three_buckets(self):
-        """三种诊断状态分别计数到不同桶。"""
+        """Each of the three diagnostic statuses is counted into its own bucket."""
         today_start = dt.datetime(2026, 7, 21, 0, 0, 0).timestamp()
-        # 3 条告警：human / llm / undiagnosed
+        # 3 alerts: human / llm / undiagnosed
         alerts = [
             self._make_alert(today_start + 3600 * 10, human='real'),
             self._make_alert(today_start + 3600 * 11, llm='false_alarm'),
             self._make_alert(today_start + 3600 * 12, human=None, llm=None),
         ]
-        # 直接 patch _window_bounds 的 now 参数：需要重构 _collect_dashboard_metrics
-        # 接受 now 参数才行。但当前签名不接 now，所以走 _window_bounds 默认用
-        # _time.time()。为保持纯函数可测，这里改用 monkeypatch。
+        # Directly patching the ``now`` parameter of `_window_bounds` would
+        # require refactoring `_collect_dashboard_metrics` to accept ``now``.
+        # Since the current signature does not accept ``now``, `_window_bounds`
+        # falls back to ``_time.time()``.  To keep the pure function testable,
+        # we monkeypatch ``_time.time`` instead.
         with mock.patch('phm_site.views_admin._time.time', return_value=self.now):
             m = _collect_dashboard_metrics('today', alerts)
         self.assertEqual(m['counts']['human'], 1)
@@ -240,14 +247,14 @@ class CollectDashboardMetricsTest(TestCase):
         self.assertEqual(m['counts']['total'], 3)
 
     def test_breakdown_real_false_uncertain(self):
-        """breakdown 把每类的 verdict 细分成 real/false_alarm/uncertain。"""
+        """Breakdown splits each category's verdict into real / false_alarm / uncertain."""
         today_start = dt.datetime(2026, 7, 21, 0, 0, 0).timestamp()
         alerts = [
-            # human 类 3 种 verdict 各 1 条
+            # human category: one of each verdict
             self._make_alert(today_start + 3600 * 1, human='real'),
             self._make_alert(today_start + 3600 * 2, human='false_alarm'),
             self._make_alert(today_start + 3600 * 3, human='uncertain'),
-            # llm 类 2 种 verdict
+            # llm category: two verdicts
             self._make_alert(today_start + 3600 * 4, llm='real'),
             self._make_alert(today_start + 3600 * 5, llm='false_alarm'),
         ]
@@ -260,47 +267,47 @@ class CollectDashboardMetricsTest(TestCase):
         self.assertEqual(m['breakdown']['llm']['uncertain'], 0)
 
     def test_breakdown_human_priority_over_llm(self):
-        """当 human_verdict 非空时，分类走 human，breakdown 也归 human。"""
+        """When ``human_verdict`` is non-empty, the classification and breakdown both go to the human category."""
         today_start = dt.datetime(2026, 7, 21, 0, 0, 0).timestamp()
         alerts = [
-            # 同时有 human 和 llm verdict → 归 human，verdict 取 human 的
+            # Both human and llm verdict present -> classified as human, verdict taken from human
             self._make_alert(today_start + 3600 * 1, human='real', llm='false_alarm'),
         ]
         with mock.patch('phm_site.views_admin._time.time', return_value=self.now):
             m = _collect_dashboard_metrics('today', alerts)
         self.assertEqual(m['counts']['human'], 1)
         self.assertEqual(m['counts']['llm'], 0)
-        # breakdown：human.real += 1，llm 完全不动
+        # breakdown: human.real += 1, llm completely untouched
         self.assertEqual(m['breakdown']['human']['real'], 1)
         self.assertEqual(m['breakdown']['llm']['false_alarm'], 0)
 
     def test_breakdown_invalid_verdict_ignored(self):
-        """verdict 值不在 real/false_alarm/uncertain 内时不计入 breakdown
-        （但 counts 照常计）。"""
+        """A verdict value outside real/false_alarm/uncertain is excluded from the breakdown
+        (but still counted normally)."""
         today_start = dt.datetime(2026, 7, 21, 0, 0, 0).timestamp()
         alerts = [
             self._make_alert(today_start + 3600 * 1, human='garbage'),
         ]
         with mock.patch('phm_site.views_admin._time.time', return_value=self.now):
             m = _collect_dashboard_metrics('today', alerts)
-        # counts.human = 1（有 human_verdict）
+        # counts.human = 1 (has human_verdict)
         self.assertEqual(m['counts']['human'], 1)
-        # 但 breakdown.human 三个字段全 0（'garbage' 不认）
+        # but breakdown.human has all three fields at 0 ('garbage' is unrecognized)
         self.assertEqual(sum(m['breakdown']['human'].values()), 0)
 
     def test_buckets_have_title_field(self):
-        """每个桶都应有 title 字段（悬停完整时间）。"""
+        """Every bucket should have a ``title`` field (hover tooltip with the full time)."""
         with mock.patch('phm_site.views_admin._time.time', return_value=self.now):
             m = _collect_dashboard_metrics('today', [])
         for b in m['buckets']:
             self.assertIn('title', b)
             self.assertIn('label', b)
             self.assertIn('count', b)
-        # 第 0 桶 title 应是今天的日期开头
+        # Bucket 0's title should start with today's date
         self.assertTrue(m['buckets'][0]['title'].startswith('2026-07-21'))
 
     def test_buckets_have_parts_matrix(self):
-        """每桶 parts 含 human/llm/undiagnosed 三维（来源×verdict 2×3 + undiagnosed 计数）。"""
+        """Each bucket's ``parts`` contains the three dimensions human/llm/undiagnosed (source x verdict 2x3 + undiagnosed count)."""
         with mock.patch('phm_site.views_admin._time.time', return_value=self.now):
             m = _collect_dashboard_metrics('today', [])
         for b in m['buckets']:
@@ -309,39 +316,39 @@ class CollectDashboardMetricsTest(TestCase):
             self.assertIn('human', parts)
             self.assertIn('llm', parts)
             self.assertIn('undiagnosed', parts)
-            # human/llm 各含 3 个 verdict key
+            # human/llm each contain 3 verdict keys
             for src in ('human', 'llm'):
                 self.assertEqual(set(parts[src].keys()),
                                  {'real', 'false_alarm', 'uncertain'})
-            # undiagnosed 是 int（无 verdict 细分）
+            # undiagnosed is an int (no verdict breakdown)
             self.assertIsInstance(parts['undiagnosed'], int)
 
     def test_bucket_parts_classification_correct(self):
-        """告警分到正确桶的 correct parts 段。"""
+        """Alerts are distributed into the correct parts segments of the right bucket."""
         today_start = dt.datetime(2026, 7, 21, 0, 0, 0).timestamp()
         alerts = [
-            # 10:00：human real 一条 + llm false 一条 + 未诊断一条
+            # 10:00: one human real + one llm false_alarm + one undiagnosed
             self._make_alert(today_start + 3600 * 10, human='real'),
             self._make_alert(today_start + 3600 * 10, llm='false_alarm'),
             self._make_alert(today_start + 3600 * 10),
-            # 11:00：human uncertain 一条
+            # 11:00: one human uncertain
             self._make_alert(today_start + 3600 * 11, human='uncertain'),
         ]
         with mock.patch('phm_site.views_admin._time.time', return_value=self.now):
             m = _collect_dashboard_metrics('today', alerts)
-        # 10 点桶：3 条总数
+        # 10-o'clock bucket: 3 alerts total
         b10 = m['buckets'][10]
         self.assertEqual(b10['count'], 3)
         self.assertEqual(b10['parts']['human']['real'], 1)
         self.assertEqual(b10['parts']['llm']['false_alarm'], 1)
         self.assertEqual(b10['parts']['undiagnosed'], 1)
-        # 11 点桶：1 条 human uncertain
+        # 11-o'clock bucket: 1 human uncertain
         b11 = m['buckets'][11]
         self.assertEqual(b11['count'], 1)
         self.assertEqual(b11['parts']['human']['uncertain'], 1)
 
     def test_bucket_parts_sum_equals_count(self):
-        """每桶 parts 各段加起来 = count（数据一致性）。"""
+        """The sum of each bucket's parts segments equals its count (data consistency)."""
         today_start = dt.datetime(2026, 7, 21, 0, 0, 0).timestamp()
         alerts = [
             self._make_alert(today_start + 3600 * 5, human='real'),
@@ -358,9 +365,9 @@ class CollectDashboardMetricsTest(TestCase):
         self.assertEqual(parts_sum, b5['count'])
 
     def test_bucket_distribution(self):
-        """告警按时间正确落到对应桶。"""
+        """Alerts fall into the correct bucket based on their timestamp."""
         today_start = dt.datetime(2026, 7, 21, 0, 0, 0).timestamp()
-        # 10:00 一条，11:30 两条
+        # 10:00 one alert, 11:30 two alerts
         alerts = [
             self._make_alert(today_start + 3600 * 10),
             self._make_alert(today_start + 3600 * 11 + 1800),
@@ -370,28 +377,28 @@ class CollectDashboardMetricsTest(TestCase):
             m = _collect_dashboard_metrics('today', alerts)
         self.assertEqual(m['buckets'][10]['count'], 1)
         self.assertEqual(m['buckets'][11]['count'], 2)
-        # 其他桶全 0
+        # All other buckets should be zero
         zero_others = sum(1 for i, b in enumerate(m['buckets'])
                           if i not in (10, 11) and b['count'] == 0)
         self.assertEqual(zero_others, 22)
 
     def test_out_of_window_dropped(self):
-        """早于 start_ts 的告警被丢弃，不计入桶也不计入计数。"""
+        """Alerts earlier than the window start are discarded and not counted in any bucket or total."""
         today_start = dt.datetime(2026, 7, 21, 0, 0, 0).timestamp()
-        yesterday = today_start - 3600 * 12  # 昨天中午
-        in_window = today_start + 3600 * 5    # 今天 5:00
+        yesterday = today_start - 3600 * 12  # yesterday noon
+        in_window = today_start + 3600 * 5    # today 5:00
         alerts = [
             self._make_alert(yesterday, human='real'),
             self._make_alert(in_window, human='real'),
         ]
         with mock.patch('phm_site.views_admin._time.time', return_value=self.now):
             m = _collect_dashboard_metrics('today', alerts)
-        # 昨天那条被丢弃
+        # The alert from yesterday was discarded
         self.assertEqual(m['counts']['total'], 1)
         self.assertEqual(m['counts']['human'], 1)
 
     def test_30d_window_uses_day_buckets(self):
-        """30d 窗口应得到 30 个按天的桶。"""
+        """The 30d window should produce 30 day-based buckets."""
         with mock.patch('phm_site.views_admin._time.time', return_value=self.now):
             m = _collect_dashboard_metrics('30d', [])
         self.assertEqual(m['bucket_kind'], 'day')
@@ -405,11 +412,11 @@ class CollectDashboardMetricsTest(TestCase):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 视图层测试（mock Container）
+# View-layer tests (mocked Container)
 # ════════════════════════════════════════════════════════════════════════════
 
 class DashboardViewAccessTest(TestCase):
-    """页面访问权限与渲染。"""
+    """Tests for page access permissions and rendering."""
 
     def setUp(self):
         self.client = Client()
@@ -457,7 +464,7 @@ class DashboardViewAccessTest(TestCase):
         self.assertEqual(resp.status_code, 200)
 
     def test_container_not_ready_renders_state_page(self):
-        """Container 未就绪时渲染 _state.html 占位页，不 500。"""
+        """When the Container is not ready, the view renders the ``_state.html`` placeholder page instead of raising a 500 error."""
         self.client.force_login(self.staff)
         with mock.patch('phm_site.views_admin.services_bridge') as sb:
             sb.get_state.return_value = 'initializing'
@@ -477,7 +484,7 @@ class DashboardViewAccessTest(TestCase):
 
 
 class DashboardViewWindowTest(TestCase):
-    """window GET 参数处理与 banner/卡片渲染。"""
+    """Tests for the window GET parameter and banner/card rendering."""
 
     def setUp(self):
         self.client = Client()
@@ -494,11 +501,11 @@ class DashboardViewWindowTest(TestCase):
         return container
 
     def _mock_link_status(self, status='online', rtt_ms=2000.0):
-        """模拟 services_bridge.get_link_status 返回值。"""
+        """Simulate the return value of ``services_bridge.get_link_status``."""
         return {'status': status, 'rtt_ms': rtt_ms, 'last_success_ts': _time.time()}
 
     def test_default_window_is_today(self):
-        """无 window 参数走默认 today。"""
+        """Without a ``window`` parameter, the view defaults to 'today'."""
         self.client.force_login(self.staff)
         with mock.patch('phm_site.views_admin.services_bridge') as sb, \
              mock.patch('phm_site.views_admin.AlertRecord') as ar_qs:
@@ -507,8 +514,8 @@ class DashboardViewWindowTest(TestCase):
             ar_qs.objects.filter.return_value.only.return_value = []
             resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 200)
-        # today tab 应标记 active
-        self.assertContains(resp, '今天</span>')  # active span 闭合
+        # today tab should be marked active
+        self.assertContains(resp, '今天</span>')  # active span closing tag
 
     def test_window_7d_param_accepted(self):
         self.client.force_login(self.staff)
@@ -533,7 +540,7 @@ class DashboardViewWindowTest(TestCase):
         self.assertContains(resp, '最近 30 天</span>')
 
     def test_invalid_window_falls_back_to_today(self):
-        """非法 window 值不抛错，兜底为 today。"""
+        """An invalid ``window`` value does not raise; it falls back to 'today'."""
         self.client.force_login(self.staff)
         with mock.patch('phm_site.views_admin.services_bridge') as sb, \
              mock.patch('phm_site.views_admin.AlertRecord') as ar_qs:
@@ -546,7 +553,7 @@ class DashboardViewWindowTest(TestCase):
         self.assertContains(resp, '今天</span>')
 
     def test_banner_health_tier_rendered(self):
-        """不同健康度应渲染对应 banner tier 类名。"""
+        """Different health scores should render the corresponding banner tier class."""
         self.client.force_login(self.staff)
         cases = [
             (0.95, 'normal'),
@@ -564,7 +571,7 @@ class DashboardViewWindowTest(TestCase):
             self.assertContains(resp, f'phm-dash-banner-{tier}')
 
     def test_three_stat_cards_rendered(self):
-        """三张统计卡片的关键文字都应渲染。"""
+        """Key text for all three stat cards should be rendered."""
         self.client.force_login(self.staff)
         with mock.patch('phm_site.views_admin.services_bridge') as sb, \
              mock.patch('phm_site.views_admin.AlertRecord') as ar_qs:
@@ -578,7 +585,7 @@ class DashboardViewWindowTest(TestCase):
 
 
 class DashboardViewHealthErrorTest(TestCase):
-    """system_health() 抛错时降级为 1.0 不 500。"""
+    """When ``system_health()`` raises, the view degrades to 1.0 instead of returning 500."""
 
     def setUp(self):
         self.client = Client()
@@ -598,12 +605,12 @@ class DashboardViewHealthErrorTest(TestCase):
             ar_qs.objects.filter.return_value.only.return_value = []
             resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 200)
-        # 降级到 1.0（normal 分档）
+        # Degrades to 1.0 (normal tier)
         self.assertContains(resp, 'phm-dash-banner-normal')
 
 
 class DashboardViewAlertsErrorTest(TestCase):
-    """AlertRecord 查询抛错时降级为空 metrics 不 500。"""
+    """When the ``AlertRecord`` query raises, the view degrades to empty metrics instead of returning 500."""
 
     def setUp(self):
         self.client = Client()
@@ -625,16 +632,16 @@ class DashboardViewAlertsErrorTest(TestCase):
             sb.get_link_status.return_value = {
                 'status': 'online', 'rtt_ms': 2000.0, 'last_success_ts': _time.time(),
             }
-            # 查询链抛错
+            # The query chain raises an error
             ar_qs.objects.filter.side_effect = RuntimeError("db locked")
             resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 200)
-        # 走空 metrics 分支：显示"暂无告警记录"
+        # Falls through to the empty-metrics branch: shows "no alerts in this time window"
         self.assertContains(resp, '当前时间窗内暂无告警记录')
 
 
 class DashboardViewLinkStatusTest(TestCase):
-    """banner 右侧显示天地延迟 + 链路状态（替代之前的"异常阈值"）。"""
+    """Tests for the link latency and status badge on the right side of the banner (replaces the old "anomaly threshold")."""
 
     def setUp(self):
         self.client = Client()
@@ -651,7 +658,7 @@ class DashboardViewLinkStatusTest(TestCase):
         return c
 
     def test_link_latency_displayed_in_banner(self):
-        """banner 渲染"天地延迟 Xms"字样（不再是"异常阈值"）。"""
+        """The banner renders the link latency text (no longer the "anomaly threshold")."""
         self.client.force_login(self.staff)
         with mock.patch('phm_site.views_admin.services_bridge') as sb, \
              mock.patch('phm_site.views_admin.AlertRecord') as ar_qs:
@@ -667,11 +674,11 @@ class DashboardViewLinkStatusTest(TestCase):
         self.assertContains(resp, '天地延迟')
         self.assertContains(resp, '2000')
         self.assertContains(resp, 'ms')
-        # 不再渲染"异常阈值"
+        # No longer renders "anomaly threshold"
         self.assertNotContains(resp, '异常阈值')
 
     def test_link_status_badge_rendered(self):
-        """链路状态徽章 phm-dash-link-<status> 渲染。"""
+        """The link-status badge ``phm-dash-link-<status>`` is rendered correctly."""
         self.client.force_login(self.staff)
         for status in ['online', 'degraded', 'offline', 'waiting']:
             with mock.patch('phm_site.views_admin.services_bridge') as sb, \
@@ -688,7 +695,7 @@ class DashboardViewLinkStatusTest(TestCase):
             self.assertContains(resp, f'phm-dash-link-{status}')
 
     def test_latency_none_renders_dash(self):
-        """rtt_ms 为 None 时显示"—"。"""
+        """When ``rtt_ms`` is ``None``, the template renders an em-dash placeholder."""
         self.client.force_login(self.staff)
         with mock.patch('phm_site.views_admin.services_bridge') as sb, \
              mock.patch('phm_site.views_admin.AlertRecord') as ar_qs:
@@ -701,11 +708,11 @@ class DashboardViewLinkStatusTest(TestCase):
             ar_qs.objects.filter.return_value.only.return_value = []
             resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 200)
-        # "—" 占位（模板用 — 实体）
+        # Em-dash placeholder (template uses the -- entity)
         self.assertContains(resp, '—')
 
     def test_get_link_status_failure_degrades_to_unknown(self):
-        """services_bridge.get_link_status 抛错时降级 latency=None / status=unknown。"""
+        """When ``services_bridge.get_link_status`` raises, the view degrades to ``latency=None`` and ``status=unknown``."""
         self.client.force_login(self.staff)
         with mock.patch('phm_site.views_admin.services_bridge') as sb, \
              mock.patch('phm_site.views_admin.AlertRecord') as ar_qs:
@@ -719,7 +726,7 @@ class DashboardViewLinkStatusTest(TestCase):
 
 
 class DashboardViewBreakdownRenderTest(TestCase):
-    """三卡片细分（实警/虚警/待定）渲染。"""
+    """Tests for the breakdown rendering on the three stat cards (real / false_alarm / uncertain)."""
 
     def setUp(self):
         self.client = Client()
@@ -729,7 +736,7 @@ class DashboardViewBreakdownRenderTest(TestCase):
         )
 
     def test_three_stat_cards_with_breakdown(self):
-        """三卡片都应渲染实警/虚警/待定细分行（前两张有细分，第三张无）。"""
+        """All three cards should render the real / false_alarm / uncertain breakdown rows (the first two cards have breakdowns; the third does not)."""
         self.client.force_login(self.staff)
         with mock.patch('phm_site.views_admin.services_bridge') as sb, \
              mock.patch('phm_site.views_admin.AlertRecord') as ar_qs:
@@ -746,14 +753,14 @@ class DashboardViewBreakdownRenderTest(TestCase):
             ar_qs.objects.filter.return_value.only.return_value = []
             resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 200)
-        # 人工卡片细分
+        # Human card breakdown
         self.assertContains(resp, '实警')
         self.assertContains(resp, '虚警')
         self.assertContains(resp, '待定')
 
 
 class DashboardViewAutoRefreshTest(TestCase):
-    """自动刷新（?auto=1）页面级 reload。"""
+    """Tests for the auto-refresh page reload feature (``?auto=1``)."""
 
     def setUp(self):
         self.client = Client()
@@ -763,7 +770,7 @@ class DashboardViewAutoRefreshTest(TestCase):
         )
 
     def _setup_mocks(self):
-        """返回 (services_bridge mock, AlertRecord mock) 上下文管理器元组。"""
+        """Returns a ``(services_bridge mock, AlertRecord mock)`` context-manager tuple for setup."""
         sb_patch = mock.patch('phm_site.views_admin.services_bridge')
         ar_patch = mock.patch('phm_site.views_admin.AlertRecord')
         sb = sb_patch.start()
@@ -784,18 +791,18 @@ class DashboardViewAutoRefreshTest(TestCase):
         return sb, ar_qs
 
     def test_default_on_no_auto_param(self):
-        """无 ?auto 参数时默认勾选自动刷新（需求书反馈：dashboard 默认开自动刷新）。"""
+        """Without the ``?auto`` parameter, auto-refresh is checked by default (per requirements feedback: dashboard should auto-refresh by default)."""
         self.client.force_login(self.staff)
         self._setup_mocks()
         resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 200)
         body = resp.content.decode('utf-8')
-        # checkbox 应带 checked
+        # checkbox should be checked
         toggle_part = body.split('id="phm-auto-refresh-toggle"')[1].split('>')[0]
         self.assertIn('checked', toggle_part)
 
     def test_auto_param_zero_disables_refresh(self):
-        """?auto=0 显式关闭自动刷新。"""
+        """``?auto=0`` explicitly disables auto-refresh."""
         self.client.force_login(self.staff)
         self._setup_mocks()
         resp = self.client.get(self.url, {'auto': '0'})
@@ -805,7 +812,7 @@ class DashboardViewAutoRefreshTest(TestCase):
         self.assertNotIn('checked', toggle_part)
 
     def test_auto_param_enables_refresh(self):
-        """?auto=1 时 checkbox 勾选 + 渲染倒计时脚本。"""
+        """When ``?auto=1``, the checkbox is checked and the countdown script is rendered."""
         self.client.force_login(self.staff)
         self._setup_mocks()
         resp = self.client.get(self.url, {'auto': '1'})
@@ -814,14 +821,14 @@ class DashboardViewAutoRefreshTest(TestCase):
         # checkbox checked
         toggle_part = body.split('id="phm-auto-refresh-toggle"')[1].split('>')[0]
         self.assertIn('checked', toggle_part)
-        # 渲染了刷新间隔（15s）
+        # Renders the refresh interval (15s)
         self.assertIn('15', body)
 
     def test_refresh_seconds_rendered_in_template(self):
-        """模板里渲染了 _DASHBOARD_REFRESH_SECONDS。"""
+        """The template renders ``_DASHBOARD_REFRESH_SECONDS``."""
         self.client.force_login(self.staff)
         self._setup_mocks()
         resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 200)
-        # 自动刷新开关的文案 "每 15s 自动刷新"
+        # The auto-refresh toggle label "auto-refresh every 15s"
         self.assertContains(resp, '每 15s 自动刷新')

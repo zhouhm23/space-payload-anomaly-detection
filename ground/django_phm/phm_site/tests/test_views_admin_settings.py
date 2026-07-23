@@ -1,14 +1,17 @@
-"""第 5 页：系统设置测试。
+"""Page 5: system settings tests.
 
-覆盖：
-  (a) Helper 纯函数：_parse_settings_category / _classify_value_kind
+Coverage:
+  (a) Pure helpers: _parse_settings_category / _classify_value_kind
       / _build_settings_items / _group_items_by_section
-  (b) 视图访问：匿名跳登录 / staff 可读 / 超管可改 / 三类 category 都能渲染
-  (c) AJAX 端点权限：save 非 staff 403、staff 403、超管 200
-  (d) AJAX 业务逻辑：成功 / 只读 key 拒绝 / 类型不匹配 / calibration 直接 403
-  (e) 类型校验 / _doc 保留
+  (b) View access: anonymous redirects to login / staff read / superuser write /
+      all three categories render
+  (c) AJAX endpoint permissions: save → non-staff 403, staff 403, superuser 200
+  (d) AJAX business logic: success / readonly-key rejection / type mismatch /
+      calibration returns 403 directly
+  (e) Type validation / _doc preservation
 
-测试用 Django TestCase + force_login。Service 层走 mock（不真写文件）。
+Tests use Django TestCase + force_login. The Service layer is mocked (no real
+file writes).
 """
 from __future__ import annotations
 
@@ -28,7 +31,7 @@ from phm_site.views_admin import (
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Helper 纯函数测试
+# Helper pure-function tests
 # ════════════════════════════════════════════════════════════════════════════
 
 class ParseSettingsCategoryTest(TestCase):
@@ -65,7 +68,7 @@ class ClassifyValueKindTest(TestCase):
 
 
 class BuildSettingsItemsTest(TestCase):
-    """_build_settings_items 扁平化逻辑。"""
+    """_build_settings_items flattening logic."""
 
     def test_flatten_with_display_names(self):
         raw = {
@@ -79,12 +82,12 @@ class BuildSettingsItemsTest(TestCase):
             'thresholds': {'_doc': '阈值', 'anomaly': '异常分数阈值', 'l1_sigma_k': 'σ 倍数'}
         }
         items = _build_settings_items(raw, names)
-        # _doc 不应作为 item 出现
+        # _doc should not appear as an item.
         keys = [(it['section'], it['key']) for it in items]
         self.assertIn(('thresholds', 'anomaly'), keys)
         self.assertIn(('thresholds', 'l1_sigma_k'), keys)
         self.assertNotIn(('thresholds', '_doc'), keys)
-        # 中文 label 来自 display_names
+        # The Chinese label comes from display_names.
         anomaly = next(it for it in items if it['key'] == 'anomaly')
         self.assertEqual(anomaly['name'], '异常分数阈值')
         self.assertEqual(anomaly['section_label'], '阈值')
@@ -135,11 +138,11 @@ class GroupItemsBySectionTest(TestCase):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 视图访问测试
+# View access tests
 # ════════════════════════════════════════════════════════════════════════════
 
 class SettingsViewAccessTest(TestCase):
-    """GET /admin/phm_site/settings/ 访问权限与渲染。"""
+    """Access control and rendering for GET /admin/phm_site/settings/."""
 
     def setUp(self):
         self.client = Client()
@@ -174,7 +177,7 @@ class SettingsViewAccessTest(TestCase):
 
     def test_calibration_tab_renders_readonly(self):
         self.client.force_login(self.staff)
-        # 用真实文件路径（存在），不 mock
+        # Use the real file path (it exists); no mock.
         resp = self.client.get(self.url + '?category=calibration')
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, '只读')
@@ -198,18 +201,19 @@ class SettingsViewAccessTest(TestCase):
         patcher, _svc = _patch_system_service()
         with patcher:
             resp = self.client.get(self.url + '?category=system')
-        # staff 看不到保存按钮（class="phm-settings-save-btn" 的 <button> 元素）
-        # 注意 JS 中也有 '.phm-settings-save-btn' 字符串（querySelector），所以
-        # 断言精确 <button 标签。
+        # Staff cannot see the save button (the <button> element with
+        # class="phm-settings-save-btn").
+        # Note: the JS also references the '.phm-settings-save-btn' string
+        # (querySelector), so we assert on the precise <button tag.
         self.assertNotContains(resp, 'class="phm-btn phm-btn-sm phm-btn-primary phm-settings-save-btn"')
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# AJAX 端点测试
+# AJAX endpoint tests
 # ════════════════════════════════════════════════════════════════════════════
 
 class SettingsSaveApiTest(TestCase):
-    """POST /admin/phm_site/settings/api/save/ 端点。"""
+    """POST /admin/phm_site/settings/api/save/ endpoint."""
 
     def setUp(self):
         self.client = Client()
@@ -307,15 +311,17 @@ class SettingsSaveApiTest(TestCase):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 辅助 mock helpers
+# Helper mock helpers
 # ════════════════════════════════════════════════════════════════════════════
 
 def _patch_system_service():
-    """mock get_system_config()：raw_with_docs 返回最小结构，display_names 返回中文名。
+    """Mock get_system_config(): raw_with_docs returns a minimal structure and
+    display_names returns Chinese names.
 
-    使用 new=svc 让 patch 的替身直接是 svc 本身（as svc 拿到 svc，而不是
-    一个未配置的 MagicMock）。注意 service 层的 get_system_config 是函数，
-    new 替身也必须可调用（用 CallableMock 让 __call__ 返回 svc 本身）。
+    Uses new=svc so the patch's stand-in IS svc itself (the `as svc` clause
+    receives svc, not an unconfigured MagicMock). Note that the service layer's
+    get_system_config is a function, so the new stand-in must also be callable
+    (CallableMock makes __call__ return svc itself).
     """
     svc = mock.Mock()
     svc.raw_with_docs.return_value = {
@@ -330,7 +336,7 @@ def _patch_system_service():
                        'l1_sigma_k': 'σ 倍数'}
     }
     svc.is_readonly.return_value = False
-    # get_system_config() 返回 svc —— patch 一个 lambda 即可
+    # get_system_config() returns svc — patching a lambda is enough.
     return mock.patch(
         'phm.services.system_config_service.get_system_config',
         new=lambda: svc,

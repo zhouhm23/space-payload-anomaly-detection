@@ -73,9 +73,10 @@ class AlertPacket:
     message: str = ""
     raw_window: list | None = None
     score_window: list | None = None
-    # 真实异常采样时刻（秒，epoch）：t_acq_start + argmax(scores)/sample_rate。
-    # 这是异常在遥测时间轴上的真实位置，供前端红点精准对齐。
-    # 旧版 space 段不传此字段（None），消费方需兜底用 timestamp。
+    # Real anomaly sample time (seconds, epoch): t_acq_start + argmax(scores)/sample_rate.
+    # The anomaly's true position on the telemetry time axis, used by the front-end
+    # to align the red dot precisely. Older space segments do not send this field
+    # (None); consumers must fall back to `timestamp`.
     acq_ts: float | None = None
 
 

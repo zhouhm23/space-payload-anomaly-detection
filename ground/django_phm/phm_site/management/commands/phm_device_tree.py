@@ -1,15 +1,15 @@
 """Device tree management command.
 
-Agent 友好双通道：与「设备树管理」HTTP API 并行。
+Agent-friendly dual channel: a CLI parallel to the "device tree management" HTTP API.
 
-子命令：
-  --list       [--format json|text]            # 展示当前设备树
-  --validate   --file new_config.json          # 预检（空树 / 重复 sourceId）
-  --save       --file new_config.json          # 保存整树（含 TCP 推送）
+Subcommands:
+  --list       [--format json|text]            # Show current device tree
+  --validate   --file new_config.json          # Pre-check (empty tree / duplicate sourceId)
+  --save       --file new_config.json          # Save entire tree (includes TCP push)
 
-直调 services_bridge.get_container().config，不重复业务逻辑。
+Directly calls services_bridge.get_container().config. Does not duplicate business logic.
 
-示例：
+Examples:
   python manage.py phm_device_tree --list --format json
   python manage.py phm_device_tree --validate --file new_config.json
   python manage.py phm_device_tree --save --file new_config.json
@@ -25,7 +25,7 @@ from phm_site import services_bridge
 
 
 def _ensure_ready():
-    """确保 PHM Container 就绪（CLI 直启 services_bridge）。"""
+    """Ensure the PHM Container is ready (CLI directly starts services_bridge)."""
     if services_bridge.get_state() == 'idle':
         services_bridge.start()
     deadline = time.time() + 60
@@ -42,7 +42,7 @@ def _ensure_ready():
 
 
 def _count_sensors(tree):
-    """递归统计传感器数量。"""
+    """Recursively count the number of sensors."""
     n = 0
     def walk(nodes):
         nonlocal n
@@ -56,9 +56,10 @@ def _count_sensors(tree):
 
 
 def _find_duplicate_source_id(tree):
-    """复用 ConfigService._find_duplicate_source 检测重复 sourceId。
+    """Detect duplicate sourceId by reusing ConfigService._find_duplicate_source.
 
-    返回首个重复的 sourceId，或 None。
+    Returns:
+        The first duplicate sourceId found, or None.
     """
     from phm.services.config_service import ConfigService
     return ConfigService._find_duplicate_source(tree)
@@ -88,7 +89,7 @@ class Command(BaseCommand):
         elif opts['save']:
             self._do_save(opts)
 
-    # ── 子操作 ──────────────────────────────────────────────────
+    # ── Sub-operations ──────────────────────────────────────────────────
 
     def _do_list(self, opts):
         c = _ensure_ready()
@@ -118,7 +119,7 @@ class Command(BaseCommand):
             self._print_tree(n.get('children'), depth + 1)
 
     def _load_body(self, opts):
-        """从 --file 加载 JSON body，含基础结构校验。"""
+        """Load JSON body from --file, with basic structure validation."""
         if not opts['file']:
             raise CommandError("--validate / --save 需要 --file（JSON 文件路径）")
         try:
@@ -131,7 +132,7 @@ class Command(BaseCommand):
         if not isinstance(body, dict):
             raise CommandError("JSON 根必须是对象")
         if 'device_tree' not in body:
-            # 兼容：直接传树数组（外层包装）
+            # Compatibility: accept a bare tree array (wrap it)
             if isinstance(body, list):
                 body = {'device_tree': body}
             else:
@@ -153,7 +154,7 @@ class Command(BaseCommand):
         ))
 
     def _do_save(self, opts):
-        # 先预检
+        # Pre-check first
         body = self._load_body(opts)
         tree = body.get('device_tree')
         if not isinstance(tree, list) or not tree:
@@ -163,7 +164,7 @@ class Command(BaseCommand):
             raise CommandError(f"❌ 拒绝：重复的 sourceId = {dup}")
 
         c = _ensure_ready()
-        # 补 aggregation_strategy 缺省
+        # Fill in aggregation_strategy default
         if 'aggregation_strategy' not in body:
             body['aggregation_strategy'] = 'min'
         result = c.config.save(body)

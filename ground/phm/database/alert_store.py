@@ -2,8 +2,8 @@
 
 Alerts are **confirmed anomalies** — i.e. measured telemetry whose anomaly
 score (from the space-side TSPulse) exceeded the threshold.  They are the
-ground-truth "实报" (measured report) stream, distinct from forecast-derived
-"预警" (early warnings) which live in ``warning_store.py``.
+ground-truth measured-report stream, distinct from forecast-derived early
+warnings which live in ``warning_store.py``.
 """
 
 from __future__ import annotations

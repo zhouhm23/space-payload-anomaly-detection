@@ -1,19 +1,19 @@
 """Health-value service.
 
 Implements the single-block health formula required by the v1.0 spec
-(``docs/产品需求书.md`` §健康度计算方式):
+(``docs/PRD.md`` § Health Calculation):
 
-    单通道健康值 = 1 - 异常点数 / 总点数   （单数据块内，范围 [0, 1]）
+    single_channel_health = 1 - anomalous_points / total_points  (within one block, range [0, 1])
 
-  * 异常点 = anomaly_score > THRESHOLD 的采样点
-  * 块大小由传感器参数决定（block_size），不做 20000 的隐式默认
-  * 范围严格 [0, 1]，1 = 完全健康，0 = 全部异常
-  * 文件夹节点 = 子通道 min（保守，木桶效应）或 mean，范围仍 [0, 1]
-  * 系统总健康值 = 全部启用通道健康值平均
+  * Anomalous point = sample where anomaly_score > THRESHOLD
+  * Block size is determined by sensor parameters (block_size); no implicit default of 20000
+  * Range strictly [0, 1], 1 = fully healthy, 0 = all anomalous
+  * Folder node = min of child channels (conservative, weakest-link) or mean, range still [0, 1]
+  * System aggregate health = average of all enabled channel health values
 
 When a ``ConfigService`` is injected, the service also returns a
 ``folders`` map aggregating per-channel health up to each device-tree
-folder (``min`` strategy = "木桶效应" / worst sensor wins; ``mean`` = average).
+folder (``min`` strategy = weakest-link / worst sensor wins; ``mean`` = average).
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ except Exception:  # pragma: no cover — defensive
 def channel_health(scores: Iterable[float], threshold: float = ANOMALY_THRESHOLD) -> float:
     """Single-channel health in [0, 1].
 
-    Formula: ``1 - 异常点数 / 总点数``.  Anomaly points are those with
+    Formula: ``1 - anomalous_points / total_points``.  Anomaly points are those with
     ``score > threshold`` (strictly greater, mirroring the warning trigger).
     Empty input returns 1.0 (no evidence of anomaly = fully healthy).
     """
@@ -61,9 +61,9 @@ class HealthService:
         ``block_size`` is the number of recent samples per channel to score
         over.  The legacy default (20000) matches ``RING_BUFFER_MAX`` and
         simply means "use whatever is in the ring".  v1.0 callers that want
-        single-block semantics (per ``docs/产品需求书.md`` §健康度计算方式)
+        single-block semantics (per ``docs/PRD.md`` § Health Calculation)
         should pass the sensor's transport ``blockSize`` (e.g. 512); the
-        formula stays the same (``1 - 异常点数 / 总点数``).
+        formula stays the same (``1 - anomalous_points / total_points``).
 
         ``@rul``-marked special sensors are excluded from both the system
         aggregate and folder aggregation — they run a separate RUL pipeline
@@ -139,7 +139,7 @@ class HealthService:
                 continue  # folder has no sensors with data yet — skip it
             if strategy == "mean":
                 value = round(sum(ch_healths) / len(ch_healths), 3)
-            else:  # "min" default — 木桶效应, worst sensor wins
+            else:  # "min" default — weakest-link, worst sensor wins
                 value = round(min(ch_healths), 3)
             out[folder["id"]] = {
                 "name": folder.get("name", folder.get("id", "")),

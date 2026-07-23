@@ -5,7 +5,7 @@ fd00X_lstm_attn.pt``) into a lightweight inference class that follows the
 ``BaseRULPredictor`` contract.  The architecture definition is duplicated
 here (not imported from ``experiments/``) to keep the product library
 self-contained — ``experiments/`` is private-research code and must not be
-referenced from ``src/`` (see AGENTS.md "库边界").
+referenced from ``src/`` (see AGENTS.md "library boundary").
 
 The class is lazy-loading: the PyTorch model is only instantiated and
 weights loaded on the first ``predict_rul`` call.  This keeps the ground

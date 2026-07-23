@@ -1,4 +1,4 @@
-"""AppConfig for phm_site — 启动时拉起后台线程（auto-poll + eval + auto-diagnosis）."""
+"""AppConfig for phm_site — starts the background threads on boot (auto-poll + eval + auto-diagnosis)."""
 import os
 import sys
 
@@ -11,9 +11,9 @@ class PhmSiteConfig(AppConfig):
     verbose_name = 'PHM数据管理'
 
     def ready(self):
-        # 仅在 runserver 时启动后台线程。
-        # services_bridge.get_container() 也有 lazy-init 兜底，
-        # 因此即便 ready() 跑在非服务进程（如 migrate），也不会阻塞。
+        # Only start the background threads under runserver.
+        # services_bridge.get_container() also has a lazy-init fallback, so even
+        # if ready() runs in a non-serving process (e.g. migrate) it will not block.
         is_runserver = 'runserver' in sys.argv
         is_main = os.environ.get('RUN_MAIN') == 'true'
         is_noreload = '--noreload' in sys.argv

@@ -104,15 +104,20 @@ class TelemetryService:
 
         Raises ``ConnectionError`` when the space TCP server is unreachable
         (port not listening / SYN timeout).  This lets callers distinguish
-        "连接失败" from "连接成功但本周期无数据"——前者应被 ``_poll_one``
-        记为链路失败，后者是合法空 poll（不影响链路状态）。
+        "connection failed" from "connected but no data this cycle" — the
+        former should be recorded as a link failure by ``_poll_one``, while
+        the latter is a valid empty poll (does not affect link status).
 
-        历史教训（Day20）：``GroundClient.poll()`` 内部吞掉所有 socket
-        异常返回空 list，导致 ``_poll_one`` 把连接超时（~2s）误判为
-        "链路 RTT=2000ms 且 success=True"，``link_status`` 恒显示 online。
-        修复：``_poll_space`` 调 ``GroundClient.poll()`` 后检查
-        ``client.connected`` 标志（``GroundClient.poll()`` 内部维护，
-        True=连上，False=socket 异常），False 时抛 ``ConnectionError``。
+        Historical lesson (Day20): ``GroundClient.poll()`` silently swallowed
+        all socket exceptions and returned an empty list, causing ``_poll_one``
+        to misinterpret a connection timeout (~2s) as "link RTT=2000ms and
+        success=True", keeping ``link_status`` permanently online.
+        Fix: after calling ``GroundClient.poll()``, check the ``client.connected``
+        flag (maintained internally by ``GroundClient.poll()``, True = connected,
+        False = socket exception) and raise ``ConnectionError`` when False.
+
+        Compatible with older GroundClient versions (no ``connected`` attribute):
+        defaults to True, so behaviour is unchanged.
         """
         exhausted = False
         try:
@@ -125,10 +130,12 @@ class TelemetryService:
         except Exception:
             return {}, [], False
 
-        # 连接失败冒泡：GroundClient.poll() 吞了 socket 异常返回空 list，
-        # 但 client.connected 标志会暴露真实状态。连不上时抛 ConnectionError
-        # 让 _poll_one 走 except → success=False（修复 Day20 link_status bug）。
-        # 兼容老版 GroundClient（无 connected 属性）：默认 True 不影响。
+        # Bubble up connection failures: GroundClient.poll() swallows socket exceptions
+        # and returns an empty list, but the client.connected flag reveals the true
+        # state.  When unreachable, raise ConnectionError so _poll_one takes the
+        # except path → success=False (fixes Day20 link_status bug).
+        # Compatible with legacy GroundClient (no connected attribute): defaults to
+        # True so behaviour is unchanged.
         if getattr(client, 'connected', True) is False:
             raise ConnectionError(
                 f"space TCP {self.space_host}:{self.space_port} unreachable"
@@ -241,9 +248,11 @@ class TelemetryService:
                 if p.metadata.get("exhausted", False):
                     exhausted = True
             elif isinstance(p, AlertPacket):
-                # 优先用 space 段传来的真实异常采样时刻（acq_ts），
-                # 它与遥测时间轴同源（t_acq_start 锚定），前端红点能精准对齐。
-                # 旧版 space 段不传 acq_ts，兜底用接收时刻 time.time()。
+                # Prefer the real anomaly-sample timestamp (acq_ts) sent by the
+                # space segment — it shares the same timeline anchor (t_acq_start)
+                # as telemetry, so the frontend red dots align precisely.
+                # Legacy space builds do not send acq_ts; fall back to the
+                # reception time time.time().
                 alert_time = p.acq_ts if p.acq_ts is not None else time.time()
                 alerts_list.append({
                     "channel": p.channel,

@@ -6,14 +6,14 @@ import { api } from '@/api'
 
 const store = useSystemStore()
 
-// 前台主题（颜色 + 显示文案）
+// Front-end theme (colours + display text)
 const theme = ref<Record<string, any>>({ systemTitle: '空间有效载荷天地协同健康管理系统' })
 api.theme().then((t) => (theme.value = t)).catch(() => {})
 
-// 轮询系统信息（3s）
+// Poll system info (3 s)
 const { start, stop } = usePoll(() => store.refreshSystemInfo(), 3000, { immediate: true, autoStart: true })
 
-// UTC 时钟本地更新（1s，无需打后端，避免顶栏卡顿）
+// UTC clock local update (1 s, no backend call to avoid top-bar stutter)
 const utcNow = ref<string>('')
 let clockTimer: ReturnType<typeof setInterval> | null = null
 function updateClock() {
@@ -21,12 +21,12 @@ function updateClock() {
   utcNow.value = d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')
 }
 
-// 计算属性
+// Computed properties
 const systemTitle = computed(() => theme.value.systemTitle || '空间有效载荷天地协同健康管理系统')
 const linkStatus = computed(() => store.systemInfo?.link_status || 'initializing')
 const linkLatency = computed(() => store.systemInfo?.link_latency_ms)
 
-// 链路状态文本 + 颜色 class
+// Link status text + colour class
 const linkLabel = computed(() => {
   switch (linkStatus.value) {
     case 'online': return '天地链路 正常'
@@ -47,7 +47,7 @@ const linkDotClass = computed(() => {
   }
 })
 
-// 系统整体健康度（从 deviceTree 拉取）
+// System overall health (fetched from `deviceTree`)
 const systemHealth = computed(() => {
   const h = store.deviceTree?.health?.system
   if (typeof h !== 'number') return null
@@ -72,13 +72,13 @@ onUnmounted(() => {
 
 <template>
   <div class="header-bar">
-    <!-- 左：系统标题 -->
+    <!-- Left: system title -->
     <div class="header-left">
       <div class="system-logo">🛰️</div>
       <div class="system-title">{{ systemTitle }}</div>
     </div>
 
-    <!-- 中：核心状态指标（健康度 + 链路） -->
+    <!-- Centre: core status metrics (health + link) -->
     <div class="header-center">
       <div class="metric-block">
         <div class="metric-label">系统健康度</div>
@@ -107,7 +107,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 右：UTC 时间 -->
+    <!-- Right: UTC time -->
     <div class="header-right">
       <div class="utc-block">
         <div class="metric-label">UTC 时间</div>

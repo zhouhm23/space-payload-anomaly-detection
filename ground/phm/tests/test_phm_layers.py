@@ -26,7 +26,7 @@ from phm.database.alert_store import AlertStore
 
 
 # ---------------------------------------------------------------------------
-# Health formula (v1.0 spec: 1 - 异常点数/总点数, range [0, 1])
+# Health formula (v1.0 spec: 1 - anomaly_points/total_points, range [0, 1])
 # ---------------------------------------------------------------------------
 class TestChannelHealth:
     def test_all_normal(self):
@@ -270,7 +270,7 @@ class TestHealthServiceFolderAggregation:
 
     def test_min_strategy_worst_sensor_wins(self):
         # C-1 = all normal (health 1.0), C-2 = all anomalous (health 0.0)
-        # → folder min (木桶效应) = 0.0
+        # → folder min (weakest-link effect) = 0.0
         rb = self._ring_with_healths([0.1, 0.2], [0.8, 0.9], [0.5, 0.5])
         cfg = _FakeConfigService({"device_tree": self._tree(), "aggregation_strategy": "min"})
         from phm.services.health_service import HealthService

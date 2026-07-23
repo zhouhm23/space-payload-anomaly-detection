@@ -14,7 +14,7 @@ re-calling the LLM.  A structured ``llm_verdict`` (real / false_alarm /
 uncertain) is parsed from the report and written back to the
 WarningEntry (predicted) or alert_records row (measured).
 
-Vision-model approach (Day17-续4): the alert-time waveform is rendered as
+Vision-model approach (Day17 follow-up 4): the alert-time waveform is rendered as
 a 2-panel PNG chart (raw values + anomaly scores with threshold line) and
 sent as a base64 image to a vision LLM (GLM-4V-Flash).  Comparative
 experiments showed GLM-4V-Flash + PNG achieves 75% accuracy on a mixed
@@ -341,7 +341,7 @@ class DiagnosisService:
                                     store.set_verdict(wid, "llm", verdict)
                                 break
             elif alert_type in ("measured", "joint") and self.sqlite is not None:
-                # joint 告警也在 alert_records，复用 measured 的回写路径
+                # Joint alerts also live in alert_records; reuse the measured write-back path.
                 self.sqlite.update_alert_verdict(channel, alert_ts, verdict, is_llm=True)
         except Exception:
             logger.debug("write_verdict_back failed for %s/%s", channel, alert_type, exc_info=True)
@@ -485,11 +485,13 @@ class DiagnosisService:
         # Device-tree position + display name.
         display_name, device_path, description = self._resolve_device(channel)
 
-        # ── Joint alert（子系统联合告警）专用分支 ──────────────────────
-        # joint 告警的 channel 是虚拟 "SUB:<folder>"，无遥测表/cascade/raw_snapshot。
-        # 它的上下文全部存在 alert_records.score_snapshot 里（dict，含 joint_curve /
-        # contributions / channels）。这里提取后直接构造 context 提前返回，
-        # 不走下面的 measured/predicted 通用逻辑（那套依赖遥测表，对 joint 全空）。
+        # ── Joint-alert (subsystem joint alert) dedicated branch ─────────
+        # A joint alert's channel is the virtual "SUB:<folder>"; it has no
+        # telemetry table / cascade / raw_snapshot. Its context is stored
+        # entirely in alert_records.score_snapshot (a dict carrying joint_curve /
+        # contributions / channels). We extract it here, build the context, and
+        # return early — bypassing the measured/predicted generic logic below
+        # (that path depends on the telemetry table, which is empty for joint).
         if alert_type == "joint":
             return self._build_joint_context(
                 channel, alert_ts, display_name, device_path, description, history,
@@ -590,15 +592,17 @@ class DiagnosisService:
         display_name: str | None, device_path: str | None,
         description: str | None, history: list,
     ) -> dict | None:
-        """构造联合告警（joint）的诊断上下文。
+        """Build the diagnosis context for a joint alert.
 
-        joint 告警的 channel 是虚拟 ``SUB:<folder>``，无遥测表/cascade。
-        上下文来自 alert_records.score_snapshot（dict，含 joint_curve /
-        contributions / channels）。找不到对应告警记录时返回 None。
+        A joint alert's channel is the virtual ``SUB:<folder>``; it has no
+        telemetry table / cascade. Context comes from
+        alert_records.score_snapshot (a dict carrying joint_curve /
+        contributions / channels). Returns None when no matching alert record
+        is found.
         """
         if self.sqlite is None or alert_ts is None:
             return None
-        # 从 alert_records 按 (channel, alert_ts) 找到这条联合告警
+        # Look up the joint alert in alert_records by (channel, alert_ts).
         joint_alert = None
         try:
             for a in (self.sqlite.query_alerts(limit=200) or []):
@@ -649,7 +653,7 @@ class DiagnosisService:
             "device_path": device_path,
             "snapshot_raw": None,
             "snapshot_scores": None,
-            "_joint": True,  # 标记，供 _build_prompt 识别走 joint 模板
+            "_joint": True,  # Flag so _build_prompt picks the joint template.
         }
 
     # ------------------------------------------------------------------
@@ -658,7 +662,8 @@ class DiagnosisService:
 
     def _build_prompt(self, channel: str, context: dict) -> str:
         s = context["summary"]
-        # 联合告警走专用 prompt 模板（多通道共识，非单通道波形）
+        # Joint alerts use a dedicated prompt template (multi-channel consensus,
+        # not single-channel waveform).
         if context.get("_joint") or s.get("alert_type") == "joint":
             return self._build_joint_prompt(channel, s)
         ws = s["window_stats"]
@@ -777,11 +782,14 @@ class DiagnosisService:
 
     @staticmethod
     def _build_joint_prompt(channel: str, s: dict) -> str:
-        """联合告警专用 prompt（多通道共识，无单通道波形）。
+        """Dedicated prompt for joint alerts (multi-channel consensus, no
+        single-channel waveform).
 
-        联合告警是同一子系统（设备树 folder）下 >=2 个 sibling 通道同时超阈值时
-        触发的「子系统级」告警。prompt 聚焦：子系统名 + 联合分数 + 各子通道贡献 +
-        共识通道数，让 LLM 判断是否为真实系统性异常。
+        A joint alert is a subsystem-level alert triggered when >=2 sibling
+        channels under the same device-tree folder exceed the threshold at the
+        same time. The prompt focuses on: subsystem name + joint score +
+        per-subchannel contribution + consensus-channel count, letting the
+        LLM judge whether it is a real system-level anomaly.
         """
         sub_channels = s.get("sub_channels") or []
         contributions = s.get("contributions") or []
@@ -800,7 +808,8 @@ class DiagnosisService:
         if s.get("description"):
             lines.append(f"子系统描述：{s['description']}")
 
-        # 各子通道贡献（contributions 是 list[dict]，含 channel/score/threshold/over 等）
+        # Per-subchannel contribution (contributions is list[dict] carrying
+        # channel/score/threshold/over, etc.).
         if contributions:
             lines += ["", f"【各子通道贡献】（共 {len(contributions)} 个通道）"]
             for c in contributions:
@@ -815,7 +824,7 @@ class DiagnosisService:
                     f"{'超限' if over else '未超限'}）"
                 )
 
-        # 联合分数曲线（降采样到 ~16 点，避免 prompt 过长）
+        # Joint score curve (down-sampled to ~16 points to keep the prompt short).
         if joint_curve and len(joint_curve) > 1:
             try:
                 import numpy as _np

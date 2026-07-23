@@ -1,16 +1,16 @@
 <script setup lang="ts">
 /**
- * PHM 监控大屏根组件
+ * PHM monitor dashboard root component
  *
- * 布局：
- * - 顶部 60px：HeaderBar（系统名/健康度/链路/延迟/UTC）
- * - 主体 flex：
- *   - 左 240px：DeviceTree
- *   - 中 flex:1：CenterCharts（4:1:2 三区）
- *   - 右 340px：RightDetail（上下两部分）
+ * Layout:
+ * - Top 60px: `HeaderBar` (system name / health / link / latency / UTC)
+ * - Body flex:
+ *   - Left 240px: `DeviceTree`
+ *   - Center flex:1: `CenterCharts` (4:1:2 three-zone layout)
+ *   - Right 340px: `RightDetail` (upper and lower sections)
  *
- * 启动状态机：
- * - 显示一个遮罩，等 Container 就绪后再展示大屏
+ * Startup state machine:
+ * - An overlay is displayed until the Container is ready, after which the dashboard is revealed
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useSystemStore } from '@/stores/system'
@@ -19,16 +19,23 @@ import HeaderBar from '@/components/HeaderBar.vue'
 import DeviceTree from '@/components/DeviceTree.vue'
 import CenterCharts from '@/components/CenterCharts.vue'
 import RightDetail from '@/components/RightDetail.vue'
+import ResizableSplitter from '@/components/ResizableSplitter.vue'
 
 const store = useSystemStore()
 const theme = ref<Record<string, any>>({})
+
+// Left and right panel widths (default 240/340, matching historical fixed values; persisted to localStorage via `ResizableSplitter` after user drag)
+const DEFAULT_LEFT = 240
+const DEFAULT_RIGHT = 340
+const leftWidth = ref(DEFAULT_LEFT)
+const rightWidth = ref(DEFAULT_RIGHT)
 
 let startupTimer: ReturnType<typeof setInterval> | null = null
 let systemInfoTimer: ReturnType<typeof setInterval> | null = null
 let deviceTreeTimer: ReturnType<typeof setInterval> | null = null
 let rulTimer: ReturnType<typeof setInterval> | null = null
 
-// 启动状态轮询（1s 一次，直到 ready/failed）
+// Startup status polling (1 s interval until ready or failed)
 async function pollStartup() {
   await store.checkStartup()
   if (store.startupState === 'ready' || store.startupState === 'failed') {
@@ -36,7 +43,7 @@ async function pollStartup() {
       clearInterval(startupTimer)
       startupTimer = null
     }
-    // ready 后立即拉一次业务数据 + 启动周期轮询 + 启动通道轮播
+    // When ready, immediately fetch business data once, start periodic polling, and start channel carousel
     if (store.startupState === 'ready') {
       store.refreshSystemInfo()
       store.refreshDeviceTree()
@@ -44,7 +51,7 @@ async function pollStartup() {
       systemInfoTimer = setInterval(() => store.refreshSystemInfo(), 3000)
       deviceTreeTimer = setInterval(() => store.refreshDeviceTree(), 5000)
       rulTimer = setInterval(() => store.refreshRul(), 5000)
-      // 通道轮播：默认 15 秒，间隔从 theme.carousel.intervalMs 读
+      // Channel carousel: default 15 s, interval read from `theme.carousel.intervalMs`
       const interval = theme.value?.carousel?.intervalMs || 15000
       store.startCarousel(interval)
     }
@@ -52,7 +59,7 @@ async function pollStartup() {
 }
 
 onMounted(() => {
-  // 拉主题（含轮播间隔等配置）
+  // Fetch theme (includes carousel interval and other config)
   api.theme().then((t) => (theme.value = t)).catch(() => {})
   pollStartup()
   startupTimer = setInterval(pollStartup, 1000)
@@ -66,7 +73,7 @@ onUnmounted(() => {
   store.stopCarousel()
 })
 
-// 是否显示启动遮罩
+// Whether to show the startup overlay
 const showStartupOverlay = computed(() => store.startupState !== 'ready')
 </script>
 
@@ -75,20 +82,36 @@ const showStartupOverlay = computed(() => store.startupState !== 'ready')
     <HeaderBar />
 
     <main class="app-main">
-      <aside class="panel-left">
+      <aside class="panel-left" :style="{ width: leftWidth + 'px' }">
         <DeviceTree />
       </aside>
+
+      <ResizableSplitter
+        storage-key="phm.layout.left"
+        :default-size="DEFAULT_LEFT"
+        :min="160"
+        :max="480"
+        @resize="(v) => (leftWidth = v)"
+      />
 
       <section class="panel-center">
         <CenterCharts />
       </section>
 
-      <aside class="panel-right">
+      <ResizableSplitter
+        storage-key="phm.layout.right"
+        :default-size="DEFAULT_RIGHT"
+        :min="220"
+        :max="560"
+        @resize="(v) => (rightWidth = v)"
+      />
+
+      <aside class="panel-right" :style="{ width: rightWidth + 'px' }">
         <RightDetail />
       </aside>
     </main>
 
-    <!-- 启动状态遮罩 -->
+    <!-- Startup status overlay -->
     <div v-if="showStartupOverlay" class="startup-overlay">
       <div class="startup-card" :class="store.startupState">
         <div class="startup-icon">
@@ -139,9 +162,9 @@ const showStartupOverlay = computed(() => store.startupState !== 'ready')
 }
 
 .panel-left {
-  width: 240px;
   flex-shrink: 0;
   border-right: 1px solid #2a3050;
+  overflow: hidden;
 }
 
 .panel-center {
@@ -150,12 +173,12 @@ const showStartupOverlay = computed(() => store.startupState !== 'ready')
 }
 
 .panel-right {
-  width: 340px;
   flex-shrink: 0;
   border-left: 1px solid #2a3050;
+  overflow: hidden;
 }
 
-/* 启动遮罩 */
+/* Startup overlay */
 .startup-overlay {
   position: fixed;
   inset: 0;

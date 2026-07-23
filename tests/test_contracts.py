@@ -1,4 +1,4 @@
-"""Contract guardrails — 17 invariants from the踩坑史 (lessons learned).
+"""Contract guardrails — 17 invariants from the lessons-learned history.
 
 These tests protect the M1 data path against regressions that were
 painful to debug the first time around.  Every invariant cites the
@@ -83,17 +83,20 @@ def test_c2_t_acq_captured_before_l1_l2_processing():
     """In space/main.py the call order must be:
        t_acq = time.time() → ipc.read() → L1.check() → L2.detect() → enqueue.
 
-    M1.2 修正：``t_acq`` 必须在 IPC 请求**之前**记录，而不是之后。
-    原因：IPC 引入了网络往返延迟（本地 ms 级但抖动），如果 t_acq 记
-    在 IPC 之后，延迟会污染采集时刻，破坏地面段等距时间戳重建。
+    M1.2 fix: ``t_acq`` must be recorded **before** the IPC request, not after.
+    Reason: IPC introduces a network round-trip delay (local ms-level but with
+    jitter); if ``t_acq`` is recorded after IPC, the delay pollutes the
+    acquisition timestamp and breaks equispaced timestamp reconstruction on
+    the ground segment.
 
-    旧版（M1.2 之前）：``src.read(window)`` → ``t_acq = time.time()``，
-    因为本地 read 是内存调用延迟可忽略所以顺序不那么关键。
+    Legacy (pre-M1.2): ``src.read(window)`` → ``t_acq = time.time()``;
+    because the local ``read`` is a memory call with negligible latency the
+    ordering was less critical.
     """
     src = (SPACE_DIR / "main.py").read_text(encoding="utf-8")
-    # 找 IPC 请求行（M1.2 后的形态）
+    # Locate the IPC request line (post-M1.2 form)
     ipc_lines = _lines_of(src, "ipc.read(") or _lines_of(src, "ipc_client.read(")
-    # 兼容旧代码：src.read(window)
+    # Fallback for legacy code: src.read(window)
     if not ipc_lines:
         ipc_lines = _lines_of(src, "src.read(window)")
     t_acq_lines = _lines_of(src, "t_acq = time.time()")
@@ -102,15 +105,15 @@ def test_c2_t_acq_captured_before_l1_l2_processing():
     impute_lines = _lines_of(src, "pp._impute(") or _lines_of(src, "pp._impute(raw")
 
     assert ipc_lines and t_acq_lines, "IPC read or t_acq assignment missing"
-    # 取 _process_channel 内部的真实调用（最后一次出现）
+    # Use the actual call inside _process_channel (last occurrence)
     ipc_idx = ipc_lines[-1]
     t_acq_idx = t_acq_lines[-1]
-    # 关键断言：t_acq 在 IPC 请求之前
+    # Key assertion: t_acq is recorded before the IPC request
     assert t_acq_idx < ipc_idx, (
         f"t_acq must come BEFORE ipc.read (line {t_acq_idx+1} vs {ipc_idx+1}) — "
         "otherwise IPC latency leaks into the acquisition timestamp"
     )
-    # t_acq 必须在所有检测算子之前
+    # t_acq must also precede all detection operators
     for name, lines in [("l1_filter.check", l1_lines),
                         ("detector.detect", detect_lines),
                         ("pp._impute", impute_lines)]:
@@ -354,8 +357,8 @@ def test_c11_sample_rate_consistent_space_and_ground():
     A mismatch silently corrupts the timestamp grid: raw quantised at one
     rate, pred at another, ground reconstructs at a third.
 
-    M1.2 之前：sample_rate 写死在 ``space/main.py DAQ_CONFIG`` 里。
-    M1.2 之后：从 ``space_daq.json`` 读，所以断言改为查 JSON 文件。
+    Pre-M1.2: ``sample_rate`` was hardcoded in ``space/main.py DAQ_CONFIG``.
+    Post-M1.2: read from ``space_daq.json``, so the assertion now checks the JSON file.
     """
     import json as _json
 
@@ -446,7 +449,7 @@ def test_c15_context_uses_same_scaler_as_target():
     """When context is prepended, it must be standardised with the SAME
     scaler fit on the target block (scaler.transform), not a fresh
     fit_transform.  Otherwise short slowly-varying channels score near
-    zero (silent 漏报).
+    zero (silent missed-detection).
     """
     src = (SPACE_DIR / "anomaly_detection.py").read_text(encoding="utf-8")
     # Context handling must call transform, not fit_transform.
@@ -519,19 +522,21 @@ def test_c17_alert_threshold_consistent_space_and_ground():
 # ════════════════════════════════════════════════════════════════════════
 
 def test_c18_ipc_server_binds_localhost_only():
-    """M1.2 引入的契约：信号发生器 IPC 必须绑定 127.0.0.1，绝不 0.0.0.0。
+    """Contract introduced in M1.2: the signal-generator IPC server must bind
+    127.0.0.1, never 0.0.0.0.
 
-    IPC 是采集卡↔信号发生器的本机通信，对外开放会让远程主机能
-    读取传感器原始数据（信息泄露）或注入伪造数据（数据污染）。
+    IPC is local-only communication between the acquisition card and the signal
+    generator. Exposing it would let remote hosts read raw sensor data
+    (information leak) or inject forged data (data contamination).
     """
     ipc_src = (SPACE_DIR / "signal_ipc.py").read_text(encoding="utf-8")
-    # IPC_HOST 常量必须是 127.0.0.1
+    # IPC_HOST constant must be 127.0.0.1
     assert re.search(r'^IPC_HOST\s*=\s*["\']127\.0\.0\.1["\']', ipc_src, re.MULTILINE), (
         "IPC_HOST must be '127.0.0.1' (never '0.0.0.0' or other)"
     )
-    # 不能有 0.0.0.0 作为实际的 bind/host 参数。
-    # 只检查"看起来像代码"的行：以空格开头、不含引号包裹的字符串字面量。
-    # docstring/注释/纯文本说明里出现 0.0.0.0 是允许的。
+    # No 0.0.0.0 may appear as an actual bind/host parameter.
+    # Only inspect lines that look like code: indented, not inside a quoted string literal.
+    # 0.0.0.0 inside docstrings, comments, or prose is allowed.
     bad = []
     for i, line in enumerate(ipc_src.splitlines(), 1):
         stripped = line.strip()
@@ -544,7 +549,7 @@ def test_c18_ipc_server_binds_localhost_only():
         # Skip lines that are obviously inside a docstring (heuristic:
         # line has CJK chars or starts with prose — those are docstring body)
         if any('\u4e00' <= ch <= '\u9fff' for ch in stripped):
-            continue  # 中文行，多半是 docstring
+            continue  # Chinese line, likely a docstring
         # Active code line containing 0.0.0.0 — flag it.
         bad.append(f"line {i}: {stripped}")
     assert not bad, (
@@ -554,7 +559,7 @@ def test_c18_ipc_server_binds_localhost_only():
 
 
 def test_c18_ipc_default_port_documented():
-    """IPC 默认端口 9878 应在 signal_ipc.py 里声明为常量，便于统一管理。"""
+    """IPC default port 9878 should be declared as a constant in signal_ipc.py for centralized management."""
     ipc_src = (SPACE_DIR / "signal_ipc.py").read_text(encoding="utf-8")
     assert re.search(r"^IPC_DEFAULT_PORT\s*=\s*\d+", ipc_src, re.MULTILINE), (
         "IPC_DEFAULT_PORT constant not defined in signal_ipc.py"
@@ -562,27 +567,28 @@ def test_c18_ipc_default_port_documented():
 
 
 # ════════════════════════════════════════════════════════════════════════
-# C19 — AlertPacket carries acq_ts (真实异常采样时刻)
+# C19 — AlertPacket carries acq_ts (true anomaly sampling timestamp)
 # ════════════════════════════════════════════════════════════════════════
-# Day22 issue 3.3b：前端红点偏离真实异常位置，根因是 AlertPacket 只带
-# wall-clock time.time()（地基接收时刻），与遥测采样网格（t_acq_start 锚定）
-# 属不同时钟。修复：AlertPacket 新增 acq_ts = t_acq + argmax(scores)/sr，
-# 全链路（space → ground → sqlite.created_at → alert_points API → 前端 tsToX）
-# 传递真实采样时刻。
+# Day22 issue 3.3b: the front-end red dot was offset from the real anomaly
+# position because AlertPacket only carried wall-clock time.time() (ground
+# receipt time), which is a different clock from the telemetry sampling grid
+# (anchored by `t_acq_start`). The fix adds
+# `acq_ts = t_acq + argmax(scores)/sr` propagated through the whole chain
+# (space → ground → sqlite.created_at → alert_points API → front-end tsToX).
 
 def test_c19_alert_packet_has_acq_ts_field():
-    """AlertPacket 必须含 acq_ts 字段（真实异常采样时刻）。"""
+    """AlertPacket must contain the acq_ts field (true anomaly sampling timestamp)."""
     from comm import AlertPacket
     fields = AlertPacket.__dataclass_fields__
     assert "acq_ts" in fields, "AlertPacket must have acq_ts field"
 
 
 def test_c19_space_main_computes_acq_ts_from_argmax():
-    """space/main.py 的告警路径必须用 nanargmax 算峰值位置并传 acq_ts。"""
+    """The alert path in space/main.py must use nanargmax to compute the peak position and pass acq_ts."""
     src = (SPACE_DIR / "main.py").read_text(encoding="utf-8")
     alert_lines = _lines_of(src, "enqueue_alert")
     assert alert_lines, "enqueue_alert call not found in main.py"
-    region = _region(src, alert_lines[0] - 15, 20)  # 往前看算 acq_ts 的逻辑
+    region = _region(src, alert_lines[0] - 15, 20)  # look backward for the acq_ts computation logic
     assert "acq_ts" in region, "enqueue_alert must pass acq_ts="
     assert "nanargmax" in region or "argmax" in region, (
         "acq_ts must be computed from argmax/nanargmax of scores"
@@ -590,9 +596,9 @@ def test_c19_space_main_computes_acq_ts_from_argmax():
 
 
 def test_c19_ground_client_poll_reads_acq_ts():
-    """GroundClient.poll 解析 alert 包时必须读取 acq_ts 字段。"""
+    """GroundClient.poll must read the acq_ts field when parsing an alert packet."""
     src = (GROUND_DIR / "comm.py").read_text(encoding="utf-8")
-    # 找 AlertPacket 构造的代码块
+    # Locate the code block where AlertPacket is constructed
     idx = _first_line(src, 'obj.get("type") == "alert"')
     assert idx >= 0, "alert parsing branch not found in ground/comm.py"
     region = _region(src, idx, 12)
@@ -602,8 +608,8 @@ def test_c19_ground_client_poll_reads_acq_ts():
 
 
 def test_c19_telemetry_service_prefers_acq_ts():
-    """TelemetryService 必须优先用 AlertPacket.acq_ts 作为告警时间，
-    而非 wall-clock time.time()。"""
+    """TelemetryService must prefer `AlertPacket.acq_ts` as the alert timestamp,
+    rather than wall-clock time.time()."""
     src = (GROUND_DIR / "phm" / "services" / "telemetry_service.py").read_text(encoding="utf-8")
     idx = _first_line(src, "isinstance(p, AlertPacket)")
     assert idx >= 0, "AlertPacket handling not found in telemetry_service.py"

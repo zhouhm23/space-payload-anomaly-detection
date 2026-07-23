@@ -36,9 +36,11 @@ class ModelEntry:
         context_length: input window length the model was trained on.
         prediction_length: output horizon (0 for detectors / RUL).
         notes: free-text provenance / version note.
-        deploy: deployment target — ``"ground"`` (地基，本地推理) /
-            ``"space"`` (天基，预留 OTA 推送). 天基模型未来通过 OTA 传输
-            到星载计算节点，当前仅作元数据标记，不触发传输逻辑。
+        deploy: deployment target — ``"ground"`` (local inference on the
+            ground segment) / ``"space"`` (space segment, OTA push reserved).
+            Space-segment models are intended to be pushed to onboard compute
+            nodes via OTA in the future; for now this is a metadata-only flag
+            and triggers no transport logic.
     """
     key: str
     kind: str

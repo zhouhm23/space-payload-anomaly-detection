@@ -1,4 +1,4 @@
-"""Layer 3 — Physical-constraint validator (post-processing裁决).
+"""Layer 3 — Physical-constraint validator (post-processing adjudication).
 
 Runs *after* the DL detector (Layer 2).  Its job is to suppress false alarms
 that violate physical / system priors and to boost alarms that the DL model

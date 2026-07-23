@@ -77,9 +77,10 @@ class AlertPacket:
     # scrolled past the alert point by the time diagnosis runs).
     raw_window: list | None = None
     score_window: list | None = None
-    # 真实异常采样时刻（秒，epoch）：t_acq_start + argmax(scores)/sample_rate。
-    # 异常在遥测时间轴上的真实位置，供前端红点精准对齐。
-    # 旧版 space 段不传此字段（None），消费方需兜底用 timestamp。
+    # Real anomaly sample time (seconds, epoch): t_acq_start + argmax(scores)/sample_rate.
+    # The anomaly's true position on the telemetry time axis, used by the front-end
+    # to align the red dot precisely. Older space segments do not send this field
+    # (None); consumers must fall back to `timestamp`.
     acq_ts: float | None = None
 
 
@@ -210,21 +211,22 @@ class GroundClient:
         self.host = host
         self.port = port
         self.timeout = timeout
-        # 上一次 poll 是否成功建立 socket 连接（Day20 link_status bug 修复用）。
-        # 初始 False；poll() 内部连接成功后置 True，socket 异常时保持 False。
-        # 调用方（TelemetryService._poll_space）据此区分"连接失败"与"空 poll"。
+        # Whether the previous poll successfully established the socket connection
+        # (used by the Day20 link_status bug fix). Starts False; set True inside
+        # poll() once the connection succeeds, left False on a socket error. Callers
+        # (TelemetryService._poll_space) use this to tell "connection failed" from "empty poll".
         self.connected = False
 
     def poll(self, config: dict | None = None) -> list[TelemetryPacket | AlertPacket]:
         packets: list[TelemetryPacket | AlertPacket] = []
         sock = None
-        # 重置：本次 poll 尚未连上，后续 socket.connect 成功才置 True
+        # Reset: this poll has not connected yet; only set True after socket.connect succeeds
         self.connected = False
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(self.timeout)
             sock.connect((self.host, self.port))
-            # socket 连接已建立——后续 socket 异常（recv 超时等）不算"连接失败"
+            # Socket connected — a subsequent socket error (recv timeout etc.) is not a "connection failure"
             self.connected = True
             # Send config to space segment first
             if config:

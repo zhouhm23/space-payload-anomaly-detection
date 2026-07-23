@@ -1,16 +1,19 @@
-/* PHM 后台自定义页公共 JS 工具。
-   - 启动时把 window.THEME.colors 注入 :root CSS 变量（一个真相源，前后端同源）
-   - fetchJSON：统一带 CSRF + JSON 的 POST 封装
-   - toast / drawer / spinner：基础 UI 组件
-   所有函数挂在 window.PHM 命名空间下，避免污染全局。 */
+/* PHM admin custom-page shared JS utilities.
+   - On boot, injects window.THEME.colors into :root CSS variables (single source
+     of truth, shared across front-end and back-end).
+   - fetchJSON: unified POST wrapper carrying CSRF + JSON.
+   - toast / drawer / spinner: basic UI components.
+   All functions live under the window.PHM namespace to avoid polluting globals. */
 (function () {
   'use strict';
 
-  // ── 主题注入 :root CSS 变量 ──────────────────────────────────
-  // 后台跟随 SimpleUI 的亮色风格（白底卡片），不注入前台的暗色背景/文字色
-  // （否则会与 SimpleUI 白底冲突，观感割裂）。
-  // 只注入"强调色"（红/黄/绿/蓝/青）——它们用于徽章/状态色，跨前后台一致，
-  // 且在亮色卡片上也清晰可读。
+  // ── Theme injection into :root CSS variables ───────────────────
+  // The admin follows SimpleUI's light style (white cards); it does NOT inject
+  // the front-end dark background/text colors (that would clash with the white
+  // SimpleUI base and look jarring).
+  // Only "accent" colors (red/yellow/green/blue/cyan) are injected — they drive
+  // badge/status colors, are consistent across front-end and admin, and stay
+  // legible on light cards.
   function injectTheme() {
     var theme = (window.THEME && window.THEME.colors) || {};
     var root = document.documentElement;
@@ -52,7 +55,7 @@
     }, duration);
   }
 
-  // ── fetch JSON（带 CSRF） ────────────────────────────────────
+  // ── fetch JSON (with CSRF) ─────────────────────────────────────
   function getCookie(name) {
     var value = '; ' + document.cookie;
     var parts = value.split('; ' + name + '=');
@@ -80,7 +83,7 @@
     });
   }
 
-  // ── Drawer（右侧滑出） ──────────────────────────────────────
+  // ── Drawer (slide-in from the right) ──────────────────────────
   function openDrawer(title, bodyHTML) {
     closeDrawer();
     var mask = document.createElement('div');
@@ -97,14 +100,14 @@
     drawer.querySelector('.phm-drawer-body').innerHTML = bodyHTML || '';
     mask.appendChild(drawer);
     document.body.appendChild(mask);
-    // 触发动画
+    // Trigger the animation
     requestAnimationFrame(function () {
       mask.classList.add('active');
       drawer.classList.add('active');
     });
     mask.addEventListener('click', closeDrawer);
     drawer.querySelector('.phm-drawer-close').addEventListener('click', closeDrawer);
-    // 暴露给外部填充
+    // Exposed so the caller can fill it
     PHM._drawerEl = drawer;
     return drawer;
   }
@@ -120,12 +123,12 @@
     PHM._drawerEl = null;
   }
 
-  // ── ESC 关闭抽屉 ─────────────────────────────────────────────
+  // ── Close the drawer on ESC ───────────────────────────────────
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') closeDrawer();
   });
 
-  // ── 工具函数 ─────────────────────────────────────────────────
+  // ── Utility functions ─────────────────────────────────────────
   function fmtTimestamp(ts) {
     if (!ts) return '—';
     var d = new Date(ts * 1000);
@@ -142,7 +145,7 @@
     });
   }
 
-  // ── 对外暴露 ─────────────────────────────────────────────────
+  // ── Public exports ────────────────────────────────────────────
   window.PHM = {
     injectTheme: injectTheme,
     toast: toast,
@@ -154,7 +157,7 @@
     _drawerEl: null
   };
 
-  // 启动注入主题
+  // Inject the theme on boot
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', injectTheme);
   } else {

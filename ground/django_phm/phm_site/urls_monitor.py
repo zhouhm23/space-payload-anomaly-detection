@@ -1,9 +1,11 @@
-"""前台监控大屏路由（/monitor/）。
+"""Front-end monitor dashboard routes (mounted under /monitor/).
 
-开发环境：Vue3 dev server (:5173)，Django 只做跳转。
-生产环境：serve dist/index.html（Vue3 build 产物）。
+Dev environment: the Vue3 dev server (:5173) serves the app; Django only
+redirects to it.
+Production environment: Django serves dist/index.html (the Vue3 build output).
 
-v1.1 第一轮（1a）放占位页，后续 1b-1e 由 Vue3 接管。
+The v1.1 first round (1a) ships a placeholder page; later rounds 1b-1e are
+taken over by Vue3.
 """
 from __future__ import annotations
 

@@ -272,7 +272,7 @@ class FileSource(SensorSource):
 
         data_len = len(self._data)
 
-        # non-loop: 读完即止
+        # non-loop: read until exhausted, then stop
         if not self._loop:
             available = min(n, data_len - self._pos)
             if available == 0:
@@ -286,7 +286,8 @@ class FileSource(SensorSource):
                 chunk = _apply_noise(chunk, self._noise)
             return chunk
 
-        # loop 模式：块式读取，每次固定返回 n 点，不足时从文件头补齐
+        # loop mode: block-style read, always returns exactly n points,
+        # wrapping to the file head when the end is reached
         result = np.empty(n, dtype=np.float32)
         filled = 0
         while filled < n:
@@ -295,7 +296,7 @@ class FileSource(SensorSource):
             filled += chunk_size
             self._pos += chunk_size
             if self._pos >= data_len:
-                self._pos = 0  # 回到文件头继续读
+                self._pos = 0  # rewind to file head and continue reading
 
         if self._noise.missing_rate > 0 or self._noise.noise_std > 0:
             result = _apply_noise(result, self._noise)
@@ -389,9 +390,10 @@ class SyntheticConfig:
 # Virtual sensor source (was SyntheticSource)
 # ---------------------------------------------------------------------------
 
-# Preset virtual sensors registered in the global list
-# 异常注入策略：用 zero_drop（随机值变 0，模拟传感器失联），不会超量程
-# signal 在 return 前会 clip 到 [-amplitude, amplitude]，保证不超量程
+# Preset virtual sensors registered in the global list.
+# Anomaly injection strategy: use zero_drop (random values become 0,
+# simulating sensor disconnection) to avoid out-of-range values.
+# Signal is clipped to [-amplitude, amplitude] before return.
 _VIRTUAL_PRESETS: dict[str, SyntheticConfig] = {
     "sine": SyntheticConfig(
         signal_type="sine", frequency=0.02, amplitude=1.0,
@@ -507,8 +509,9 @@ class VirtualSensorSource(SensorSource):
                     end = min(burst_start + burst_len, n)
                     signal[burst_start:end] += burst[:end - burst_start]
 
-        # 超量程截断：所有异常注入后，clip 到 [-amplitude, +amplitude]
-        # 模拟真实 ADC 饱和特性，避免 drift/spike 让信号超出传感器量程
+        # Out-of-range clipping: after all anomaly injection, clip to [-amplitude, +amplitude].
+        # Simulates real ADC saturation behaviour, preventing drift/spike from
+        # pushing the signal outside the sensor's measurement range.
         if cfg.amplitude > 0:
             signal = np.clip(signal, -cfg.amplitude, cfg.amplitude)
 
@@ -572,28 +575,34 @@ class VirtualSensorSource(SensorSource):
 # ---------------------------------------------------------------------------
 # C-MAPSS engine degradation source
 # ---------------------------------------------------------------------------
-# 需求：CMAPSS-1（RUL 退化演示）也走信号发生器 → IPC → 采集卡 → TCP → Django，
-# 与 C-1/D-14 同链路。本类把 C-MAPSS test_FD00X.txt 中某台 engine 的退化曲线
-# 按 cycle 顺序展开为 1D float 流（每 cycle 一个点），让 ring_buffer/SQLite/异常
-# 检测全套链路都看得见它。RUL 精确预测仍由 RulService 直接读全 14 维做（研究
-# 用途，对真实场景也合理——RUL 模型需要完整 14 维特征）。
+# Requirement: CMAPSS-1 (RUL degradation demo) also goes through the signal
+# generator -> IPC -> DAQ card -> TCP -> Django pipeline, sharing the same
+# link as C-1/D-14.  This class unfolds the degradation curve of a single
+# engine from C-MAPSS test_FD00X.txt into a 1D float stream (one point per
+# cycle), so that ring_buffer / SQLite / anomaly detection all see it.
+# Accurate RUL prediction is still done by RulService reading the full
+# 14-dimensional data (research purpose, also reasonable for real scenarios
+# -- RUL models need the complete 14-d feature set).
 #
-# 派生 1D 信号的选择：用 14 维传感器的 z-score 归一化均值（按整个 engine 序列
-# 计算均值/方差）。这个标量随 cycle 单调变化，能直观反映「退化趋势」。
+# Choice of derived 1D signal: z-score normalised mean of the 14 degradation
+# sensors (mean/std computed over the entire engine sequence).  This scalar
+# varies monotonically with cycle count and intuitively reflects the
+# "degradation trend".
 
 CMAPSS_PREFIX = "cmapss:"
 
-# C-MAPSS 数据集根目录（与 RulService 同源）。
-# 路径推演：__file__ = 生产实习/src/space/sensor_source.py
-#   parent                  = 生产实习/src/space
-#   parent.parent           = 生产实习/src
-#   parent.parent.parent    = 生产实习/  ← datasets/ 同级
+# Root directory for C-MAPSS dataset (same source as RulService).
+# Path derivation: __file__ = src/space/sensor_source.py
+#   parent                  = src/space
+#   parent.parent           = src
+#   parent.parent.parent    = project root  <- datasets/ is a sibling
 _CMAPSS_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "datasets" / "CMAPSSData"
 
-# 14 个携带退化信息的传感器列（与 RulService.CMAPSSDataSource.SENSORS 一致）
+# 14 sensor columns carrying degradation information (consistent with
+# RulService.CMAPSSDataSource.SENSORS)
 _CMAPSS_DEGRADATION_SENSORS = (2, 3, 4, 7, 8, 9, 11, 12, 13, 14, 15, 17, 20, 21)
 
-# C-MAPSS test_FD00X.txt 的 26 列（unit + cycle + 3 op + 21 sensors）
+# 26 columns in C-MAPSS test_FD00X.txt (unit + cycle + 3 op + 21 sensors)
 _CMAPSS_COLUMNS = (
     ["unit", "cycle"]
     + [f"op_setting_{i}" for i in range(1, 4)]
@@ -606,7 +615,7 @@ def _make_cmapss_id(subset: str, unit_id: int) -> str:
 
 
 def _parse_cmapss_id(source_id: str) -> tuple[str, int]:
-    """Parse ``cmapss:FD001:1`` → (subset, unit_id)。"""
+    """Parse ``cmapss:FD001:1`` -> (subset, unit_id)."""
     body = source_id[len(CMAPSS_PREFIX):]
     parts = body.split(":", 1)
     if len(parts) != 2:
@@ -620,27 +629,27 @@ def _parse_cmapss_id(source_id: str) -> tuple[str, int]:
 
 
 def _load_cmapss_engine(subset: str, unit_id: int) -> np.ndarray:
-    """加载某台 engine 的退化传感器曲线（n_cycles, 14）。
+    """Load the degradation sensor curve for a single engine (n_cycles, 14).
 
-    数据集路径默认 src/datasets/CMAPSSData/test_FD00X.txt。
-    若文件不存在或 engine 不存在，抛 FileNotFoundError。
+    Dataset path defaults to src/datasets/CMAPSSData/test_FD00X.txt.
+    Raises FileNotFoundError if the file or engine does not exist.
     """
     test_path = _CMAPSS_DATA_DIR / f"test_{subset}.txt"
     if not test_path.exists():
         raise FileNotFoundError(
             f"C-MAPSS test file not found: {test_path}\n"
-            f"数据集需放在 datasets/CMAPSSData/ 下（手动备份）"
+            f"Expected under datasets/CMAPSSData/ (manual copy required)"
         )
     try:
         import pandas as pd
     except ImportError as e:
-        raise RuntimeError("CMapssSource 需要 pandas，请 pip install pandas") from e
+        raise RuntimeError("CMapssSource requires pandas, please run: pip install pandas") from e
     df = pd.read_csv(test_path, sep=r"\s+", header=None, names=_CMAPSS_COLUMNS)
     mask = df["unit"] == unit_id
     if not mask.any():
         raise ValueError(
-            f"engine unit={unit_id} 不在 {subset}（可用 unit: "
-            f"{sorted(df['unit'].unique())[:10]}...）"
+            f"engine unit={unit_id} not found in {subset} "
+            f"(available units: {sorted(df['unit'].unique())[:10]}...)"
         )
     sensor_cols = [f"sensor_{i}" for i in _CMAPSS_DEGRADATION_SENSORS]
     return df.loc[mask, sensor_cols].to_numpy(dtype=np.float32)
@@ -648,13 +657,16 @@ def _load_cmapss_engine(subset: str, unit_id: int) -> np.ndarray:
 
 @register_source(CMAPSS_PREFIX)
 class CMapssSource(SensorSource):
-    """把 C-MAPSS 单台 engine 的退化曲线作为 1D 标量流送出。
+    """Streams a single engine's C-MAPSS degradation curve as a 1D scalar signal.
 
-    每次 ``read(n)`` 返回 n 个连续 cycle 的「退化指数」（14 维归一化均值），
-    按 cycle 顺序推进。到末尾时按 ``loop`` 配置决定回卷或停止。
+    Each ``read(n)`` returns n consecutive cycles of the "degradation index"
+    (14-sensor z-score normalised mean), advancing sequentially by cycle.
+    At the end, ``loop`` controls whether to rewind or stop.
 
-    与 FileSource 的区别：FileSource 重放真实 telemetry；CMapssSource 把研究
-    用退化数据集投影成单维信号，目的是让特殊 RUL 传感器在天地链路上可见。
+    Difference from FileSource: FileSource replays real telemetry;
+    CMapssSource projects a research degradation dataset into a
+    single-dimensional signal so that the special RUL sensor is visible
+    on the space-to-ground data link.
     """
 
     def __init__(
@@ -676,18 +688,18 @@ class CMapssSource(SensorSource):
         self._source_id = _make_cmapss_id(subset, self._unit_id)
         self._channel = f"CMAPSS_{subset}_{self._unit_id}"
 
-        # 加载并预计算 1D 退化信号
+        # Load and pre-compute the 1D degradation signal
         raw_14d = _load_cmapss_engine(subset, self._unit_id)  # (T, 14)
         if raw_14d.shape[0] < 2:
-            raise ValueError(f"engine {unit_id} 数据太少（{raw_14d.shape[0]} cycles）")
-        # Z-score 归一化（用整条序列的均值/方差）
+            raise ValueError(f"engine {unit_id} has too few data points ({raw_14d.shape[0]} cycles)")
+        # Z-score normalisation (using mean/std of the entire sequence)
         mean = raw_14d.mean(axis=0, keepdims=True)
         std = raw_14d.std(axis=0, keepdims=True)
         std_safe = np.where(std > 1e-8, std, 1.0)
         z = (raw_14d - mean) / std_safe  # (T, 14)
-        # 14 维均值 → 1D 退化曲线
+        # 14-d mean -> 1D degradation curve
         signal = z.mean(axis=1).astype(np.float32)
-        # 进一步线性归一化到 [-1, 1]，便于与 C-1 / D-14 同图表显示
+        # Further linear normalisation to [-1, 1] for consistent chart display with C-1 / D-14
         s_max = float(np.abs(signal).max()) or 1.0
         self._signal = (signal / s_max).astype(np.float32)
         self._pos = 0
@@ -711,7 +723,7 @@ class CMapssSource(SensorSource):
                 chunk = _apply_noise(chunk, self._noise)
             return chunk
 
-        # loop 模式
+        # loop mode
         result = np.empty(n, dtype=np.float32)
         filled = 0
         while filled < n:
@@ -813,9 +825,10 @@ def list_all_sources(dataset_dir: str | None = None) -> list[dict]:
             "signal_type": sig_type,
         })
 
-    # ---- C-MAPSS engine sources（特殊 RUL 演示传感器） ----
-    # 列出每个 subset 的 unit=1 engine（演示用，不全列 100 台）。
-    # 数据集不存在时静默跳过（datasets/CMAPSSData 是手动备份的大文件）。
+    # ---- C-MAPSS engine sources (special RUL demo sensors) ----
+    # List unit=1 engine for each subset (demo only; not all 100 units).
+    # Silently skip if the dataset does not exist (datasets/CMAPSSData
+    # contains large files that must be manually copied).
     for subset in ("FD001", "FD002", "FD003", "FD004"):
         test_path = _CMAPSS_DATA_DIR / f"test_{subset}.txt"
         if not test_path.exists():
@@ -823,7 +836,7 @@ def list_all_sources(dataset_dir: str | None = None) -> list[dict]:
         try:
             import pandas as pd
             df = pd.read_csv(test_path, sep=r"\s+", header=None, names=_CMAPSS_COLUMNS)
-            # 只列 unit=1（演示用）；如需扩展可改这里
+            # Only list unit=1 (for demo); modify here to extend to more units
             if (df["unit"] == 1).any():
                 sources.append({
                     "id": _make_cmapss_id(subset, 1),
@@ -834,7 +847,7 @@ def list_all_sources(dataset_dir: str | None = None) -> list[dict]:
                     "is_special": True,
                 })
         except Exception:
-            # pandas 缺失或解析失败，跳过（不影响其他 source）
+            # pandas missing or parse failed, skip (does not affect other sources)
             continue
 
     return sources

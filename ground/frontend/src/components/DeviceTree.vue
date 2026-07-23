@@ -1,11 +1,15 @@
 <script setup lang="ts">
 /**
- * 左设备树面板（需求书 §左设备树区）。
+ * Left device-tree panel (spec left device-tree panel).
  *
- * - 文件夹和传感器都显示健康值
- * - 特殊传感器（非一维数据源）名称后加 `*` 标注，不参与轮播
- * - 通道切换完全由自动轮播控制，左栏不响应点击（仅展示）
- *   （文件夹可点击展开/折叠，这是合理的 UI 交互）
+ * - Both folders and sensors display a health value so the operator can
+ *   spot degraded subsystems at a glance.
+ * - Special sensors (non-1D data sources) are suffixed with `*` and are
+ *   excluded from the auto-carousel because their data format differs.
+ * - Channel switching is fully controlled by the auto-carousel; the left
+ *   panel is display-only and does not respond to sensor clicks.
+ * - Folders may still be clicked to expand or collapse, which is a
+ *   reasonable navigation interaction.
  */
 import { computed } from 'vue'
 import { useSystemStore } from '@/stores/system'

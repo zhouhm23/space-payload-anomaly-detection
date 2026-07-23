@@ -74,8 +74,9 @@ _DEFAULTS: dict[str, Any] = {
 # Keys that are documentation-only and must not reach the browser.
 _DOC_KEYS = {"_doc"}
 
-# 中文展示名映射（后台「系统设置 · 前台主题」用）。
-# 与 ui_theme.json 的 _doc 互补——_doc 是悬浮说明，这里是列表 label。
+# Chinese display-name mapping (used by the admin "System Settings · Front-end Theme" page).
+# Complementary to the _doc field in ui_theme.json — _doc provides hover tooltips;
+# these values serve as list labels.
 _DISPLAY_NAMES: dict[str, dict[str, str]] = {
     "colors": {
         "_doc": "调色板",
@@ -132,8 +133,9 @@ _DISPLAY_NAMES: dict[str, dict[str, str]] = {
     },
 }
 
-# 嵌套 dict 类型（如 chart.padding / chart412.padding）暂不支持网页编辑。
-# 这些 key 父级是 dict 而非标量，UI 应整体灰显。
+# Nested dict keys (e.g. chart.padding / chart412.padding) are not editable
+# via the web UI.  Their parent values are dicts, not scalars — the UI should
+# grey them out entirely.
 _NESTED_KEYS = frozenset({
     "chart.padding", "chart412.padding",
 })
@@ -198,11 +200,12 @@ class ThemeService:
     # ── Back-office write support (settings page) ──────────────────────
 
     def raw_with_docs(self) -> dict[str, Any]:
-        """读取磁盘 JSON **原文**（含 ``_doc``），供后台 UI 渲染悬浮描述。
+        """Read the on-disk JSON **verbatim** (including ``_doc``) for admin UI hover descriptions.
 
-        与 ``as_dict()`` 的区别：as_dict 已 strip _doc；本方法直接 open →
-        json.load，保证 UI 看到的是文件最新状态。文件缺失时回退到
-        _DEFAULTS 深拷贝（带 _DISPLAY_NAMES 的 _doc，保证 UI 仍能渲染）。
+        Unlike ``as_dict()`` which has _doc stripped, this method reads the
+        file fresh on every call so the UI always reflects the latest on-disk
+        state.  Falls back to a deep copy of ``_DEFAULTS`` (augmented with
+        _doc from ``_DISPLAY_NAMES``) when the file is missing.
         """
         try:
             with open(self.theme_path, encoding="utf-8") as f:
@@ -214,7 +217,7 @@ class ThemeService:
         except Exception:
             logger.warning("failed to read raw ui_theme %s — using defaults",
                            self.theme_path, exc_info=True)
-        # 回退：_DEFAULTS + _DISPLAY_NAMES _doc
+        # Fallback: _DEFAULTS + _DISPLAY_NAMES _doc so the UI can still render labels.
         out: dict[str, Any] = json.loads(json.dumps(_DEFAULTS))
         for section, names in _DISPLAY_NAMES.items():
             doc = names.get("_doc")
@@ -223,13 +226,13 @@ class ThemeService:
         return out
 
     def is_readonly(self, section: str, key: str) -> bool:
-        """该 key 是否只读（嵌套 dict 类型的子键、或不在 _DEFAULTS 的 key）。"""
+        """Return whether this key is read-only (nested dict sub-key or key not in _DEFAULTS)."""
         if f"{section}.{key}" in _NESTED_KEYS:
             return True
         defaults_section = _DEFAULTS.get(section)
         if not isinstance(defaults_section, dict):
             return True
-        # 嵌套 dict 子键（如 chart.padding）：父级非标量 → 整体只读
+        # Nested dict sub-keys (e.g. chart.padding): parent is non-scalar → read-only
         existing = defaults_section.get(key)
         if isinstance(existing, dict):
             return True
@@ -237,20 +240,20 @@ class ThemeService:
 
     @staticmethod
     def display_names() -> dict[str, dict[str, str]]:
-        """返回中文展示名映射（后台 UI 用）。"""
+        """Return the display-name mapping for the admin UI."""
         return _DISPLAY_NAMES
 
     def save(self, section: str, key: str, value: Any) -> dict[str, Any]:
-        """更新单个 key 的值，写回 JSON 并热生效（重新 load）。
+        """Update a single key, write back to JSON, and hot-reload.
 
-        嵌套 dict 类型的子键（如 ``chart.padding.top``）不在本方法范围内——
-        UI 直接整体灰显，不允许网页编辑。
+        Nested dict sub-keys (e.g. ``chart.padding.top``) are out of scope —
+        the UI greys them out entirely and does not allow web editing.
 
         Returns:
-            ``{"status": "ok", "old": ..., "new": ...}`` 成功；
-            ``{"status": "error", "message": ...}`` 失败。
+            ``{"status": "ok", "old": ..., "new": ...}`` on success;
+            ``{"status": "error", "message": ...}`` on failure.
         """
-        # 1) 合法性
+        # 1) Validate inputs
         if section in _DOC_KEYS or not isinstance(section, str) or not section:
             return {"status": "error", "message": f"非法 section：{section!r}"}
         if key in _DOC_KEYS or not isinstance(key, str) or not key:
@@ -266,7 +269,7 @@ class ThemeService:
             return {"status": "error",
                     "message": f"{section}.{key} 为嵌套对象，不支持网页编辑"}
 
-        # 2) 类型校验（同 SystemConfigService 范式）
+        # 2) Type check (same pattern as SystemConfigService)
         if isinstance(expected, bool):
             if not isinstance(value, bool):
                 return {"status": "error",
@@ -287,7 +290,7 @@ class ThemeService:
             return {"status": "error",
                     "message": f"{section}.{key} 类型 {type(expected).__name__} 暂不支持网页编辑"}
 
-        # 3) 原子写回 + 热生效
+        # 3) Atomic write-back + hot-reload
         try:
             raw = self.raw_with_docs()
             sec = raw.setdefault(section, {})
@@ -310,7 +313,7 @@ class ThemeService:
                 "old": old_value, "new": value}
 
     def _atomic_write(self, data: dict[str, Any]) -> None:
-        """原子写回 JSON：临时文件 → os.replace 覆盖（同 SystemConfigService）。"""
+        """Atomic JSON write-back: temp file → os.replace (same pattern as SystemConfigService)."""
         d = os.path.dirname(self.theme_path) or "."
         os.makedirs(d, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(prefix=".ui_theme_", suffix=".tmp", dir=d)

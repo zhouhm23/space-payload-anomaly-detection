@@ -4,20 +4,22 @@ Run independently from the ground segment::
 
     python -m space.main
 
-架构（M1.2 双进程改造后）
-========================
-本进程是「采集卡」，只负责硬件拓扑 + 三层级联检测 + TCP 下发地基。
-原始数据由独立的「信号发生器」进程（``signal_generator.py``）产生，
-通过本地 IPC（``signal_ipc.py``，127.0.0.1:9878）按需 pull。
+Architecture (after the M1.2 two-process rework)
+================================================
+This process is the "DAQ card": it only owns the hardware topology + the
+three-layer cascade detection + TCP downlink to the ground. Raw data is
+produced by a separate "signal generator" process (``signal_generator.py``)
+and pulled on demand via local IPC (``signal_ipc.py``, 127.0.0.1:9878).
 
-配置
-====
-硬件拓扑读自 ``space/data/space_daq.json``（通道 id/name/enabled/isSpecial
-+ sample_rate + window_size + host/port）。数据源绑定（哪个通道接什么
-SensorSource）由信号发生器自己的 ``signal_sources.json`` 决定，本进程
-不关心。
+Configuration
+=============
+The hardware topology is read from ``space/data/space_daq.json`` (channel
+id/name/enabled/isSpecial + sample_rate + window_size + host/port). The
+data-source binding (which channel is fed by which SensorSource) is decided
+by the signal generator's own ``signal_sources.json``; this process does
+not care.
 
-停止：Ctrl+C。
+Stop with Ctrl+C.
 """
 
 from __future__ import annotations
@@ -228,14 +230,14 @@ def main():
     def _process_channel(ipc, pp, ch_dict, ch_id, cur_step):
         """IPC read → L1 → L2 → enqueue for one channel. Returns True if data was read.
 
-        Contract C2 (修正后): ``t_acq = time.time()`` MUST be recorded
+        Contract C2 (revised): ``t_acq = time.time()`` MUST be recorded
         BEFORE the IPC request, not after.  Otherwise IPC round-trip
         latency (ms-level, but variable) leaks into the acquisition
         timestamp and breaks the equidistant grid downstream.
         """
         ch_name = ch_dict["name"]
 
-        # ★ C2 修正：先打时间戳，再发起 IPC 请求
+        # ★ C2 fix: stamp the timestamp first, then fire the IPC request
         t_acq = time.time()
         try:
             raw, exhausted, _ = ipc.read(ch_name, window)
@@ -307,16 +309,18 @@ def main():
         )
 
         # ★ C12: AlertPacket must carry raw_window + score_window snapshots
-        # ★ C13: AlertPacket must carry acq_ts (真实异常采样时刻) so the
-        #        ground segment + 前端红点 can align to the telemetry time
-        #        axis. acq_ts = t_acq_start + argmax(scores)/sample_rate.
-        #        旧版只传 wall-clock time.time()，与遥测采样网格属不同时钟，
-        #        导致前端红点偏离真实异常位置（Day22 issue 3.3b）。
+        # ★ C13: AlertPacket must carry acq_ts (the real anomaly sample time) so
+        #        the ground segment + front-end red dot can align to the
+        #        telemetry time axis. acq_ts = t_acq_start + argmax(scores)/sample_rate.
+        #        The old version sent only the wall-clock time.time(), which is a
+        #        different clock from the telemetry sampling grid and caused the
+        #        front-end red dot to drift off the real anomaly position (Day22 issue 3.3b).
         if scores is not None and len(scores) > 0:
             mx = float(np.nanmax(scores))
             if mx > ALERT_THRESHOLD:
-                # argmax 在有 NaN 时仍返回第一个最大值的位置（NaN 安全），
-                # 但要先做 nanargmax 找到真实峰值的采样索引。
+                # argmax still returns the first max position in the presence of NaN
+                # (NaN-safe), but we must first use nanargmax to find the true peak's
+                # sample index.
                 try:
                     peak_idx = int(np.nanargmax(scores))
                 except (ValueError, RuntimeWarning):

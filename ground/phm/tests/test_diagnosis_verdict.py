@@ -91,14 +91,15 @@ class TestAutoDiagnoseStatus:
 
 
 class TestJointAlertDiagnosis:
-    """联合告警（alert_type=joint）诊断测试。
+    """Joint-alert (alert_type=joint) diagnosis tests.
 
-    joint 告警 channel 是虚拟 "SUB:<folder>"，无遥测表/cascade。
-    上下文从 alert_records.score_snapshot（dict）提取。
+    A joint alert's channel is the virtual "SUB:<folder>"; it has no telemetry
+    table / cascade. Context is extracted from alert_records.score_snapshot
+    (a dict).
     """
 
     def _make_service_with_joint_alert(self, joint_alert):
-        """构造一个 disabled DiagnosisService，sqlite 返回指定 joint alert。"""
+        """Build a disabled DiagnosisService whose sqlite returns the given joint alert."""
         sqlite = types.SimpleNamespace(
             query_alerts=lambda limit=50: [joint_alert],
             get_diagnosis=lambda *a, **kw: None,
@@ -135,7 +136,7 @@ class TestJointAlertDiagnosis:
         }
 
     def test_build_joint_context_returns_context(self):
-        """joint 告警应成功构造 context（不返回 None）。"""
+        """A joint alert should successfully build a context (not return None)."""
         svc = self._make_service_with_joint_alert(self._sample_joint_alert())
         ctx = svc._build_context("SUB:数据集", "joint", alert_ts=1700000000.0)
         assert ctx is not None
@@ -147,24 +148,24 @@ class TestJointAlertDiagnosis:
         assert s["sub_channels"] == ["C-1", "C-2"]
 
     def test_build_joint_context_none_when_alert_missing(self):
-        """找不到 joint 告警记录时返回 None。"""
+        """When no matching joint alert record is found, returns None."""
         svc = self._make_service_with_joint_alert(self._sample_joint_alert())
-        # 用不存在的 alert_ts
+        # Use a non-existent alert_ts.
         ctx = svc._build_context("SUB:数据集", "joint", alert_ts=9999999999.0)
         assert ctx is None
 
     def test_diagnose_joint_no_no_detection_error(self):
-        """joint 告警诊断不应报 'no detection data available'。"""
+        """A joint alert diagnosis must not report 'no detection data available'."""
         svc = self._make_service_with_joint_alert(self._sample_joint_alert())
         result = svc.diagnose("SUB:数据集", alert_type="joint",
                               alert_ts=1700000000.0, force_refresh=True)
-        # disabled service → 无 LLM 调用，error 应为 "not configured" 而非
-        # "no detection data available"
+        # Disabled service → no LLM call; error should be "not configured" rather
+        # than "no detection data available".
         assert result["error"] != "no detection data available for channel SUB:数据集"
         assert "not configured" in (result.get("error") or "").lower()
 
     def test_build_joint_prompt_contains_contributions(self):
-        """joint prompt 应包含子通道贡献信息。"""
+        """The joint prompt should include sub-channel contribution info."""
         svc = self._make_service_with_joint_alert(self._sample_joint_alert())
         ctx = svc._build_context("SUB:数据集", "joint", alert_ts=1700000000.0)
         prompt = svc._build_prompt("SUB:数据集", ctx)
@@ -174,18 +175,21 @@ class TestJointAlertDiagnosis:
         assert "0.72" in prompt  # joint_score
 
     def test_joint_prompt_does_not_mention_waveform(self):
-        """joint user prompt 不应提到「波形」（联合告警无单通道波形）。"""
+        """The joint user prompt must not mention 'waveform' (joint alerts have
+        no single-channel waveform)."""
         svc = self._make_service_with_joint_alert(self._sample_joint_alert())
         ctx = svc._build_context("SUB:数据集", "joint", alert_ts=1700000000.0)
         prompt = svc._build_prompt("SUB:数据集", ctx)
-        # joint prompt 用「联合分数曲线」，不应出现「原始波形」「波形迷你图」
+        # The joint prompt uses the "joint score curve" and must not contain
+        # "raw waveform" or "waveform mini-chart".
         assert "波形" not in prompt
         assert "联合分数曲线" in prompt
 
     def test_joint_uses_joint_system_prompt(self):
-        """joint 告警应用 _JOINT_SYSTEM_PROMPT（不提波形迷你图）。"""
+        """Joint alerts must use _JOINT_SYSTEM_PROMPT (which does not mention
+        the waveform mini-chart)."""
         from phm.services.diagnosis_service import _JOINT_SYSTEM_PROMPT, _SYSTEM_PROMPT
-        # joint system prompt 不含「波形迷你图」
+        # The joint system prompt must not contain "波形迷你图".
         assert "波形迷你图" not in _JOINT_SYSTEM_PROMPT
-        # 通用 system prompt 含「波形迷你图」（对照）
+        # The generic system prompt DOES contain "波形迷你图" (control).
         assert "波形迷你图" in _SYSTEM_PROMPT

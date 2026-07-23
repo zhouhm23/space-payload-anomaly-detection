@@ -1,11 +1,12 @@
 """Django settings for PHM ground system (Django + DRF + SimpleUI).
 
-工程结构（v1.1 重写）：
-- 前台监控大屏：Vue3 SPA，build 后产物落到 django_phm/static/phm_site/dist/
-- 后台管理：SimpleUI 主体 + 自定义 Django 模板（extends admin/base_site.html）
-- API：Django REST Framework（/api/v2/* 新规范）+ 保留旧视图过渡（/api/*）
+Project layout (v1.1 rewrite):
+- Front-end monitor: Vue3 SPA; build output lands in django_phm/static/phm_site/dist/
+- Admin: SimpleUI body + custom Django templates (extends admin/base_site.html)
+- API: Django REST Framework (/api/v2/* new spec) + legacy views kept for transition (/api/*)
 
-业务逻辑层（src/ground/phm/）零改动，通过 services_bridge 桥接 Container。
+The business-logic layer (src/ground/phm/) is untouched and is bridged into
+Django via services_bridge.
 """
 
 from __future__ import annotations
@@ -19,11 +20,11 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent  # src/ground
 SRC_DIR = BASE_DIR.parent  # src/
 
-# 把 src/ground/ 加入 sys.path，使 `import phm` / `import comm` 可用
+# Add src/ground/ to sys.path so `import phm` / `import comm` work
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-# ── .env 加载（从 server.py 迁移） ──────────────────────────────────────────
+# ── .env loading (migrated from server.py) ──────────────────────────────────
 def _load_dotenv() -> None:
     env_path = SRC_DIR / ".env"
     if not env_path.exists():
@@ -44,9 +45,10 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
-# ── HuggingFace 离线缓存（必须在 from_pretrained 之前设置） ────────────────
-# 历史教训（Day18）：不设 HF_HUB_OFFLINE 会联网确认 revision，触发 meta-tensor
-# 损坏后续模型构造。必须强制离线 + 本地快照。
+# ── HuggingFace offline cache (must be set before any from_pretrained) ──────
+# Historical lesson (Day18): without HF_HUB_OFFLINE the loader pings the hub to
+# confirm the revision, which triggers meta-tensor corruption in subsequent
+# model construction. Offline mode + a local snapshot are mandatory.
 _HF_CACHE = SRC_DIR / ".hf_cache"
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HOME", str(_HF_CACHE))
@@ -55,7 +57,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 
-# ── Django 核心 ─────────────────────────────────────────────────────────────
+# ── Django core ─────────────────────────────────────────────────────────────
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'dev-insecure-key-change-in-prod')
 DEBUG = True
 ALLOWED_HOSTS = ['*']
@@ -68,16 +70,16 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    # 第三方
+    # third-party
     'rest_framework',
     'django_filters',
     'corsheaders',
-    # 本项目
+    # this project
     'phm_site',
 ]
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',  # 必须在 CommonMiddleware 之前
+    'corsheaders.middleware.CorsMiddleware',  # must precede CommonMiddleware
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -109,13 +111,13 @@ TEMPLATES = [
 WSGI_APPLICATION = 'django_phm.wsgi.application'
 ASGI_APPLICATION = 'django_phm.asgi.application'
 
-# ── 本地化（SimpleUI 后台简体中文） ────────────────────────────────────────
+# ── Localisation (SimpleUI admin in Simplified Chinese) ─────────────────────
 LANGUAGE_CODE = 'zh-hans'
 TIME_ZONE = 'Asia/Shanghai'
 USE_I18N = True
 USE_TZ = False
 
-# ── 数据库（共用 phm.db） ───────────────────────────────────────────────────
+# ── Database (shared phm.db) ────────────────────────────────────────────────
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
@@ -123,29 +125,29 @@ DATABASES = {
     }
 }
 
-# ── 静态文件 ────────────────────────────────────────────────────────────────
+# ── Static files ────────────────────────────────────────────────────────────
 STATIC_URL = '/static/'
 STATICFILES_DIRS = [
-    BASE_DIR / 'django_phm' / 'static',  # 自定义页静态资源
+    BASE_DIR / 'django_phm' / 'static',  # custom-page static assets
 ]
 
-# 生产部署：collectstatic 收集到此目录
+# Production: collectstatic gathers files here
 STATIC_ROOT = BASE_DIR / 'django_phm' / 'staticfiles'
 
-# Vue3 前台大屏 build 产物（生产环境直接 serve）
-# 开发环境通过 vite dev server (:5173) 代理，不走这里
+# Vue3 front-end monitor build output (served directly in production).
+# In development the vite dev server (:5173) proxies it, so this path is unused.
 FRONTEND_DIST = BASE_DIR / 'django_phm' / 'static' / 'phm_site' / 'dist'
 if FRONTEND_DIST.exists():
     STATICFILES_DIRS.append(FRONTEND_DIST)
 
-# ── DRF 配置 ────────────────────────────────────────────────────────────────
+# ── DRF config ──────────────────────────────────────────────────────────────
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework.authentication.SessionAuthentication',  # 后台同源
+        'rest_framework.authentication.SessionAuthentication',  # same-origin with the admin
         'rest_framework.authentication.BasicAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.AllowAny',  # 前台大屏匿名访问，细粒度在视图层
+        'rest_framework.permissions.AllowAny',  # the monitor is anonymous; fine-grained control lives in the views
     ],
     'DEFAULT_FILTER_BACKENDS': [
         'django_filters.rest_framework.DjangoFilterBackend',
@@ -158,36 +160,43 @@ REST_FRAMEWORK = {
         'rest_framework.renderers.JSONRenderer',
         'rest_framework.renderers.BrowsableAPIRenderer',
     ],
-    'DATETIME_FORMAT': None,  # 返回原始 ISO 字符串
+    'DATETIME_FORMAT': None,  # return the raw ISO string
     'DEFAULT_TIME_ZONE': 'UTC',
 }
 
-# ── CORS（Vue3 dev server :5173 → Django :8501） ────────────────────────────
-CORS_ORIGIN_ALLOW_ALL = True  # 开发期允许所有源（生产环境应配白名单）
+# ── CORS (Vue3 dev server :5173 → Django :8501) ─────────────────────────────
+CORS_ORIGIN_ALLOW_ALL = True  # allow all origins in dev (production should use a whitelist)
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_ALL_METHODS = True
 CORS_ALLOW_ALL_HEADERS = True
 
-# ── SimpleUI 配置 ───────────────────────────────────────────────────────────
+# ── SimpleUI config ─────────────────────────────────────────────────────────
 SIMPLEUI_HOME_INFO = False
 SIMPLEUI_ANALYSIS = False
-# 右上角 fa-home 按钮点击后 window.open() 的目标 URL。
-# 指向 /monitor/（前台监控大屏），复用 SimpleUI 自带首页按钮做"后台→前台"跳转，
-# 无需在 dashboard.html 自建按钮。仪表盘仍通过左侧菜单访问。
+# Target URL for the top-right fa-home button's window.open().
+# Points to /monitor/ (the front-end monitor) — reuses SimpleUI's built-in home
+# button as the "admin → front-end" jump, so dashboard.html needs no custom
+# button. The dashboard is still reachable from the left menu.
 SIMPLEUI_INDEX = '/monitor/'
-# 品牌名：登录页 / 首页大标题（原默认 "Django administration"，用户反馈应改为本系统简称）
+# Brand name: login page / home heading (Django's default "Django administration";
+# changed to this system's short name per user feedback)
 SIMPLEUI_HOME_TITLE = '天地PHM 管理后台'
-# 自定义菜单（对齐需求书 §后台 9 项）：首页/用户管理/审计日志走 SimpleUI 默认，
-# 仪表盘/告警与预警/回收站/设备树/系统设置/模型管理为本系统自定义页。
-# system_keep=True 让 SimpleUI 自动列出 django.contrib.auth (User/Group →「认证和授权」)
-# 与 django.contrib.admin (LogEntry →「管理」/审计日志) 的默认菜单组。
-# menu_display 是白名单 + 排序：精确控制只显示需求书要求的 4 个组，
-# 隐藏 SimpleUI 默认会列出的 PHM数据管理（业务表的 ModelAdmin 列表，开发用不上面向用户）。
-# 「权限说明」是用户管理页上的按钮（需求书原文："用户管理...加个说明按钮，
-# 打开显示权限说明面板"），URL 保留但不挂菜单——按钮嵌入待用户管理页改造时完成。
+# Custom menu (aligned with spec admin section — 9 items): home/user-management/audit-log
+# go through SimpleUI defaults; dashboard/alert-management/recycle/device-tree/
+# system-settings/model-management are this system's custom pages.
+# system_keep=True lets SimpleUI auto-list django.contrib.auth (User/Group →
+# "认证和授权") and django.contrib.admin (LogEntry → "管理" / audit log) default
+# menu groups.
+# menu_display is a whitelist + ordering: it shows exactly the 4 groups the spec
+# requires and hides the "PHM数据管理" group SimpleUI would list by default
+# (the ModelAdmin list of business tables — a dev aid, not user-facing).
+# "权限说明" is a button on the user-management page (spec verbatim: "user
+# management ... add a button that opens a permissions panel"); the URL is kept
+# but not wired into the menu — the embedded button lands when the
+# user-management page is reworked.
 SIMPLEUI_CONFIG = {
-    # 品牌名（左侧菜单头部主标题 + 副标题 + 图标）。fas fa-satellite-dish
-    # 契合「天地协同」（卫星↔地面站）语义。
+    # Brand name (left-menu heading + subtitle + icon). fas fa-satellite-dish
+    # matches the "space-ground synergy" (satellite ↔ ground station) semantics.
     'title': '天地PHM',
     'subtitle': '空间载荷健康管理平台',
     'icon': 'fas fa-satellite-dish',
@@ -215,14 +224,14 @@ SIMPLEUI_CONFIG = {
     ],
 }
 
-# ── PHM 运行时配置 ──────────────────────────────────────────────────────────
+# ── PHM runtime config ──────────────────────────────────────────────────────
 SPACE_HOST = os.environ.get("SPACE_HOST", "127.0.0.1")
 SPACE_PORT = int(os.environ.get("SPACE_PORT", "9876"))
 PHM_CONFIG_PATH = str(BASE_DIR / "device_config.json")
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# ── 日志 ────────────────────────────────────────────────────────────────────
+# ── Logging ─────────────────────────────────────────────────────────────────
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
