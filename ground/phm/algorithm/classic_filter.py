@@ -152,7 +152,13 @@ class ClassicFilter(BaseFilter):
         if self.enable_sigma and sigma > 0:
             lo = mu - self.sigma_k * sigma
             hi = mu + self.sigma_k * sigma
-            sigma_out = finite_mask & (v < lo) | (v > hi)
+            # NOTE: parentheses are required here because ``&`` binds
+            # tighter than ``|`` in Python.  Writing
+            # ``finite_mask & (v < lo) | (v > hi)`` would parse as
+            # ``(finite_mask & (v < lo)) | (v > hi)`` and incorrectly flag
+            # +Inf samples (v > hi is True for +Inf even though finite_mask
+            # is False).  See experiments/diag/reproduce_classic_filter_opbug.py.
+            sigma_out = finite_mask & ((v < lo) | (v > hi))
             n_sigma = int(sigma_out.sum())
             if n_sigma > 0:
                 rules.append("sigma_3")
@@ -168,7 +174,10 @@ class ClassicFilter(BaseFilter):
             if iqr > 0:
                 lo_iqr = q1 - self.iqr_factor * iqr
                 hi_iqr = q3 + self.iqr_factor * iqr
-                iqr_out = finite_mask & (v < lo_iqr) | (v > hi_iqr)
+                # See note on the sigma rule above: parentheses required so
+                # non-finite samples are excluded by finite_mask before the
+                # OR combines the two comparisons.
+                iqr_out = finite_mask & ((v < lo_iqr) | (v > hi_iqr))
                 n_iqr = int(iqr_out.sum())
                 if n_iqr > 0:
                     rules.append("iqr")

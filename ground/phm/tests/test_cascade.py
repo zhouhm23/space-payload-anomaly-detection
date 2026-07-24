@@ -119,6 +119,45 @@ class TestClassicFilter:
         result = f.filter(values)
         assert "iqr" in result.detail["rules"]
 
+    def test_inf_not_flagged_by_sigma(self):
+        """+Inf must NOT be flagged as a sigma outlier.
+
+        Regression guard for an operator-precedence bug where
+        ``finite_mask & (v < lo) | (v > hi)`` parsed as
+        ``(finite_mask & (v < lo)) | (v > hi)`` and incorrectly flagged
+        +Inf (v > hi is True for +Inf even though finite_mask is False).
+        Non-finite samples are sanitised by L3, not L1.
+        """
+        f = ClassicFilter(enable_constant=False, enable_iqr=False,
+                          enable_rate=False, sigma_k=3.0)
+        values = np.random.RandomState(42).randn(200).astype(np.float32)
+        values[10] = np.inf   # +Inf — must not be flagged by sigma
+        values[20] = -np.inf  # -Inf — must not be flagged by sigma
+        values[30] = np.nan   # NaN — must not be flagged
+        values[50] = 50.0     # real outlier — must be flagged
+        values[60] = -50.0    # real outlier — must be flagged
+        result = f.filter(values)
+        pss = result.detail["per_sample_score"]
+        assert pss[10] == 0.0, "+Inf should not be flagged (got non-zero)"
+        assert pss[20] == 0.0, "-Inf should not be flagged"
+        assert pss[30] == 0.0, "NaN should not be flagged"
+        assert pss[50] > 0.0, "real positive outlier must be flagged"
+        assert pss[60] > 0.0, "real negative outlier must be flagged"
+
+    def test_inf_not_flagged_by_iqr(self):
+        """Same operator-precedence guard for the IQR rule."""
+        f = ClassicFilter(enable_constant=False, enable_sigma=False,
+                          enable_rate=False)
+        values = np.random.RandomState(7).randn(200).astype(np.float32)
+        values[10] = np.inf
+        values[20] = -np.inf
+        values[50] = 50.0  # real outlier
+        result = f.filter(values)
+        pss = result.detail["per_sample_score"]
+        assert pss[10] == 0.0, "+Inf should not be flagged by IQR"
+        assert pss[20] == 0.0, "-Inf should not be flagged by IQR"
+        assert pss[50] > 0.0, "real outlier must be flagged by IQR"
+
 
 # ---------------------------------------------------------------------------
 # Layer 3: PhysicalConstraint

@@ -28,6 +28,19 @@ from .cascade_detector import CascadeDetector
 from .direction_calibrator import DirectionCalibrator
 from .freq_feature import FreqFeatureExtractor
 from .calibration_config import CalibrationConfig, ChannelCalibration
+# Leak-free post-processing (knee threshold + EMA smoothing + persistence).
+# Optional Layer 3.5 — off by default, validated in
+# experiments/metrics/run_ablation_a6.py.
+from .persistence_filter import (
+    DEFAULT_EMA_ALPHA,
+    DEFAULT_PERSIST_K,
+    DEFAULT_PERSIST_W,
+    PersistenceConfig,
+    PersistenceFilter,
+    apply_persistence,
+    causal_ema,
+    knee_threshold,
+)
 
 __all__ = [
     # Base plugin contracts
@@ -48,6 +61,15 @@ __all__ = [
     "FreqFeatureExtractor",
     "CalibrationConfig",
     "ChannelCalibration",
+    # Leak-free post-processing (Layer 3.5, optional)
+    "PersistenceConfig",
+    "PersistenceFilter",
+    "apply_persistence",
+    "knee_threshold",
+    "causal_ema",
+    "DEFAULT_EMA_ALPHA",
+    "DEFAULT_PERSIST_W",
+    "DEFAULT_PERSIST_K",
     # Cascade data types
     "LayerResult",
     "CascadeOutput",

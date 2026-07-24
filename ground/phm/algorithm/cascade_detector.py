@@ -37,7 +37,6 @@ from __future__ import annotations
 import logging
 
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler
 
 from .base import BaseDetector
 from .base_filter import BaseFilter
@@ -276,15 +275,19 @@ class CascadeDetector(BaseDetector):
         # ``l1_fuse_weight == 0`` (legacy behaviour) or when L1 produced no
         # per-sample scores.  Validated in
         # experiments/cascade_eval/benchmark_cascade.py (L1_FUSE_WEIGHT).
+        #
+        # The min-max normalisation is done in pure numpy (rather than
+        # fitting a new scaler on every call) — semantically identical
+        # but avoids the per-call sklearn overhead in the streaming hot path.
         if self.l1_fuse_weight > 0.0 and l1_scores is not None:
             try:
                 l1_arr = np.asarray(l1_scores, dtype=np.float32).ravel()
                 if len(l1_arr) == len(final):
-                    l1_range = float(l1_arr.max() - l1_arr.min())
+                    l1_min = float(l1_arr.min())
+                    l1_max = float(l1_arr.max())
+                    l1_range = l1_max - l1_min
                     if l1_range > 1e-12:
-                        l1_norm = (
-                            MinMaxScaler().fit_transform(l1_arr.reshape(-1, 1)).ravel()
-                        )
+                        l1_norm = (l1_arr - l1_min) / l1_range
                     else:
                         l1_norm = np.zeros_like(l1_arr)
                     final = np.maximum(final, l1_norm * self.l1_fuse_weight).astype(
