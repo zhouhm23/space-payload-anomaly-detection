@@ -752,12 +752,12 @@ def dashboard_view(request):
 
     # Auto-refresh: OFF by default (?auto=1 to enable). The requirements doc
     # specifies auto-refresh, but production profiling showed that the 15s SSR
-    # full-page reload stacks badly with the in-process eval threads (GIL
-    # contention) and the 2.66 GB SQLite WAL read amplification — a single
-    # open dashboard tab amplified to ~20 s perceived latency. Defaulting off
-    # removes the amplifier while keeping the feature opt-in for users who
-    # want live updates.
-    auto_refresh = request.GET.get('auto') == '1'
+    # Auto-refresh: ON by default (per product requirements — the dashboard
+    # is the live operations console). ``?auto=0`` opts out for this session;
+    # the toggle persists via the checkbox.  Performance under a multi-GB DB
+    # is addressed separately via WAL checkpoint tuning + the eval thread
+    # scheduler, not by disabling the core UX.
+    auto_refresh = request.GET.get('auto') != '0'
 
     # Container three-state gate
     c, err = _container_or_error(request)
@@ -850,8 +850,6 @@ def dashboard_view(request):
 # URL ?table= whitelist (key → (SQLiteStore table name, display label))
 _RECYCLE_TABLE_MAP = {
     'alerts':     ('alert_records',     '告警记录'),
-    'detections': ('detection_results', '检测明细'),
-    'diagnoses':  ('diagnosis_records', '诊断记录'),
 }
 _RECYCLE_TABLE_DEFAULT = 'alerts'
 _RECYCLE_LIMIT_DEFAULT = 20
@@ -1065,16 +1063,36 @@ def _recycle_alert(request):
     limit = _parse_recycle_limit(request.GET.get('limit'))
     page = _parse_alert_page(request.GET.get('page'))  # Reuse generic page parser
 
+    # Recycle-bin filters (issue #3): deletion-time range + channel + status.
+    # deleted_start/end parse ISO dates or Unix timestamps (shared helper).
+    # status only meaningful for alerts (see _build_recycle_where_clause); for
+    # detections/diagnoses the store silently ignores it.
+    deleted_start = _parse_iso_or_float(request.GET.get('deleted_start'))
+    deleted_end = _parse_iso_or_float(request.GET.get('deleted_end'))
+    channel = (request.GET.get('channel') or '').strip()[:64]
+    status = (request.GET.get('status') or '').strip().lower()
+    if status not in ('confirmed', 'false', 'pending', 'active',
+                      'real', 'false_alarm', 'uncertain'):
+        status = None
+
     c, err = _container_or_error(request)
     if c is None:
         return _render_state_page(request, err, '回收站')
 
-    # Total row count (for pagination)
+    # Total row count (for pagination) — pass the same filters so the count and
+    # the rows on the current page stay consistent.
     try:
-        total_count = c.sqlite.count_deleted(sql_table)
+        total_count = c.sqlite.count_deleted(
+            sql_table,
+            deleted_start=deleted_start, deleted_end=deleted_end,
+            channel=channel, status=status,
+        )
     except Exception as e:
         logger.warning("recycle count_deleted(%s) failed: %s", sql_table, e)
         total_count = 0
+
+    # Channel options for the filter dropdown (shared with alert/telemetry pages).
+    available_channels = _list_tel_channels(c)
 
     # Calculate pagination: clamp page to last page if it exceeds total_pages
     total_pages = max(1, math.ceil(total_count / limit)) if total_count > 0 else 1
@@ -1084,7 +1102,11 @@ def _recycle_alert(request):
 
     # Call SQLiteStore.query_deleted (ordered by deleted_at DESC)
     try:
-        rows = c.sqlite.query_deleted(sql_table, limit=limit, offset=offset)
+        rows = c.sqlite.query_deleted(
+            sql_table, limit=limit, offset=offset,
+            deleted_start=deleted_start, deleted_end=deleted_end,
+            channel=channel, status=status,
+        )
     except Exception as e:
         logger.warning("recycle query_deleted(%s) failed: %s", sql_table, e)
         rows = []
@@ -1128,13 +1150,21 @@ def _recycle_alert(request):
         'tabs': tabs,
         'limit': limit,
         'is_superuser': is_superuser,
+        # Sensor dropdown options (value=label pairs from device-tree + telemetry tables)
+        'available_channels': available_channels,
         'csrf_token_str': request.META.get('CSRF_COOKIE', ''),
         # Pagination (same style as alert_view, reuses _pagination.html / _page_size_select.html)
         'total_count': total_count,
         'page': page,
         'total_pages': total_pages,
         'page_range': _build_page_range(page, total_pages),
-        'current_filters': {'table': table_key if table_key != _RECYCLE_TABLE_DEFAULT else ''},
+        'current_filters': {
+            'table': table_key if table_key != _RECYCLE_TABLE_DEFAULT else '',
+            'deleted_start': request.GET.get('deleted_start', '') or '',
+            'deleted_end': request.GET.get('deleted_end', '') or '',
+            'channel': channel or '',
+            'status': status or '',
+        },
         'page_size_options': _RECYCLE_PAGE_SIZE_OPTIONS,
     })
 
@@ -1157,6 +1187,9 @@ def _recycle_telemetry(request):
     limit = _parse_tel_limit(request.GET.get('limit'))
     page = _parse_alert_page(request.GET.get('page'))
     channel = (request.GET.get('channel') or '').strip()[:64]
+    # Recycle-bin filter (issue #3): deletion-time range on deleted_at.
+    deleted_start = _parse_iso_or_float(request.GET.get('deleted_start'))
+    deleted_end = _parse_iso_or_float(request.GET.get('deleted_end'))
 
     c, err = _container_or_error(request)
     if c is None:
@@ -1167,9 +1200,11 @@ def _recycle_telemetry(request):
     rows, total_count = [], 0
     if channel:
         try:
-            total_with = c.sqlite.count_tel(channel, include_deleted=True)
-            total_live = c.sqlite.count_tel(channel, include_deleted=False)
-            total_count = max(0, total_with - total_live)
+            # count_tel_deleted filters on deleted_at directly (and respects the
+            # date range), giving a correct page count for the filtered list.
+            total_count = c.sqlite.count_tel_deleted(
+                channel, deleted_start=deleted_start, deleted_end=deleted_end,
+            )
         except Exception as e:
             logger.warning("recycle telemetry count(%s) failed: %s", channel, e)
             total_count = 0
@@ -1179,7 +1214,10 @@ def _recycle_telemetry(request):
             page = total_pages
         offset = (page - 1) * limit
         try:
-            rows = c.sqlite.query_tel_deleted(channel, limit=limit, offset=offset)
+            rows = c.sqlite.query_tel_deleted(
+                channel, limit=limit, offset=offset,
+                deleted_start=deleted_start, deleted_end=deleted_end,
+            )
         except Exception as e:
             logger.warning("recycle query_tel_deleted(%s) failed: %s", channel, e)
             rows = []
@@ -1193,6 +1231,8 @@ def _recycle_telemetry(request):
 
     current_filters = {
         'channel': channel or '',
+        'deleted_start': request.GET.get('deleted_start', '') or '',
+        'deleted_end': request.GET.get('deleted_end', '') or '',
     }
 
     # Channel sensor name for the page header.
@@ -1988,6 +2028,10 @@ def alert_view(request):
     if c is None:
         return _render_state_page(request, err, '告警和预警管理')
 
+    # Channel options for the sensor filter dropdown (device-tree sensors +
+    # non-empty orphan telemetry tables; same source as the telemetry page).
+    available_channels = _list_tel_channels(c)
+
     # Total row count (for pagination; same filter set as query_alerts_filtered).
     try:
         total_count = c.sqlite.count_alerts_filtered(
@@ -2077,6 +2121,8 @@ def alert_view(request):
         'limit': limit,
         'current_filters': current_filters,
         'is_superuser': is_superuser,
+        # Sensor dropdown options (value=label pairs from device-tree + telemetry tables)
+        'available_channels': available_channels,
         # Pagination
         'total_count': total_count,
         'page': page,
@@ -2261,7 +2307,10 @@ def _build_sensor_info(channel, config_service):
             out['range'] = '≥ {}'.format(y_min)
         elif y_max is not None:
             out['range'] = '≤ {}'.format(y_max)
-        out['description'] = node.get('description') or ''
+        # Display-only: strip @command tokens so the user sees clean prose.
+        # The device-tree editor shows the raw description (with @commands);
+        # everywhere else uses this filtered version.
+        out['description'] = _strip_dsl_commands(node.get('description') or '')
         desc = node.get('description') or ''
         out['is_special'] = bool(node.get('isSpecial')) or '@rul' in desc
 
@@ -2806,6 +2855,10 @@ def device_tree_view(request):
         'is_superuser': is_superuser,
         'save_url': reverse('phm_admin_device_tree_save'),
         'channels_api_url': reverse('phm_admin_device_tree_channels'),
+        # Live DSL validator endpoint — the editor's "验证命令" button calls
+        # this to surface E1-E5 errors / W1-W2 warnings before the user
+        # commits the whole tree.
+        'validate_dsl_url': reverse('phm_admin_device_tree_validate_dsl'),
     })
 
 
@@ -2825,12 +2878,36 @@ def device_tree_space_channels_api(request):
     })
 
 
+def _strip_dsl_commands(description: str) -> str:
+    """Remove @command tokens from a sensor description for display.
+
+    The device-tree editor shows the full description (prose + @commands)
+    so the scientist can edit the DSL.  Everywhere else (alert detail,
+    dashboard tooltips, etc.) the user should see only the human-readable
+    prose.  This strips every ``@token`` / ``@token=value`` sequence and
+    collapses the leftover whitespace so the prose reads naturally.
+
+    Mirrors the parser's token regex in ``sensor_dsl/parser.py`` so the
+    definition of "a @command" stays in sync.
+    """
+    if not description:
+        return ''
+    import re as _re
+    cleaned = _re.sub(r"@[^\s=@]+(?:=[^\s@]+)?", "", description)
+    # Collapse runs of whitespace left behind by removed tokens, and trim.
+    return _re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _walk_sensor_nodes(tree):
     """Yield ``(channel_key, node)`` for every sensor node in the tree.
 
-    The channel key mirrors what the cascade uses to look up
-    :class:`ChannelCalibration` — the sourceId if present, else channelName,
-    else the node name.  Folder recursion is depth-first in document order.
+    The channel key mirrors what the cascade uses at runtime to look up
+    :class:`ChannelCalibration` — the ``channelName`` (which is also the
+    telemetry table key and the alert-record channel), else the node name.
+    ``sourceId`` is the data-source identifier (e.g. ``file:NASA-MSL/D-14``)
+    and is NOT used as the calibration key — using it would write DSL
+    configs to a key the cascade never queries (it queries channelName).
+    Folder recursion is depth-first in document order.
     """
     def walk(nodes):
         if not isinstance(nodes, list):
@@ -2840,8 +2917,7 @@ def _walk_sensor_nodes(tree):
                 continue
             if n.get('type') == 'sensor':
                 key = (
-                    n.get('sourceId')
-                    or n.get('channelName')
+                    n.get('channelName')
                     or n.get('name')
                 )
                 yield key, n
@@ -3070,33 +3146,52 @@ def _parse_tel_limit(raw):
 
 
 def _list_tel_channels(c):
-    """Return the union of channels that carry telemetry data.
+    """Return channel options for the telemetry dropdown.
 
-    Sources:
-      1. Device-tree sensor nodes (``channelName`` / ``sourceId``) — the
-         configured sensor channels, even if no row has been ingested yet.
-      2. ``sqlite_master`` tables whose name starts with ``telemetry_`` —
-         channels that actually have rows on disk (e.g. manually-inserted
-         test channels not yet in the device tree).
+    Each option is ``{"value": <channel_key>, "label": <display_name>}``.
+    The channel key is what the cascade and SQLiteStore use (sourceId /
+    channelName); the label is the human-friendly sensor name (falls back
+    to the channel key when no name is set). Per the requirement, sensor
+    names are mutable display labels while channel keys are the stable
+    identity used by the data layer.
 
-    Returns a sorted list of channel-name strings. The device-tree channels
-    come first (in document order) so the dropdown reads naturally.
+    Sources (deduplicated by channel key, device-tree first):
+      1. Device-tree sensor nodes — the authoritative channel list. A
+         sensor may have a display ``name`` distinct from its channel
+         key (e.g. name="温度传感器A", sourceId="T-4").
+      2. On-disk telemetry tables with >0 rows that are NOT in the device
+         tree — genuine orphan channels (e.g. a test channel ingested
+         before being configured). Zero-row tables are hidden to keep
+         the dropdown clean.
     """
-    out: list[str] = []
-    seen: set[str] = set()
-    # 1. Configured sensors (document order, dedup).
+    out: list[dict] = []
+    seen: set[str] = set()            # channel keys already in the list
+    seen_tables: set[str] = set()     # escaped table names (for sqlite dedup)
+    # 1. Device-tree sensors (document order, dedup by channel key).
     cfg_service = getattr(c, 'config', None)
     if cfg_service is not None:
         try:
             body = cfg_service.load()
             tree = body.get('device_tree') or []
-            for key, _node in _walk_sensor_nodes(tree):
+            for key, node in _walk_sensor_nodes(tree):
                 if key and key not in seen:
                     seen.add(key)
-                    out.append(key)
+                    # Also record the escaped table name so the sqlite scan
+                    # below doesn't re-add the same channel under its lossy
+                    # table-tail alias (e.g. D-14 → telemetry_D_14 → "D_14").
+                    # Escaping mirrors SQLiteStore._tel_table verbatim.
+                    esc = "".join(ch if ch.isalnum() else "_" for ch in key)
+                    seen_tables.add(f"telemetry_{esc}")
+                    label = node.get('name') or key
+                    out.append({'value': key, 'label': label})
         except Exception as e:
             logger.debug("telemetry channels: device_tree walk failed: %s", e)
-    # 2. Tables that exist on disk but are not in the tree.
+    # 2. Orphan tables on disk (non-empty, not already in tree). Dedup by
+    # TABLE NAME (not the lossy reversed channel string) so a device-tree
+    # channel whose key contains non-alnum chars (e.g. "D-14") doesn't
+    # appear twice — once as "D-14" from the tree, once as "D_14" from
+    # the table tail. Only genuine orphans (configured nowhere, with rows)
+    # are appended; their value/label is the bare table tail.
     sqlite = getattr(c, 'sqlite', None)
     if sqlite is not None and getattr(sqlite, 'enabled', False):
         try:
@@ -3105,12 +3200,23 @@ def _list_tel_channels(c):
                 "WHERE type='table' AND name LIKE 'telemetry\\_%' ESCAPE '\\'"
             )
             for (tbl,) in cur.fetchall():
+                if not tbl or tbl in seen_tables:
+                    continue
                 ch = tbl[len('telemetry_'):]
-                # Reverse the _tel_table escape: non-alnum → '_' (lossy, but
-                # matches what _ensure_tel_table does at write time).
-                if ch and ch not in seen:
+                if not ch or ch in seen:
+                    continue
+                # Hide zero-row orphan tables (test scaffolding) — only show
+                # channels that actually carry data but aren't configured.
+                try:
+                    cnt = sqlite._conn.execute(
+                        f'SELECT COUNT(*) FROM "{tbl}"'
+                    ).fetchone()[0]
+                except Exception:
+                    cnt = 0
+                if cnt > 0:
                     seen.add(ch)
-                    out.append(ch)
+                    seen_tables.add(tbl)
+                    out.append({'value': ch, 'label': ch})
         except Exception as e:
             logger.debug("telemetry channels: sqlite_master scan failed: %s", e)
     return out
@@ -3190,6 +3296,11 @@ def telemetry_view(request):
     channel = (request.GET.get('channel') or '').strip()[:64]
     start_ts = _parse_iso_or_float(request.GET.get('start'))
     end_ts = _parse_iso_or_float(request.GET.get('end'))
+    # value_type filters rows by which value columns are non-null:
+    # raw / predicted / both. Unknown or "all" → no filter.
+    value_type = (request.GET.get('type') or '').strip().lower()
+    if value_type not in ('raw', 'predicted', 'both'):
+        value_type = None
 
     c, err = _container_or_error(request)
     if c is None:
@@ -3206,6 +3317,7 @@ def telemetry_view(request):
         try:
             total_count = c.sqlite.count_tel(
                 channel, start_ts=start_ts, end_ts=end_ts,
+                value_type=value_type,
             )
         except Exception as e:
             logger.warning("telemetry count_tel(%s) failed: %s", channel, e,
@@ -3226,6 +3338,7 @@ def telemetry_view(request):
             rows = c.sqlite.query_tel_page(
                 channel, offset=offset, limit=limit,
                 start_ts=start_ts, end_ts=end_ts,
+                value_type=value_type,
             )
         except Exception as e:
             logger.warning("telemetry query_tel_page(%s) failed: %s",
@@ -3241,6 +3354,7 @@ def telemetry_view(request):
         'channel': channel or '',
         'start': request.GET.get('start', ''),
         'end': request.GET.get('end', ''),
+        'type': value_type or '',
     }
 
     # Inject decorated rows as JSON for the ECharts front-end (bidirectional
@@ -3288,7 +3402,8 @@ def telemetry_channels_api(request):
 
     Used by the channel dropdown so a scientist can refresh the list after a
     new channel is added to the device tree without reloading the page.
-    Returns ``{status: 'ok', channels: [str, ...]}``.
+    Returns ``{status: 'ok', channels: [{value, label}, ...]}`` — the value
+    is the channel key (identity), the label is the display name.
     """
     c, err = _container_or_error(request)
     if c is None:

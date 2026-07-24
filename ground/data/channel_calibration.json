@@ -7,7 +7,18 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": [
+      "l1_sigma",
+      "l1_iqr"
+    ],
+    "l3_modules": [
+      "l3_range"
+    ],
+    "module_params": null,
+    "detector_model": "tspulse",
+    "skip_detector": false,
+    "threshold_override": 0.5
   },
   "C-2": {
     "flip": true,
@@ -17,7 +28,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "D-14": {
     "flip": false,
@@ -27,7 +44,17 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": [
+      "l1_constant"
+    ],
+    "l3_modules": [
+      "l3_constant"
+    ],
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": true,
+    "threshold_override": null
   },
   "D-15": {
     "flip": false,
@@ -37,7 +64,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "D-16": {
     "flip": false,
@@ -115,7 +148,13 @@
       0.008560903930123494
     ],
     "freq_z_min": 0.7916174034088262,
-    "freq_z_max": 6.509486507412536
+    "freq_z_max": 6.509486507412536,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "F-4": {
     "flip": false,
@@ -125,7 +164,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "F-5": {
     "flip": false,
@@ -203,7 +248,13 @@
       0.0003198375155428585
     ],
     "freq_z_min": 0.29690997268551206,
-    "freq_z_max": 8.38909664732104
+    "freq_z_max": 8.38909664732104,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "F-7": {
     "flip": false,
@@ -213,7 +264,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "F-8": {
     "flip": false,
@@ -291,7 +348,13 @@
       0.0017446545898608834
     ],
     "freq_z_min": 0.8113599165826061,
-    "freq_z_max": 7.342413455934223
+    "freq_z_max": 7.342413455934223,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "M-1": {
     "flip": false,
@@ -301,7 +364,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "M-2": {
     "flip": false,
@@ -311,7 +380,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "M-3": {
     "flip": false,
@@ -321,7 +396,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "M-4": {
     "flip": false,
@@ -331,7 +412,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "M-5": {
     "flip": false,
@@ -409,7 +496,13 @@
       0.0002482798279778327
     ],
     "freq_z_min": 0.870784819222589,
-    "freq_z_max": 6.9684801468977895
+    "freq_z_max": 6.9684801468977895,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "M-6": {
     "flip": false,
@@ -419,7 +512,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "M-7": {
     "flip": false,
@@ -429,7 +528,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "P-10": {
     "flip": false,
@@ -439,7 +544,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "P-11": {
     "flip": false,
@@ -449,7 +560,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "P-14": {
     "flip": false,
@@ -459,7 +576,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "P-15": {
     "flip": false,
@@ -537,7 +660,13 @@
       2.171709581092618e-05
     ],
     "freq_z_min": 0.1441832027188862,
-    "freq_z_max": 10.675977801657362
+    "freq_z_max": 10.675977801657362,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "S-2": {
     "flip": false,
@@ -547,7 +676,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "T-12": {
     "flip": false,
@@ -625,7 +760,13 @@
       5.746860102337409e-05
     ],
     "freq_z_min": 0.3491975028475802,
-    "freq_z_max": 4.419574330967502
+    "freq_z_max": 4.419574330967502,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "T-13": {
     "flip": false,
@@ -635,7 +776,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "T-4": {
     "flip": false,
@@ -645,7 +792,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "T-5": {
     "flip": false,
@@ -655,7 +808,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "T-8": {
     "flip": false,
@@ -665,7 +824,13 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
   },
   "T-9": {
     "flip": false,
@@ -675,6 +840,73 @@
     "freq_band_mean": null,
     "freq_band_std": null,
     "freq_z_min": null,
-    "freq_z_max": null
+    "freq_z_max": null,
+    "l1_modules": null,
+    "l3_modules": null,
+    "module_params": null,
+    "detector_model": null,
+    "skip_detector": false,
+    "threshold_override": null
+  },
+  "CMAPSS_FD001_1": {
+    "flip": false,
+    "score_type": "tsp",
+    "threshold": 0.5,
+    "threshold_name": "global_p99",
+    "freq_band_mean": null,
+    "freq_band_std": null,
+    "freq_z_min": null,
+    "freq_z_max": null,
+    "l1_modules": [
+      "l1_rate"
+    ],
+    "l3_modules": [
+      "l3_rate"
+    ],
+    "module_params": null,
+    "detector_model": "tspulse",
+    "skip_detector": false,
+    "threshold_override": 0.6
+  },
+  "VS-multi_sine": {
+    "flip": false,
+    "score_type": "tsp",
+    "threshold": 0.5,
+    "threshold_name": "global_p99",
+    "freq_band_mean": null,
+    "freq_band_std": null,
+    "freq_z_min": null,
+    "freq_z_max": null,
+    "l1_modules": [
+      "l1_iqr",
+      "l1_rate"
+    ],
+    "l3_modules": [
+      "l3_range"
+    ],
+    "module_params": null,
+    "detector_model": "tspulse",
+    "skip_detector": false,
+    "threshold_override": 0.5
+  },
+  "VS-sine": {
+    "flip": false,
+    "score_type": "tsp",
+    "threshold": 0.5,
+    "threshold_name": "global_p99",
+    "freq_band_mean": null,
+    "freq_band_std": null,
+    "freq_z_min": null,
+    "freq_z_max": null,
+    "l1_modules": [
+      "l1_sigma"
+    ],
+    "l3_modules": [
+      "l3_range"
+    ],
+    "module_params": null,
+    "detector_model": "tspulse",
+    "skip_detector": false,
+    "threshold_override": 0.5
   }
 }

@@ -102,6 +102,57 @@ def _build_alert_where_clause(
         return " AND " + " AND ".join(parts), params
     return "", params
 
+
+def _build_recycle_where_clause(
+    table: str,
+    *,
+    deleted_start: float | None = None,
+    deleted_end: float | None = None,
+    channel: str | None = None,
+    status: str | None = None,
+) -> tuple[str, list]:
+    """Build a WHERE-clause fragment + params for the recycle-bin list.
+
+    Used by ``query_deleted`` / ``count_deleted`` so the filter logic lives in
+    one place. The returned fragment starts with ``AND`` (appended after
+    ``WHERE is_deleted = 1``).
+
+    Schema-aware: every admin table has ``deleted_at`` and ``channel``, so those
+    two filters always apply. ``status`` only applies to ``alert_records`` —
+    there it maps to the underlying ``status`` / ``llm_verdict`` /
+    ``human_verdict`` columns (mirrors ``compute_final_status`` priority
+    human > llm > status). On ``detection_results`` / ``diagnosis_records`` the
+    status filter is silently dropped (no such concept).
+    """
+    parts: list[str] = []
+    params: list = []
+    if deleted_start is not None:
+        parts.append("deleted_at >= ?")
+        params.append(deleted_start)
+    if deleted_end is not None:
+        parts.append("deleted_at <= ?")
+        params.append(deleted_end)
+    if channel:
+        parts.append("channel = ?")
+        params.append(channel)
+    if status and table == "alert_records":
+        # final_status is computed (human_verdict > llm_verdict > status).
+        # A row matches a given final status iff its highest-priority non-null
+        # source equals it. Verification-tier values (active/pending/confirmed/
+        # false) only apply when no verdict is set; verdict-tier values
+        # (real/false_alarm/uncertain) match against either verdict column.
+        if status in ("confirmed", "false", "pending", "active"):
+            parts.append(
+                "(llm_verdict IS NULL AND human_verdict IS NULL AND status = ?)"
+            )
+            params.append(status)
+        else:  # real / false_alarm / uncertain — verdict tier
+            parts.append("(human_verdict = ? OR llm_verdict = ?)")
+            params.extend([status, status])
+    if parts:
+        return " AND " + " AND ".join(parts), params
+    return "", params
+
 _SCHEMA = """
 -- Per-block three-layer cascade detection results
 CREATE TABLE IF NOT EXISTS detection_results (
@@ -898,12 +949,18 @@ class SQLiteStore:
         start_ts: float | None,
         end_ts: float | None,
         include_deleted: bool,
+        value_type: str | None = None,
     ) -> tuple[str, list]:
         """Build a WHERE-clause fragment + params for a telemetry_* table.
 
         Shared by ``query_tel_page`` and ``count_tel`` so the filter logic
         lives in one place. The returned fragment starts with ``WHERE``
         (no leading ``AND``); params follow the placeholder order.
+
+        ``value_type`` optionally restricts rows by which value columns are
+        non-null: ``"raw"`` → ``raw_value IS NOT NULL``, ``"predicted"`` →
+        ``predicted_value IS NOT NULL``, ``"both"`` → both non-null.
+        ``None`` / ``"all"`` / any other value applies no value filter.
         """
         parts: list[str] = []
         params: list = []
@@ -915,6 +972,13 @@ class SQLiteStore:
         if end_ts is not None:
             parts.append("timestamp <= ?")
             params.append(end_ts)
+        if value_type == "raw":
+            parts.append("raw_value IS NOT NULL")
+        elif value_type == "predicted":
+            parts.append("predicted_value IS NOT NULL")
+        elif value_type == "both":
+            parts.append("raw_value IS NOT NULL")
+            parts.append("predicted_value IS NOT NULL")
         if parts:
             return "WHERE " + " AND ".join(parts), params
         return "", params
@@ -928,6 +992,7 @@ class SQLiteStore:
         start_ts: float | None = None,
         end_ts: float | None = None,
         include_deleted: bool = False,
+        value_type: str | None = None,
     ) -> list[dict]:
         """Paginated telemetry query for the admin data-management page.
 
@@ -948,6 +1013,9 @@ class SQLiteStore:
             end_ts:         optional inclusive upper timestamp bound.
             include_deleted: if True, also return soft-deleted rows
                              (``deleted_at IS NOT NULL``).
+            value_type:     optional value-column filter
+                            (``"raw"`` / ``"predicted"`` / ``"both"``);
+                            ``None`` or ``"all"`` applies no filter.
 
         Returns ``[]`` on failure or empty channel.
         """
@@ -964,6 +1032,7 @@ class SQLiteStore:
         table = self._ensure_tel_table(channel)
         where_sql, params = self._build_tel_where_clause(
             start_ts=start_ts, end_ts=end_ts, include_deleted=include_deleted,
+            value_type=value_type,
         )
         sql = (
             f'SELECT rowid AS id, timestamp, raw_value, anomaly_score, '
@@ -1003,17 +1072,21 @@ class SQLiteStore:
         start_ts: float | None = None,
         end_ts: float | None = None,
         include_deleted: bool = False,
+        value_type: str | None = None,
     ) -> int:
         """Total row count of a telemetry table for pagination metadata.
 
-        Filter params mirror ``query_tel_page`` (without limit/offset).
-        Returns 0 on failure or empty channel.
+        Filter params mirror ``query_tel_page`` (without limit/offset),
+        including the optional ``value_type`` value-column filter
+        (``"raw"`` / ``"predicted"`` / ``"both"``; ``None`` or ``"all"``
+        applies no filter). Returns 0 on failure or empty channel.
         """
         if not self.enabled or self._conn is None:
             return 0
         table = self._ensure_tel_table(channel)
         where_sql, params = self._build_tel_where_clause(
             start_ts=start_ts, end_ts=end_ts, include_deleted=include_deleted,
+            value_type=value_type,
         )
         sql = f'SELECT COUNT(*) FROM "{table}" {where_sql}'
         try:
@@ -1489,13 +1562,28 @@ class SQLiteStore:
         """Generate a ``?,?,?`` placeholder string (sqlite3 does not accept a list expanded inline)."""
         return ",".join(["?"] * max(n, 1))
 
-    def query_deleted(self, table: str, limit: int = 200, offset: int = 0) -> list[dict]:
+    def query_deleted(
+        self,
+        table: str,
+        limit: int = 200,
+        offset: int = 0,
+        *,
+        deleted_start: float | None = None,
+        deleted_end: float | None = None,
+        channel: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
         """Return the **soft-deleted** rows of a table (for the recycle-bin list).
 
         Args:
             table: must be one of ``_ADMIN_TABLES``.
             limit: return cap, ordered by ``deleted_at DESC``.
             offset: skip the first N rows (for paging); offset=0 is backward compatible.
+            deleted_start / deleted_end: filter on the soft-delete timestamp
+                (``deleted_at``). Useful for "what I deleted yesterday".
+            channel: sensor channel exact match (all admin tables have it).
+            status: final-status filter — only effective on ``alert_records``
+                (maps to status/llm_verdict/human_verdict). Ignored on other tables.
 
         The returned fields are aligned with ``query_alerts`` / ``query_detection``
         so the front-end can reuse the column definitions. Returns ``[]`` on failure.
@@ -1512,14 +1600,19 @@ class SQLiteStore:
             offset = max(0, int(offset))
         except (TypeError, ValueError):
             offset = 0
+        where_sql, where_params = _build_recycle_where_clause(
+            table,
+            deleted_start=deleted_start, deleted_end=deleted_end,
+            channel=channel, status=status,
+        )
         try:
             if table == "alert_records":
                 cur = self._conn.execute(
                     "SELECT id, channel, alert_type, score, message, created_at, status, "
                     "       verified_at, llm_verdict, human_verdict, raw_snapshot, deleted_at "
-                    f"FROM {table} WHERE is_deleted = 1 "
+                    f"FROM {table} WHERE is_deleted = 1{where_sql} "
                     "ORDER BY deleted_at DESC LIMIT ? OFFSET ?",
-                    [limit, offset],
+                    where_params + [limit, offset],
                 )
                 rows = cur.fetchall()
                 out = []
@@ -1549,9 +1642,9 @@ class SQLiteStore:
                 cur = self._conn.execute(
                     "SELECT id, channel, timestamp, l1_score, l2_score, l3_score, "
                     "       final_score, deleted_at "
-                    f"FROM {table} WHERE is_deleted = 1 "
+                    f"FROM {table} WHERE is_deleted = 1{where_sql} "
                     "ORDER BY deleted_at DESC LIMIT ? OFFSET ?",
-                    [limit, offset],
+                    where_params + [limit, offset],
                 )
                 rows = cur.fetchall()
                 return [
@@ -1565,9 +1658,9 @@ class SQLiteStore:
             # diagnosis_records
             cur = self._conn.execute(
                 "SELECT id, channel, alert_type, alert_ts, llm_verdict, error, created_at, deleted_at "
-                f"FROM {table} WHERE is_deleted = 1 "
+                f"FROM {table} WHERE is_deleted = 1{where_sql} "
                 "ORDER BY deleted_at DESC LIMIT ? OFFSET ?",
-                [limit, offset],
+                where_params + [limit, offset],
             )
             rows = cur.fetchall()
             return [
@@ -1582,21 +1675,37 @@ class SQLiteStore:
             logger.warning("query_deleted(%s) failed", table, exc_info=True)
             return []
 
-    def count_deleted(self, table: str) -> int:
+    def count_deleted(
+        self,
+        table: str,
+        *,
+        deleted_start: float | None = None,
+        deleted_end: float | None = None,
+        channel: str | None = None,
+        status: str | None = None,
+    ) -> int:
         """Return the total number of soft-deleted rows in a table (recycle-bin paging count).
 
         Args:
             table: must be one of ``_ADMIN_TABLES``.
+            Filter kwargs mirror ``query_deleted`` (deleted_start / deleted_end /
+            channel / status) so the page count and the rows stay consistent.
 
-        Returns ``SELECT COUNT(*) FROM {table} WHERE is_deleted=1``; 0 on failure.
+        Returns ``SELECT COUNT(*) FROM {table} WHERE is_deleted=1[AND ...]``; 0 on failure.
         """
         if not self.enabled or self._conn is None:
             return 0
         if table not in self._ADMIN_TABLES:
             return 0
+        where_sql, where_params = _build_recycle_where_clause(
+            table,
+            deleted_start=deleted_start, deleted_end=deleted_end,
+            channel=channel, status=status,
+        )
         try:
             cur = self._conn.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE is_deleted = 1"
+                f"SELECT COUNT(*) FROM {table} WHERE is_deleted = 1{where_sql}",
+                where_params,
             )
             row = cur.fetchone()
             return int(row[0]) if row else 0
@@ -2016,12 +2125,17 @@ class SQLiteStore:
         *,
         limit: int = 200,
         offset: int = 0,
+        deleted_start: float | None = None,
+        deleted_end: float | None = None,
     ) -> list[dict]:
         """List soft-deleted telemetry rows for a channel (recycle-bin view).
 
         Returns rows newest-deleted-first (ORDER BY deleted_at DESC) with
         the same fields as ``query_tel_page`` so the front end can reuse
         the column definitions. Returns ``[]`` on failure or empty channel.
+
+        ``deleted_start`` / ``deleted_end`` optionally filter on the soft-delete
+        timestamp (``deleted_at``); both bounds are inclusive.
         """
         if not self.enabled or self._conn is None:
             return []
@@ -2035,15 +2149,24 @@ class SQLiteStore:
             offset = max(0, int(offset))
         except (TypeError, ValueError):
             offset = 0
+        where_parts: list[str] = ["deleted_at IS NOT NULL"]
+        where_params: list = []
+        if deleted_start is not None:
+            where_parts.append("deleted_at >= ?")
+            where_params.append(deleted_start)
+        if deleted_end is not None:
+            where_parts.append("deleted_at <= ?")
+            where_params.append(deleted_end)
+        where_sql = " AND ".join(where_parts)
         table = self._ensure_tel_table(channel)
         try:
             cur = self._conn.execute(
                 f'SELECT rowid AS id, timestamp, raw_value, anomaly_score, '
                 f'predicted_value, predicted_anomaly_score, origin_ts, '
                 f'ingested_at, deleted_at, origin '
-                f'FROM "{table}" WHERE deleted_at IS NOT NULL '
+                f'FROM "{table}" WHERE {where_sql} '
                 f'ORDER BY deleted_at DESC LIMIT ? OFFSET ?',
-                [limit, offset],
+                where_params + [limit, offset],
             )
             rows = cur.fetchall()
         except Exception:
@@ -2064,6 +2187,43 @@ class SQLiteStore:
             }
             for r in rows
         ]
+
+    def count_tel_deleted(
+        self,
+        channel: str,
+        *,
+        deleted_start: float | None = None,
+        deleted_end: float | None = None,
+    ) -> int:
+        """Count soft-deleted telemetry rows for a channel (recycle-bin paging).
+
+        Filter kwargs mirror ``query_tel_deleted`` so the page count and the
+        rows stay in sync. Returns 0 on failure or empty channel.
+        """
+        if not self.enabled or self._conn is None:
+            return 0
+        if not channel or not isinstance(channel, str):
+            return 0
+        where_parts: list[str] = ["deleted_at IS NOT NULL"]
+        where_params: list = []
+        if deleted_start is not None:
+            where_parts.append("deleted_at >= ?")
+            where_params.append(deleted_start)
+        if deleted_end is not None:
+            where_parts.append("deleted_at <= ?")
+            where_params.append(deleted_end)
+        where_sql = " AND ".join(where_parts)
+        table = self._ensure_tel_table(channel)
+        try:
+            cur = self._conn.execute(
+                f'SELECT COUNT(*) FROM "{table}" WHERE {where_sql}',
+                where_params,
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+        except Exception:
+            logger.warning("count_tel_deleted(%s) failed", channel, exc_info=True)
+            return 0
 
     # ───────────────────────────────────────────────────────────────────
     # Per-channel telemetry: manual insert (origin='manual')

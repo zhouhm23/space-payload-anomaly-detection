@@ -201,13 +201,23 @@ class TelemetryViewAccessTest(TestCase):
         self.assertIsNotNone(kwargs.get('end_ts'))
 
     def test_available_channels_in_context(self):
-        """The dropdown should list channels from the device tree."""
+        """The dropdown should list channels from the device tree.
+
+        Each entry is a dict ``{value, label}`` so the template can show a
+        human-friendly name while submitting the channel key.
+        """
         self.client.force_login(self.staff)
         c = _make_mock_container()
         p1, p2 = _patch_container(c)
         with p1, p2:
             resp = self.client.get(self.url)
-        self.assertIn('C-1', resp.context['available_channels'])
+        chans = resp.context['available_channels']
+        values = [ch['value'] for ch in chans]
+        self.assertIn('C-1', values)
+        c1 = next(ch for ch in chans if ch['value'] == 'C-1')
+        # Label falls back to the channel key when the node has no display
+        # name; here the mock node carries name="传感器 C-1".
+        self.assertEqual(c1['label'], '传感器 C-1')
 
     def test_rows_json_injected_for_chart(self):
         """rows_json carries the decorated rows so ECharts can render."""
@@ -313,7 +323,10 @@ class TelemetryChannelsApiTest(TestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body['status'], 'ok')
-        self.assertIn('C-1', body['channels'])
+        # Channels is a list of {value, label} dicts; C-1 must be present
+        # as a value (identity), with the display label carried alongside.
+        values = [ch['value'] for ch in body['channels']]
+        self.assertIn('C-1', values)
 
 
 class TelemetryCreateApiTest(TestCase):

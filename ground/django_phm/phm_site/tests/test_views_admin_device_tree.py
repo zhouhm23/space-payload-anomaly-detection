@@ -314,7 +314,7 @@ class DeviceTreeSaveDslHookTest(TestCase):
     def test_sensor_without_description_passes(self):
         """A sensor with no description must not be blocked by the DSL hook."""
         resp = self._post_save([
-            {'type': 'sensor', 'sourceId': 'X-1'},
+            {'type': 'sensor', 'channelName': 'X-1', 'sourceId': 'X-1'},
         ])
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()['status'], 'ok')
@@ -322,7 +322,7 @@ class DeviceTreeSaveDslHookTest(TestCase):
     def test_sensor_with_prose_only_description_passes(self):
         """Plain prose (no @commands) must not be blocked."""
         resp = self._post_save([
-            {'type': 'sensor', 'sourceId': 'X-1',
+            {'type': 'sensor', 'channelName': 'X-1', 'sourceId': 'X-1',
              'description': '普通温度传感器'},
         ])
         self.assertEqual(resp.status_code, 200)
@@ -330,7 +330,7 @@ class DeviceTreeSaveDslHookTest(TestCase):
     def test_legacy_at_rul_description_passes(self):
         """Legacy ``@rul:xxx`` is unknown to the DSL → treated as prose → passes."""
         resp = self._post_save([
-            {'type': 'sensor', 'sourceId': 'X-1',
+            {'type': 'sensor', 'channelName': 'X-1', 'sourceId': 'X-1',
              'description': '@rul:fd001 special'},
         ])
         self.assertEqual(resp.status_code, 200)
@@ -339,7 +339,7 @@ class DeviceTreeSaveDslHookTest(TestCase):
 
     def test_e1_unknown_algorithm_blocks_save(self):
         resp = self._post_save([
-            {'type': 'sensor', 'sourceId': 'X-1',
+            {'type': 'sensor', 'channelName': 'X-1', 'sourceId': 'X-1',
              'description': '@算法=does_not_exist'},
         ])
         self.assertEqual(resp.status_code, 400)
@@ -349,7 +349,7 @@ class DeviceTreeSaveDslHookTest(TestCase):
 
     def test_e2_skip_model_mutex_blocks_save(self):
         resp = self._post_save([
-            {'type': 'sensor', 'sourceId': 'X-1',
+            {'type': 'sensor', 'channelName': 'X-1', 'sourceId': 'X-1',
              'description': '@算法=tspulse @跳过模型'},
         ])
         self.assertEqual(resp.status_code, 400)
@@ -357,7 +357,7 @@ class DeviceTreeSaveDslHookTest(TestCase):
 
     def test_e3_setpoint_no_anchor_blocks_save(self):
         resp = self._post_save([
-            {'type': 'sensor', 'sourceId': 'X-1',
+            {'type': 'sensor', 'channelName': 'X-1', 'sourceId': 'X-1',
              'description': '@算法=l1_setpoint'},
         ])
         self.assertEqual(resp.status_code, 400)
@@ -365,7 +365,7 @@ class DeviceTreeSaveDslHookTest(TestCase):
 
     def test_e4_threshold_out_of_range_blocks_save(self):
         resp = self._post_save([
-            {'type': 'sensor', 'sourceId': 'X-1',
+            {'type': 'sensor', 'channelName': 'X-1', 'sourceId': 'X-1',
              'description': '@算法=tspulse @阈值=1.5'},
         ])
         self.assertEqual(resp.status_code, 400)
@@ -373,7 +373,7 @@ class DeviceTreeSaveDslHookTest(TestCase):
 
     def test_e5_param_for_undeclared_module_blocks_save(self):
         resp = self._post_save([
-            {'type': 'sensor', 'sourceId': 'X-1',
+            {'type': 'sensor', 'channelName': 'X-1', 'sourceId': 'X-1',
              'description': '@算法=tspulse @参数.l1_sigma.sigma_k=4'},
         ])
         self.assertEqual(resp.status_code, 400)
@@ -383,7 +383,7 @@ class DeviceTreeSaveDslHookTest(TestCase):
 
     def test_error_payload_carries_channel_and_description(self):
         resp = self._post_save([
-            {'type': 'sensor', 'sourceId': 'X-1',
+            {'type': 'sensor', 'channelName': 'X-1', 'sourceId': 'X-1',
              'description': '@算法=bad'},
         ])
         body = resp.json()
@@ -395,9 +395,9 @@ class DeviceTreeSaveDslHookTest(TestCase):
     def test_first_failing_sensor_reported(self):
         """When multiple sensors fail, only the first is reported (fix-and-resubmit)."""
         resp = self._post_save([
-            {'type': 'sensor', 'sourceId': 'X-1',
+            {'type': 'sensor', 'channelName': 'X-1', 'sourceId': 'X-1',
              'description': '@算法=bad1'},
-            {'type': 'sensor', 'sourceId': 'X-2',
+            {'type': 'sensor', 'channelName': 'X-2', 'sourceId': 'X-2',
              'description': '@算法=bad2'},
         ])
         self.assertEqual(resp.status_code, 400)
@@ -414,7 +414,7 @@ class DeviceTreeSaveDslHookTest(TestCase):
             p1, p2 = _patch_container(c)
             with p1, p2:
                 resp = self._post_save([{
-                    'type': 'sensor', 'sourceId': 'X-1',
+                    'type': 'sensor', 'channelName': 'X-1', 'sourceId': 'X-1',
                     'description': '@算法=tspulse @阈值=0.6',
                 }])
         self.assertEqual(resp.status_code, 200)

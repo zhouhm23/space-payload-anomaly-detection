@@ -25,9 +25,13 @@
       </select>
     </label>
     <label class="phm-filter-field">
-      <span class="phm-text-dim">传感器名称</span>
-      <input type="text" name="channel" value="{{ current_filters.channel }}"
-             placeholder="C-1" class="phm-input" style="width: 110px;">
+      <span class="phm-text-dim">传感器</span>
+      <select name="channel" class="phm-input" style="min-width: 140px;">
+        <option value="">全部</option>
+        {% for ch in available_channels %}
+          <option value="{{ ch.value }}" {% if ch.value == current_filters.channel %}selected{% endif %}>{{ ch.label }}</option>
+        {% endfor %}
+      </select>
     </label>
     <label class="phm-filter-field">
       <span class="phm-text-dim">LLM 诊断</span>

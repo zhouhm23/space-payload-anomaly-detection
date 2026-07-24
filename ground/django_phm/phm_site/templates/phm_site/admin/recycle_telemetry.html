@@ -11,12 +11,11 @@
         单通道遥测数据回收站（先选择传感器）
       {% endif %}
     </span>
-    <a href="{% url 'phm_admin_recycle' %}" class="phm-btn phm-btn-sm"
-       style="margin-left: 12px;">← 返回告警回收站</a>
   </div>
   <div class="phm-page-body">
 
 {# ── 强制单选 channel（同遥测管理页；遥测表是 per-channel 的） ──────────── #}
+{# issue #3：增加删除时间范围筛选（deleted_start / deleted_end） ──────────── #}
 <form class="phm-card phm-alert-filter" method="get" action="{% url 'phm_admin_recycle' %}">
   <div class="phm-flex" style="flex-wrap: wrap; gap: 12px; align-items: center;">
     <input type="hidden" name="type" value="telemetry">
@@ -25,12 +24,22 @@
       <select name="channel" id="phm-recycle-tel-channel-select" class="phm-input" style="min-width: 180px;">
         <option value="">— 选择传感器 —</option>
         {% for ch in available_channels %}
-          <option value="{{ ch }}" {% if ch == channel %}selected{% endif %}>{{ ch }}</option>
+          <option value="{{ ch.value }}" {% if ch.value == channel %}selected{% endif %}>{{ ch.label }}</option>
         {% endfor %}
       </select>
     </label>
-    <button type="submit" class="phm-btn phm-btn-primary phm-btn-sm">查看</button>
-    {% if channel %}
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">删除时间起</span>
+      <input type="text" name="deleted_start" value="{{ current_filters.deleted_start }}"
+             placeholder="2026-07-01" class="phm-input" style="width: 140px;">
+    </label>
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">删除时间止</span>
+      <input type="text" name="deleted_end" value="{{ current_filters.deleted_end }}"
+             placeholder="2026-07-21" class="phm-input" style="width: 140px;">
+    </label>
+    <button type="submit" class="phm-btn phm-btn-primary phm-btn-sm">筛选</button>
+    {% if channel or current_filters.deleted_start or current_filters.deleted_end %}
     <a href="{% url 'phm_admin_recycle' %}?type=telemetry" class="phm-btn phm-btn-sm">重置</a>
     {% endif %}
   </div>

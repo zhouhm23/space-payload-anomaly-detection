@@ -263,11 +263,12 @@ class LibraryDualPanelTest(TestCase):
         self.assertIsNone(resp.context['space_cards'])
 
     def test_space_placeholder_text_rendered(self):
-        """The rendered HTML contains the Phase 3 placeholder copy."""
+        """The rendered HTML contains the space-segment placeholder copy."""
         self.client.force_login(self.staff)
         resp = self.client.get(reverse('phm_admin_library'))
         self.assertContains(resp, '天基段算法库')
-        self.assertContains(resp, 'Phase 3')
+        # Product-facing copy (no internal jargon like "Phase 3" / "src/space").
+        self.assertContains(resp, '天地级联')
 
     def test_ground_panel_header_rendered(self):
         self.client.force_login(self.staff)

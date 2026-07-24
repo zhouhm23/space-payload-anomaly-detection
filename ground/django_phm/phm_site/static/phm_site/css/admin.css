@@ -465,10 +465,20 @@ select.phm-input::-ms-expand { display: none; }  /* IE/Edge 隐藏原生箭头 *
   transition: all 0.15s;
 }
 .phm-dash-tab:hover { color: var(--phm-blue); border-color: var(--phm-blue); }
-.phm-dash-tab.active {
-  background: var(--phm-blue);
-  border-color: var(--phm-blue);
-  color: #fff;
+/* Active tab: inverted colours (blue background + white text).  simpleui's
+   global ``a:link, a:visited { color: #3f9eff }`` (base.css) forces link
+   colour on every <a>, which would make active tabs blue-on-blue.  The
+   ``#content`` ID prefix + ``!important`` guarantees our white text wins
+   the cascade war regardless of load order or simpleui updates. */
+#content .phm-dash-tab.active,
+#content .phm-dash-tab.active:link,
+#content .phm-dash-tab.active:visited,
+#content a.phm-dash-tab.active,
+#content a.phm-dash-tab.active:link,
+#content a.phm-dash-tab.active:visited {
+  background: var(--phm-blue) !important;
+  border-color: var(--phm-blue) !important;
+  color: #fff !important;
   cursor: default;
 }
 .phm-dash-tabs-right {
@@ -476,6 +486,30 @@ select.phm-input::-ms-expand { display: none; }  /* IE/Edge 隐藏原生箭头 *
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* Collapsible calibration cards (settings page).  Each channel renders as a
+   <details> so the long calibration list doesn't overwhelm the page. */
+.phm-calibration-details {
+  padding: 10px 16px;
+}
+.phm-calibration-details > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.phm-calibration-details > summary::-webkit-details-marker { display: none; }
+.phm-calibration-details[open] > summary .phm-collapse-arrow {
+  transform: rotate(90deg);
+}
+.phm-collapse-arrow {
+  display: inline-block;
+  transition: transform 0.15s;
+  font-size: 10px;
+  color: var(--phm-text-dim);
 }
 .phm-dash-autorefresh {
   display: inline-flex;

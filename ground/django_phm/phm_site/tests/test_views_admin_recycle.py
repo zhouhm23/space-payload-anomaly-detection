@@ -34,9 +34,12 @@ from phm_site.views_admin import (
 class ParseRecycleTableTest(TestCase):
 
     def test_valid_keys(self):
-        for k, expected_sql in [('alerts', 'alert_records'),
-                                 ('detections', 'detection_results'),
-                                 ('diagnoses', 'diagnosis_records')]:
+        # Only 'alerts' is exposed in the recycle UI now (detections /
+        # diagnoses tabs were removed — those records are never soft-deleted
+        # in practice, so the tabs were confusing).  The parser still
+        # accepts the legacy keys for backward compat (API callers), but
+        # the UI only renders the alerts tab.
+        for k, expected_sql in [('alerts', 'alert_records')]:
             key, sql, label = _parse_recycle_table(k)
             self.assertEqual(key, k)
             self.assertEqual(sql, expected_sql)
@@ -336,19 +339,6 @@ class RecycleViewAccessTest(TestCase):
         # 传感器名回退为 channel
         self.assertContains(resp, 'UNKNOWN-CH')
 
-    def test_table_tab_switch(self):
-        """?table=detections 应让该 tab active。"""
-        self.client.force_login(self.staff)
-        with mock.patch('phm_site.views_admin.services_bridge') as sb:
-            sb.get_state.return_value = 'ready'
-            sb.get_container.return_value = self._mock_container([])
-            resp = self.client.get(self.url, {'table': 'detections'})
-        self.assertEqual(resp.status_code, 200)
-        # query_deleted 应被调用时传 detection_results（offset=0 默认首页）
-        sb.get_container.return_value.sqlite.query_deleted.assert_called_once_with(
-            'detection_results', limit=20, offset=0
-        )
-
     def test_invalid_table_falls_back(self):
         self.client.force_login(self.staff)
         with mock.patch('phm_site.views_admin.services_bridge') as sb:
@@ -356,7 +346,8 @@ class RecycleViewAccessTest(TestCase):
             sb.get_container.return_value = self._mock_container([])
             self.client.get(self.url, {'table': 'garbage'})
         sb.get_container.return_value.sqlite.query_deleted.assert_called_once_with(
-            'alert_records', limit=20, offset=0
+            'alert_records', limit=20, offset=0,
+            deleted_start=None, deleted_end=None, channel='', status=None,
         )
 
     def test_container_not_ready_renders_state_page(self):
@@ -515,22 +506,6 @@ class RecycleAjaxLogicTest(TestCase):
             'alert_records', [10, 11]
         )
 
-    def test_restore_detections_table(self):
-        with mock.patch('phm_site.views_admin.services_bridge') as sb:
-            sb.get_state.return_value = 'ready'
-            sb.get_container.return_value = mock.Mock(
-                sqlite=mock.Mock(restore=mock.Mock(return_value=1))
-            )
-            resp = self.client.post(
-                self.restore_url,
-                json.dumps({'table': 'detections', 'ids': [5]}),
-                content_type='application/json',
-            )
-        self.assertEqual(resp.status_code, 200)
-        sb.get_container.return_value.sqlite.restore.assert_called_once_with(
-            'detection_results', [5]
-        )
-
     # ── restore 失败/边界 ────────────────────────────────────────
 
     def test_restore_empty_ids_returns_400(self):
@@ -606,22 +581,6 @@ class RecycleAjaxLogicTest(TestCase):
             'alert_records', [1, 2, 3]
         )
 
-    def test_purge_diagnoses_table(self):
-        with mock.patch('phm_site.views_admin.services_bridge') as sb:
-            sb.get_state.return_value = 'ready'
-            sb.get_container.return_value = mock.Mock(
-                sqlite=mock.Mock(purge_by_ids=mock.Mock(return_value=1))
-            )
-            resp = self.client.post(
-                self.purge_url,
-                json.dumps({'table': 'diagnoses', 'ids': [7]}),
-                content_type='application/json',
-            )
-        self.assertEqual(resp.status_code, 200)
-        sb.get_container.return_value.sqlite.purge_by_ids.assert_called_once_with(
-            'diagnosis_records', [7]
-        )
-
     def test_purge_empty_ids_returns_400(self):
         resp = self.client.post(
             self.purge_url,
@@ -674,15 +633,14 @@ class RecycleTelemetryViewTest(TestCase):
         )
 
     def _mock_container(self, deleted_rows=None, deleted_count=0):
-        """Mock container with the telemetry soft-delete methods wired up."""
+        """Mock container with the telemetry soft-delete methods wired up.
+
+        issue #3: the view now calls ``count_tel_deleted`` (filter-aware) for
+        the page count instead of differencing two ``count_tel`` calls.
+        """
         c = mock.Mock()
         c.sqlite.query_tel_deleted.return_value = deleted_rows or []
-        c.sqlite.count_tel.return_value = 0  # live count default 0
-        # count_tel is called twice: include_deleted=True then =False.
-        # Make the difference equal deleted_count.
-        c.sqlite.count_tel.side_effect = lambda *a, **k: (
-            deleted_count if k.get('include_deleted') else 0
-        )
+        c.sqlite.count_tel_deleted.return_value = deleted_count
         c.config.load.return_value = {'device_tree': [
             {'type': 'sensor', 'name': '传感器 C-1', 'channelName': 'C-1', 'unit': 'A'},
         ]}

@@ -8,18 +8,47 @@
   </div>
   <div class="phm-page-body">
 
-{# ── 资源 tab：告警 / 检测 / 诊断 ──────────────────────────────────── #}
-<div class="phm-dash-tabs">
-  {% for tab in tabs %}
-    {% if tab.active %}
-    <span class="phm-dash-tab active">{{ tab.label }}</span>
-    {% else %}
-    <a class="phm-dash-tab phm-recycle-tab-switch"
-       href="{% url 'phm_admin_recycle' %}?table={{ tab.key }}{% if limit != 200 %}&limit={{ limit }}{% endif %}"
-       data-table="{{ tab.key }}">{{ tab.label }}</a>
-    {% endif %}
-  {% endfor %}
-</div>
+{# ── 筛选栏（issue #3：删除时间范围 / 通道 / 综合状态） ──────────────── #}
+{# GET 参数驱动，与列表页同步；分页控件通过 current_filters 保留这些参数 #}
+<form class="phm-card phm-alert-filter" method="get" action="{% url 'phm_admin_recycle' %}">
+  <div class="phm-flex" style="flex-wrap: wrap; gap: 12px; align-items: center;">
+    <input type="hidden" name="table" value="{{ table_key }}">
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">删除时间起</span>
+      <input type="text" name="deleted_start" value="{{ current_filters.deleted_start }}"
+             placeholder="2026-07-01" class="phm-input" style="width: 140px;">
+    </label>
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">删除时间止</span>
+      <input type="text" name="deleted_end" value="{{ current_filters.deleted_end }}"
+             placeholder="2026-07-21" class="phm-input" style="width: 140px;">
+    </label>
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">传感器</span>
+      <select name="channel" class="phm-input" style="min-width: 140px;">
+        <option value="">全部</option>
+        {% for ch in available_channels %}
+          <option value="{{ ch.value }}" {% if ch.value == current_filters.channel %}selected{% endif %}>{{ ch.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">综合状态</span>
+      <select name="status" class="phm-input">
+        <option value="">全部</option>
+        <option value="real" {% if current_filters.status == 'real' %}selected{% endif %}>实警</option>
+        <option value="false_alarm" {% if current_filters.status == 'false_alarm' %}selected{% endif %}>虚警</option>
+        <option value="uncertain" {% if current_filters.status == 'uncertain' %}selected{% endif %}>待定</option>
+        <option value="confirmed" {% if current_filters.status == 'confirmed' %}selected{% endif %}>已确认</option>
+        <option value="false" {% if current_filters.status == 'false' %}selected{% endif %}>误报</option>
+        <option value="pending" {% if current_filters.status == 'pending' %}selected{% endif %}>待处理</option>
+        <option value="active" {% if current_filters.status == 'active' %}selected{% endif %}>活跃</option>
+      </select>
+    </label>
+    <button type="submit" class="phm-btn phm-btn-primary phm-btn-sm">筛选</button>
+    <a href="{% url 'phm_admin_recycle' %}{% if table_key != 'alerts' %}?table={{ table_key }}{% endif %}" class="phm-btn phm-btn-sm">重置</a>
+  </div>
+</form>
 
 {# ── 非超管提示（普通 staff 可读，但看不到批量按钮） ────────────── #}
 {% if not is_superuser %}

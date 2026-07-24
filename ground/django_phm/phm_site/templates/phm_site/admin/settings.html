@@ -39,8 +39,7 @@
   <div class="phm-flex" style="gap: 8px;">
     <span style="font-size: 14px;">⚠️</span>
     <p class="phm-text-sec" style="margin: 0; font-size: 13px; line-height: 1.6;">
-      通道校准是 <strong>Day15 离线 LOO 标定</strong>的产物（<code class="phm-mono">build_channel_calibration.py</code> 生成）。
-      网页<strong>只读</strong>——修改口径请重跑标定脚本，不要手动编辑 JSON。
+      通道校准由<strong>离线标定流程</strong>生成，网页<strong>只读</strong>。如需调整检测参数，请通过设备树的 <code class="phm-mono">@命令</code> 配置或重新执行标定。
     </p>
   </div>
 </div>
@@ -58,7 +57,19 @@
 {% endif %}
 
 {# ── 配置项分组卡片 ─────────────────────────────────────────────────── #}
+{# 通道校准页（category=calibration）每个通道一个卡片，数量多且只读，   #}
+{# 用 <details> 默认折叠，避免页面过长。其他类别保持原样平铺展开。      #}
 {% for grp in groups %}
+{% if category == 'calibration' %}
+<details class="phm-card phm-mt-16 phm-calibration-details">
+  <summary class="phm-card-title phm-collapsible-summary" {% if grp.doc %}title="{{ grp.doc }}"{% endif %}>
+    <span class="phm-collapse-arrow">▶</span>
+    {{ grp.label }}
+    {% if grp.readonly_hint %}
+      <span class="phm-badge phm-badge-gray" style="margin-left: 8px; font-size: 11px;">只读</span>
+    {% endif %}
+  </summary>
+{% else %}
 <div class="phm-card phm-mt-16">
   <h3 class="phm-card-title" {% if grp.doc %}title="{{ grp.doc }}"{% endif %}>
     {{ grp.label }}
@@ -69,6 +80,7 @@
   {% if grp.doc %}
   <p class="phm-text-dim" style="margin: -4px 0 12px; font-size: 12px; line-height: 1.5;">{{ grp.doc }}</p>
   {% endif %}
+{% endif %}
 
   {% if grp.items %}
   <div class="phm-table-wrap">
@@ -153,7 +165,11 @@
     <p class="phm-text-sec" style="margin: 0;">（无配置项）</p>
   </div>
   {% endif %}
+{% if category == 'calibration' %}
+</details>
+{% else %}
 </div>
+{% endif %}
 {% empty %}
 <div class="phm-empty">
   <div style="font-size: 36px; margin-bottom: 8px;">📭</div>

@@ -790,23 +790,23 @@ class DashboardViewAutoRefreshTest(TestCase):
         ar_qs.objects.filter.return_value.only.return_value = []
         return sb, ar_qs
 
-    def test_default_off_no_auto_param(self):
-        """Without the ``?auto`` parameter, auto-refresh is OFF by default.
+    def test_default_on_no_auto_param(self):
+        """Without the ``?auto`` parameter, auto-refresh is ON by default.
 
-        Production profiling showed the 15 s SSR full-page reload stacked
-        badly with the in-process eval threads (GIL contention) and the
-        multi-GB SQLite WAL read amplification, pushing a single open
-        dashboard tab to ~20 s perceived latency. Auto-refresh is therefore
-        opt-in (``?auto=1``); users who want live updates tick the box.
+        The dashboard is the live operations console — per product
+        requirements it auto-refreshes every 15 s.  ``?auto=0`` opts out
+        for a session.  Performance under a multi-GB DB is addressed via
+        WAL checkpoint tuning + the eval-thread scheduler, not by
+        disabling the core UX.
         """
         self.client.force_login(self.staff)
         self._setup_mocks()
         resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 200)
         body = resp.content.decode('utf-8')
-        # checkbox should NOT be checked by default
+        # checkbox should be checked by default
         toggle_part = body.split('id="phm-auto-refresh-toggle"')[1].split('>')[0]
-        self.assertNotIn('checked', toggle_part)
+        self.assertIn('checked', toggle_part)
 
     def test_auto_param_zero_disables_refresh(self):
         """``?auto=0`` explicitly disables auto-refresh."""

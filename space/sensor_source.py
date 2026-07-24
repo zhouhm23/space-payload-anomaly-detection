@@ -509,11 +509,19 @@ class VirtualSensorSource(SensorSource):
                     end = min(burst_start + burst_len, n)
                     signal[burst_start:end] += burst[:end - burst_start]
 
-        # Out-of-range clipping: after all anomaly injection, clip to [-amplitude, +amplitude].
-        # Simulates real ADC saturation behaviour, preventing drift/spike from
-        # pushing the signal outside the sensor's measurement range.
+        # Out-of-range clipping: simulates real ADC saturation.  The clip
+        # bounds are the sensor's full-scale range, which is wider than the
+        # nominal signal amplitude — a real ADC saturates at its measurement
+        # limit, not at the signal's normal swing.  When anomaly injection
+        # is active, the bounds expand by ``anomaly_magnitude`` so injected
+        # spikes/driffs remain visible (an anomaly that is clipped away is
+        # no anomaly at all).  Without anomalies, the bounds collapse back
+        # to ``amplitude`` and the behaviour is unchanged.
         if cfg.amplitude > 0:
-            signal = np.clip(signal, -cfg.amplitude, cfg.amplitude)
+            clip_bound = cfg.amplitude
+            if cfg.anomaly_every > 0 or cfg.anomaly_prob > 0:
+                clip_bound += abs(cfg.anomaly_magnitude)
+            signal = np.clip(signal, -clip_bound, clip_bound)
 
         self._t += n
 
@@ -631,7 +639,14 @@ def _parse_cmapss_id(source_id: str) -> tuple[str, int]:
 def _load_cmapss_engine(subset: str, unit_id: int) -> np.ndarray:
     """Load the degradation sensor curve for a single engine (n_cycles, 14).
 
-    Dataset path defaults to src/datasets/CMAPSSData/test_FD00X.txt.
+    Uses the **test** split (``test_FD00X.txt``).  This is deliberate:
+    the C-MAPSS benchmark trains its RUL model on the *train* split, so
+    streaming the *test* split through the live telemetry link keeps the
+    online signal strictly disjoint from what the model trained on — no
+    data leakage.  The test split does truncate each engine mid-life
+    (fewer cycles than train), so the 1-D degradation trend is subtler;
+    that is the correct, leak-free trade-off for a demo.
+
     Raises FileNotFoundError if the file or engine does not exist.
     """
     test_path = _CMAPSS_DATA_DIR / f"test_{subset}.txt"

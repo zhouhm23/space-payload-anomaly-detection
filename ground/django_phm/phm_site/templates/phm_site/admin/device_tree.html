@@ -72,8 +72,10 @@
     <li><strong>新建</strong>：选中一个文件夹，点上方「📁＋」在该文件夹下新建子文件夹，「📡＋」新建子传感器。</li>
     <li><strong>拖拽</strong>：拖到文件夹上 → 成为该文件夹的子节点；拖到节点上 → 插到该节点之前（同级排序）。</li>
     <li><strong>防成环</strong>：禁止把文件夹拖进它自己的子孙（前端会拒绝并提示）。</li>
-    <li><strong>@ 命令</strong>（在「描述」字段）：传感器描述里写 <code class="phm-mono">@tspulse</code> / <code class="phm-mono">@ttm</code> /
-      <code class="phm-mono">@rul:fd001</code> 隐式绑定模型。带 <code class="phm-mono">@rul</code> 的传感器会标 <strong>*</strong>，不参与轮播。</li>
+    <li><strong>@ 命令</strong>（在「描述」字段）：用 <code class="phm-mono">@算法=</code> 指定处理流（L1/L2/L3 算法名，逗号分隔）、
+      <code class="phm-mono">@阈值=0.5</code> 设异常分数阈值、<code class="phm-mono">@参数.&lt;模块&gt;.&lt;键&gt;=&lt;值&gt;</code> 覆盖模块参数、
+      <code class="phm-mono">@跳过模型</code> 跳过 L2 检测器。算法名取自算法库页（如 <code class="phm-mono">l1_sigma</code> / <code class="phm-mono">tspulse</code> / <code class="phm-mono">l3_range</code>）。
+      带 <code class="phm-mono">@rul</code> 的传感器会标 <strong>*</strong>，走 RUL 特殊通道、不参与轮播。完整语法见《@命令语法说明书》。</li>
     <li><strong>保存</strong>：所有改动都在本地，点「保存整树」一次性提交。空树会被后端拒绝（安全保护）。</li>
   </ul>
 </div>
@@ -90,6 +92,7 @@
   var TREE = {{ tree_json|safe }};
   var CHANNELS = {{ channels_json|safe }};
   var SAVE_URL = "{{ save_url|escapejs }}";
+  var VALIDATE_URL = "{{ validate_dsl_url|escapejs }}";
   var IS_SUPERUSER = {{ is_superuser|yesno:"true,false" }};
   var AGGREGATION = "{{ aggregation_strategy|escapejs }}";
   // 拖拽过程中的 TREE 快照（syncTreeFromDom 用它查原始字段，TREE 正被重写）
@@ -346,23 +349,23 @@
         '<label class="phm-form-field" style="grid-column: 1 / -1;">' +
           '<span>单位（unit）</span>' +
           '<input type="text" id="phm-edit-unit" class="phm-input" value="' + escapeHTML(n.unit || '') + '"' + (IS_SUPERUSER ? '' : ' disabled') + '>' +
-        '</label>' +
-        '<label class="phm-form-field" style="grid-column: 1 / -1;">' +
-          '<span>阈值（threshold，0-1）</span>' +
-          '<input type="text" id="phm-edit-threshold" class="phm-input" value="' + (n.threshold != null ? n.threshold : '') + '"' + (IS_SUPERUSER ? '' : ' disabled') + '>' +
         '</label>';
     }
 
     editor.innerHTML += '' +
       '<label class="phm-form-field" style="grid-column: 1 / -1;">' +
-        '<span>描述（@tspulse / @ttm / @rul:fd001 等命令）</span>' +
-        '<textarea id="phm-edit-description" class="phm-input" rows="3" placeholder="传感器描述 + @ 命令"' + (IS_SUPERUSER ? '' : ' disabled') + '>' +
+        '<span>描述（可用 @算法= / @阈值= / @参数. / @跳过模型 配置处理流）</span>' +
+        '<textarea id="phm-edit-description" class="phm-input" rows="3" placeholder="例：@算法=l1_sigma,l3_range @阈值=0.5"' + (IS_SUPERUSER ? '' : ' disabled') + '>' +
           escapeHTML(n.description || '') +
         '</textarea>' +
       '</label>' +
+      '<div id="phm-edit-dsl-result" style="grid-column: 1 / -1; margin-top: 4px;"></div>' +
       '<div class="phm-flex-between" style="grid-column: 1 / -1; margin-top: 8px;">' +
         '<button class="phm-btn phm-btn-danger phm-btn-sm" id="phm-edit-delete"' + (IS_SUPERUSER ? '' : ' disabled') + '>🗑 删除节点</button>' +
-        '<button class="phm-btn phm-btn-primary phm-btn-sm" id="phm-edit-apply"' + (IS_SUPERUSER ? '' : ' disabled') + '>应用</button>' +
+        '<span class="phm-flex" style="gap: 6px;">' +
+          '<button class="phm-btn phm-btn-sm" id="phm-edit-validate-dsl"' + (IS_SUPERUSER ? '' : ' disabled') + '>🔍 验证命令</button>' +
+          '<button class="phm-btn phm-btn-primary phm-btn-sm" id="phm-edit-apply"' + (IS_SUPERUSER ? '' : ' disabled') + '>应用</button>' +
+        '</span>' +
       '</div>';
 
     // 绑定 apply / delete
@@ -380,11 +383,6 @@
           if (srcEl) n.sourceId = srcEl.value;
           var unitEl = document.getElementById('phm-edit-unit');
           if (unitEl) n.unit = unitEl.value;
-          var thEl = document.getElementById('phm-edit-threshold');
-          if (thEl) {
-            var tv = parseFloat(thEl.value);
-            n.threshold = isNaN(tv) ? undefined : tv;
-          }
         }
         var descEl = document.getElementById('phm-edit-description');
         if (descEl) n.description = descEl.value;
@@ -392,6 +390,52 @@
         if (n.type === 'sensor') n._special = n.isSpecial || /@rul/.test(n.description || '');
         renderTree();
         if (window.PHM) PHM.toast('已应用到本地（点「保存整树」生效）', 'success');
+      });
+    }
+    // Live @command DSL validator — calls validate-dsl endpoint and renders
+    // E1-E5 errors (red, blocking) / W1-W2 warnings (yellow, advisory) /
+    // has_commands:false (info, default-flow reminder) into the result div.
+    // Lets the scientist catch mistakes before committing the whole tree.
+    var validateBtn = document.getElementById('phm-edit-validate-dsl');
+    if (validateBtn) {
+      validateBtn.addEventListener('click', function () {
+        var descEl = document.getElementById('phm-edit-description');
+        var resultEl = document.getElementById('phm-edit-dsl-result');
+        if (!descEl || !resultEl) return;
+        var desc = descEl.value || '';
+        if (!window.PHM || !PHM.fetchJSON) return;
+        resultEl.innerHTML = '<span class="phm-text-dim" style="font-size:12px;">验证中…</span>';
+        PHM.fetchJSON(VALIDATE_URL, { method: 'POST', body: { description: desc } })
+          .then(function (data) {
+            var html = '';
+            if (data.status === 'error') {
+              html += '<div style="color: var(--phm-red, #e53935); font-size: 12px;">❌ ' +
+                      (data.errors || []).map(escapeHTML).join('<br>') + '</div>';
+            } else {
+              var errs = data.errors || [];
+              var warns = data.warnings || [];
+              if (errs.length) {
+                html += '<div style="color: var(--phm-red, #e53935); font-size: 12px;">❌ 硬错误（保存时会被阻断）：<br>' +
+                        errs.map(escapeHTML).join('<br>') + '</div>';
+              }
+              if (warns.length) {
+                html += (errs.length ? '<br>' : '') +
+                        '<div style="color: var(--phm-orange, #fb8c00); font-size: 12px;">⚠️ ' +
+                        warns.map(escapeHTML).join('<br>') + '</div>';
+              }
+              if (!errs.length && !warns.length) {
+                if (data.has_commands) {
+                  html += '<div style="color: var(--phm-green, #43a047); font-size: 12px;">✓ 命令格式正确</div>';
+                } else {
+                  html += '<div style="color: var(--phm-text-dim, #999); font-size: 12px;">未检测到 @ 命令，将走系统默认流程</div>';
+                }
+              }
+            }
+            resultEl.innerHTML = html || '<span class="phm-text-dim" style="font-size:12px;">—</span>';
+          })
+          .catch(function (e) {
+            resultEl.innerHTML = '<div style="color: var(--phm-red, #e53935); font-size: 12px;">验证失败：' + escapeHTML(e.message) + '</div>';
+          });
       });
     }
     var delBtn = document.getElementById('phm-edit-delete');

@@ -23,7 +23,7 @@
       <select name="channel" id="phm-tel-channel-select" class="phm-input" style="min-width: 180px;">
         <option value="">— 选择传感器 —</option>
         {% for ch in available_channels %}
-          <option value="{{ ch }}" {% if ch == channel %}selected{% endif %}>{{ ch }}</option>
+          <option value="{{ ch.value }}" {% if ch.value == channel %}selected{% endif %}>{{ ch.label }}</option>
         {% endfor %}
       </select>
     </label>
@@ -36,6 +36,15 @@
       <span class="phm-text-dim">止</span>
       <input type="text" name="end" value="{{ current_filters.end }}"
              placeholder="2026-07-21 或时间戳" class="phm-input" style="width: 150px;">
+    </label>
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">类型</span>
+      <select name="type" class="phm-input" style="min-width: 120px;">
+        <option value="">全部数据</option>
+        <option value="raw" {% if current_filters.type == 'raw' %}selected{% endif %}>仅真实值</option>
+        <option value="predicted" {% if current_filters.type == 'predicted' %}selected{% endif %}>仅预测值</option>
+        <option value="both" {% if current_filters.type == 'both' %}selected{% endif %}>真实+预测（同时有）</option>
+      </select>
     </label>
     <button type="submit" class="phm-btn phm-btn-primary phm-btn-sm">筛选</button>
     {% if channel %}
@@ -168,7 +177,7 @@
           <span>传感器 *</span>
           <select id="phm-tel-create-channel" class="phm-input">
             {% for ch in available_channels %}
-              <option value="{{ ch }}" {% if ch == channel %}selected{% endif %}>{{ ch }}</option>
+              <option value="{{ ch.value }}" {% if ch.value == channel %}selected{% endif %}>{{ ch.label }}</option>
             {% endfor %}
           </select>
         </label>
@@ -320,6 +329,20 @@
           utc_time: r.utc_time,
         };
       }).filter(function (p) { return p.value[0] != null; });
+      // After dataPts is built, compute the page's time span so the x-axis
+      // always stretches across the full page (auto-scale collapses
+      // sub-second 100Hz pages into a vertical line).
+      var tsValues = dataPts.map(function (p) { return p.value[0]; })
+                            .filter(function (t) { return t != null; });
+      var tsMin = tsValues.length ? Math.min.apply(null, tsValues) : null;
+      var tsMax = tsValues.length ? Math.max.apply(null, tsValues) : null;
+      // Tiny pad (0.5% of span, min 1ms) so first/last points aren't glued
+      // to the edge.
+      if (tsMin != null && tsMax != null) {
+        var span = tsMax - tsMin;
+        var pad = Math.max(span * 0.005, 0.001);
+        tsMin -= pad; tsMax += pad;
+      }
       chart.setOption({
         grid: { left: 56, right: 16, top: 16, bottom: 60 },
         tooltip: {
@@ -335,6 +358,10 @@
         },
         xAxis: {
           type: 'value',
+          // Pin the x-axis to the page's time span; fall back to ECharts'
+          // data-driven bounds when there's no data.
+          min: tsMin != null ? tsMin : 'dataMin',
+          max: tsMax != null ? tsMax : 'dataMax',
           // Format the epoch-seconds axis ticks back into human-readable UTC.
           axisLabel: {
             rotate: 35,
