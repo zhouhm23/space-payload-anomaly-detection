@@ -67,9 +67,11 @@ class CascadeDetector(BaseDetector):
     Args:
         detector:   the L2 DL detector (must implement ``BaseDetector``).
         classic:    the L1 classic filter.  If None, a default
-                    :class:`ClassicFilter` is created.
+                    :class:`ClassicFilter` is created.  Ignored when
+                    ``l1_chain`` is provided (the explicit chain wins).
         constraint: the L3 physical-constraint validator.  If None, a
-                    default :class:`PhysicalConstraint` is created.
+                    default :class:`PhysicalConstraint` is created.  Ignored
+                    when ``l3_chain`` is provided.
         skip_l2_on_l1_alert: if True, when L1 returns ``alert`` the cascade
                     skips L2 and uses L1 per-sample scores directly.  Set
                     False to always run L2 (more thorough but slower).
@@ -82,10 +84,27 @@ class CascadeDetector(BaseDetector):
                     score-type selection, freq baseline).  When None or
                     when a channel has no entry, the cascade runs in its
                     default (TSPulse-only, unflipped) mode.
+        l1_chain:   optional explicit L1 rule chain (Stage-2 per-channel
+                    configuration).  When provided, the cascade wraps it in
+                    a :class:`ClassicFilter` combinator (which handles rule
+                    aggregation — per-sample max + severity-ordered decision
+                    + SKIP short-circuit).  When None, falls back to
+                    ``classic`` or a default :class:`ClassicFilter`.
+        l3_chain:   optional explicit L3 rule chain.  When provided, wrapped
+                    in a :class:`PhysicalConstraint` combinator (which
+                    chains ``adjusted_scores`` through the modules and
+                    honours the constant-suppression early-return).  When
+                    None, falls back to ``constraint`` or a default
+                    :class:`PhysicalConstraint`.
 
     The ``n_params`` / ``model_source`` attributes are delegated to the
     wrapped L2 detector so downstream code that inspects model size still
     works.
+
+    Stage-1 compatibility: when both ``l1_chain`` and ``classic`` are None
+    (the WarningService default), the L1 path is identical to the
+    pre-refactor behaviour.  Same for L3.  This keeps every existing caller
+    and offline-eval script byte-for-byte unchanged.
     """
 
     def __init__(
@@ -96,10 +115,24 @@ class CascadeDetector(BaseDetector):
         skip_l2_on_l1_alert: bool = False,
         l1_fuse_weight: float = 0.3,
         calibration_config: CalibrationConfig | None = None,
+        l1_chain: list[BaseFilter] | None = None,
+        l3_chain: list[BaseFilter] | None = None,
     ) -> None:
         self._detector = detector
-        self._classic = classic or ClassicFilter()
-        self._constraint = constraint or PhysicalConstraint()
+        # L1: explicit chain wins, else classic, else default.  When an
+        # explicit chain is given we wrap it in a ClassicFilter combinator
+        # so rule aggregation (per-sample max, severity-ordered decision,
+        # SKIP short-circuit) is reused rather than re-implemented here.
+        if l1_chain is not None:
+            self._classic = ClassicFilter(rules=l1_chain)
+        else:
+            self._classic = classic or ClassicFilter()
+        # L3: same pattern — explicit chain wrapped in PhysicalConstraint
+        # so adjusted_scores chaining + constant early-return are reused.
+        if l3_chain is not None:
+            self._constraint = PhysicalConstraint(rules=l3_chain)
+        else:
+            self._constraint = constraint or PhysicalConstraint()
         self.skip_l2_on_l1_alert = skip_l2_on_l1_alert
         self.l1_fuse_weight = float(l1_fuse_weight)
         self.calibration_config = calibration_config

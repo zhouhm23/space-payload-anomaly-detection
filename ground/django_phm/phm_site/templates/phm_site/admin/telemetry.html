@@ -1,0 +1,495 @@
+{% extends "phm_site/admin/admin_base.html" %}
+
+{% block content %}
+<div class="phm-admin-shell">
+  <div class="phm-page-header">
+    <h1 class="phm-page-title">遥测数据管理</h1>
+    <span class="phm-text-dim" style="font-size: 13px;">
+      {% if channel %}
+        {{ channel_label }} · 共 {{ total_count }} 条
+      {% else %}
+        单通道遥测数据查询（不支持多选）
+      {% endif %}
+      {% if not is_superuser %}（仅查看，写操作需超级管理员）{% endif %}
+    </span>
+  </div>
+  <div class="phm-page-body">
+
+{# ── 筛选栏：强制单选 channel（需求书明确「不能多选」） ────────────────── #}
+<form class="phm-card phm-alert-filter" method="get" action="{% url 'phm_admin_telemetry' %}">
+  <div class="phm-flex" style="flex-wrap: wrap; gap: 12px; align-items: center;">
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">传感器 *</span>
+      <select name="channel" id="phm-tel-channel-select" class="phm-input" style="min-width: 180px;">
+        <option value="">— 选择传感器 —</option>
+        {% for ch in available_channels %}
+          <option value="{{ ch }}" {% if ch == channel %}selected{% endif %}>{{ ch }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">起</span>
+      <input type="text" name="start" value="{{ current_filters.start }}"
+             placeholder="2026-07-01 或时间戳" class="phm-input" style="width: 150px;">
+    </label>
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">止</span>
+      <input type="text" name="end" value="{{ current_filters.end }}"
+             placeholder="2026-07-21 或时间戳" class="phm-input" style="width: 150px;">
+    </label>
+    <button type="submit" class="phm-btn phm-btn-primary phm-btn-sm">筛选</button>
+    {% if channel %}
+    <a href="{% url 'phm_admin_telemetry' %}" class="phm-btn phm-btn-sm">重置</a>
+    {% endif %}
+  </div>
+</form>
+
+{% if not channel %}
+  {# ── 空状态：未选 channel ──────────────────────────────────────────── #}
+  <div class="phm-card">
+    <div class="phm-empty">
+      <div style="font-size: 36px; margin-bottom: 8px;">📊</div>
+      <p class="phm-text-sec">请先选择一个传感器查看遥测数据。</p>
+      <p class="phm-text-dim" style="font-size: 12px;">页面不实时刷新，切换后请用筛选按钮或刷新网页获取最新数据。</p>
+    </div>
+  </div>
+
+{% else %}
+  {# ── 顶部工具栏 ─────────────────────────────────────────────────────── #}
+  <div class="phm-alert-toolbar">
+    <span class="phm-text-sec phm-flex" style="font-size: 13px; gap: 12px; flex-wrap: wrap;">
+      <span>已选 <strong id="phm-tel-selected-count">0</strong> 项 · 共 {{ total_count }} 条</span>
+      {% include "phm_site/admin/_page_size_select.html" with limit=limit page_size_options=page_size_options %}
+    </span>
+    <span class="phm-flex" style="gap: 6px; flex-wrap: wrap;">
+      {% if is_superuser %}
+      <button class="phm-btn phm-btn-primary phm-btn-sm" id="phm-tel-create-btn">
+        ＋ 新增
+      </button>
+      <button class="phm-btn phm-btn-sm" id="phm-tel-delete-btn" disabled>
+        🗑 移到回收站
+      </button>
+      {% endif %}
+      <button class="phm-btn phm-btn-sm" id="phm-tel-export-btn">
+        ⬇ 导出 CSV
+      </button>
+    </span>
+  </div>
+
+  {# ── 加分项：曲线图（双向交互，点数=当前页行数） ────────────────────── #}
+  {# ECharts 在页面底部局部引入（admin_base 未全局加载） #}
+  <div class="phm-card" id="phm-tel-chart-card" style="padding: 8px 12px 4px;">
+    <div class="phm-flex-between" style="margin-bottom: 4px;">
+      <span class="phm-text-sec" style="font-size: 13px;">
+        曲线图（当前页 {{ rows|length }} 点）· 点击图上点高亮/勾选表格行，点击表格行高亮图上点
+      </span>
+      <span class="phm-text-dim" style="font-size: 11px;" id="phm-tel-chart-hint"></span>
+    </div>
+    <div id="phm-tel-chart" style="width: 100%; height: 240px;"></div>
+    <div class="phm-text-dim" id="phm-tel-chart-fallback" style="display:none; font-size: 12px; padding: 8px 0;">
+      曲线图依赖 ECharts（CDN 加载失败），表格功能不受影响。
+    </div>
+  </div>
+
+  {# ── 数据表 ─────────────────────────────────────────────────────────── #}
+  <div class="phm-card">
+    {% if rows %}
+    <div class="phm-table-wrap">
+      <table class="phm-table" id="phm-tel-table">
+        <thead>
+          <tr>
+            <th style="width: 36px;">
+              <input type="checkbox" id="phm-tel-select-all" title="全选">
+            </th>
+            <th style="width: 60px;">rowid</th>
+            <th style="width: 130px;">时间戳</th>
+            <th style="width: 180px;">UTC 时间</th>
+            <th style="width: 90px;">类型</th>
+            <th>值</th>
+            <th style="width: 80px;">来源</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+          <tr data-rowid="{{ r.id }}" id="phm-tel-row-{{ r.id }}"
+              class="{% if r.is_manual %}phm-tel-row-manual{% endif %}">
+            <td><input type="checkbox" class="phm-tel-row" value="{{ r.id }}"></td>
+            <td class="col-mono">{{ r.id }}</td>
+            <td class="col-mono phm-text-sec">{{ r.timestamp|floatformat:3 }}</td>
+            <td class="col-mono phm-text-sec">{{ r.utc_time }}</td>
+            <td>
+              {% if r.type_label == '真实' %}
+                <span class="phm-badge phm-badge-blue">真实</span>
+              {% elif r.type_label == '预测' %}
+                <span class="phm-badge phm-badge-yellow">预测</span>
+              {% elif r.type_label == '真实+预测' %}
+                <span class="phm-badge phm-badge-cyan">真实+预测</span>
+              {% else %}
+                <span class="phm-badge phm-badge-gray">{{ r.type_label }}</span>
+              {% endif %}
+            </td>
+            <td class="col-num">
+              {{ r.value_display }}
+              {% if r.unit %}<span class="phm-text-dim" style="margin-left:2px; font-size:11px;">{{ r.unit }}</span>{% endif %}
+            </td>
+            <td>
+              {% if r.is_manual %}
+                <span class="phm-badge phm-badge-yellow">{{ r.origin_label }}</span>
+              {% else %}
+                <span class="phm-text-dim">{{ r.origin_label }}</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% else %}
+    <div class="phm-empty">
+      <div style="font-size: 36px; margin-bottom: 8px;">📭</div>
+      <p class="phm-text-sec">该传感器在当前筛选条件下没有遥测数据。</p>
+      <p class="phm-text-dim" style="font-size: 12px;">可放宽时间范围，或点「新增」手动补录一条。</p>
+    </div>
+    {% endif %}
+
+    {% include "phm_site/admin/_pagination.html" with total_count=total_count page=page total_pages=total_pages page_range=page_range current_filters=current_filters limit=limit page_size_default=20 %}
+  </div>
+
+  {# ── 新增模态框 ─────────────────────────────────────────────────────── #}
+  <div class="phm-drawer-mask" id="phm-tel-create-mask">
+    <div class="phm-alert-confirm-dialog" style="max-width: 480px;">
+      <h3 style="margin: 0 0 12px;">＋ 手动补录遥测数据</h3>
+      <p class="phm-text-sec" style="margin: 0 0 12px; font-size: 13px;">
+        用于补录遗漏的采样点。同一时间戳会被覆盖（INSERT OR REPLACE）。手动行 origin=manual，不进采集链路。
+      </p>
+      <div class="phm-form-grid">
+        <label class="phm-form-field">
+          <span>传感器 *</span>
+          <select id="phm-tel-create-channel" class="phm-input">
+            {% for ch in available_channels %}
+              <option value="{{ ch }}" {% if ch == channel %}selected{% endif %}>{{ ch }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="phm-form-field">
+          <span>时间戳 *</span>
+          <input type="text" id="phm-tel-create-ts" class="phm-input" placeholder="1700000000 或 2026-07-21T12:00:00">
+        </label>
+        <label class="phm-form-field">
+          <span>真实值</span>
+          <input type="text" id="phm-tel-create-raw" class="phm-input" placeholder="0.123">
+        </label>
+        <label class="phm-form-field">
+          <span>预测值</span>
+          <input type="text" id="phm-tel-create-pred" class="phm-input" placeholder="0.456">
+        </label>
+      </div>
+      <div class="phm-flex-between" style="margin-top: 12px;">
+        <button class="phm-btn phm-btn-sm" id="phm-tel-create-cancel">取消</button>
+        <button class="phm-btn phm-btn-primary phm-btn-sm" id="phm-tel-create-ok">提交</button>
+      </div>
+    </div>
+  </div>
+{% endif %}
+
+  </div>{% comment %}close phm-page-body{% endcomment %}
+</div>{% comment %}close phm-admin-shell{% endcomment %}
+
+{# Local styles: manual-row highlight + chart↔table row highlight. #}
+<style>
+  .phm-tel-row-manual td { background: rgba(255, 193, 7, 0.08); }
+  #phm-tel-table tbody tr { cursor: pointer; }
+  #phm-tel-table tbody tr.phm-tel-row-highlight td { background: rgba(33, 150, 243, 0.18) !important; }
+</style>
+
+<script>
+(function () {
+  'use strict';
+
+  // Current-page rows injected by the server (same array the table renders).
+  // Each item: {id, timestamp, utc_time, raw_value, predicted_value,
+  //              type_label, value_display, origin_label, is_manual, unit}.
+  var ROWS = {{ rows_json|safe }};
+  var ROWS_BY_ID = {};
+  ROWS.forEach(function (r, i) { r._idx = i; ROWS_BY_ID[r.id] = r; });
+
+  var CREATE_API = "{{ api_create_url|escapejs }}";
+  var DELETE_API = "{{ api_delete_url|escapejs }}";
+  var EXPORT_API = "{{ api_export_url|escapejs }}";
+
+  function init() {
+    if (!window.PHM || !PHM.fetchJSON) return;
+
+    var rowChecks = Array.prototype.slice.call(document.querySelectorAll('.phm-tel-row'));
+    var selectAll = document.getElementById('phm-tel-select-all');
+    var deleteBtn = document.getElementById('phm-tel-delete-btn');
+    var exportBtn = document.getElementById('phm-tel-export-btn');
+    var createBtn = document.getElementById('phm-tel-create-btn');
+    var countEl = document.getElementById('phm-tel-selected-count');
+
+    function selectedIds() {
+      return rowChecks.filter(function (c) { return c.checked; })
+                       .map(function (c) { return parseInt(c.value, 10); });
+    }
+    function syncButtonState() {
+      var ids = selectedIds();
+      if (countEl) countEl.textContent = String(ids.length);
+      if (deleteBtn) deleteBtn.disabled = (ids.length === 0);
+      if (selectAll) selectAll.checked = (ids.length > 0 && ids.length === rowChecks.length);
+    }
+    if (selectAll) {
+      selectAll.addEventListener('change', function () {
+        rowChecks.forEach(function (c) { c.checked = selectAll.checked; });
+        syncButtonState();
+      });
+    }
+    rowChecks.forEach(function (c) {
+      c.addEventListener('change', function (e) {
+        e.stopPropagation();
+        syncButtonState();
+      });
+    });
+    syncButtonState();
+
+    // ── Chart ↔ table bidirectional interaction ──────────────────────
+    // Points and table rows share the same ROWS array; rowid (r.id) is the
+    // join key. Chart point click → highlight + check the table row; table
+    // row click → highlight the chart point.
+    var chart = null;
+    var chartPointEls = [];  // not used (ECharts uses dispatchAction)
+
+    function highlightRow(rowid, scroll) {
+      var tr = document.getElementById('phm-tel-row-' + rowid);
+      if (!tr) return;
+      document.querySelectorAll('#phm-tel-table tbody tr.phm-tel-row-highlight')
+        .forEach(function (el) { el.classList.remove('phm-tel-row-highlight'); });
+      tr.classList.add('phm-tel-row-highlight');
+      if (scroll) tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function highlightChartPoint(rowid) {
+      if (!chart) return;
+      var r = ROWS_BY_ID[rowid];
+      if (!r) return;
+      // Clear all highlights first, then highlight the picked dataIndex.
+      ROWS.forEach(function (rr) {
+        chart.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: rr._idx });
+      });
+      chart.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: r._idx });
+      chart.dispatchAction({ type: 'showTip', seriesIndex: 0, dataIndex: r._idx });
+    }
+
+    // Table row click → highlight chart point (clicks on the checkbox do not
+    // propagate here — they stopPropagation above).
+    document.querySelectorAll('#phm-tel-table tbody tr').forEach(function (tr) {
+      tr.addEventListener('click', function () {
+        var rowid = parseInt(tr.getAttribute('data-rowid'), 10);
+        if (isNaN(rowid)) return;
+        highlightRow(rowid, false);
+        highlightChartPoint(rowid);
+      });
+    });
+
+    // Build the chart once ECharts is available.
+    function buildChart() {
+      var dom = document.getElementById('phm-tel-chart');
+      if (!dom || typeof echarts === 'undefined') {
+        var fb = document.getElementById('phm-tel-chart-fallback');
+        if (fb) fb.style.display = 'block';
+        var hint = document.getElementById('phm-tel-chart-hint');
+        if (hint) hint.textContent = '图表不可用';
+        return;
+      }
+      chart = echarts.init(dom);
+      // Plot chronological (ascending): the table is newest-first; we reverse
+      // a copy so the chart reads left-to-right oldest→newest. Each datum
+      // carries the rowid so the click handler can map back to the table row.
+      var asc = ROWS.slice().reverse();
+      // Prefer raw_value, fall back to predicted_value for the y-axis.
+      // x-axis uses the numeric epoch timestamp (r.timestamp) on a VALUE axis.
+      // A category axis keyed by utc_time would collapse points that share the
+      // same whole-second label (100 Hz → 100 points/sec), which made 20-point
+      // pages render as 1–2 dots.  The value axis keeps every point distinct.
+      var dataPts = asc.map(function (r) {
+        var v = (r.raw_value != null) ? r.raw_value : r.predicted_value;
+        var ts = parseFloat(r.timestamp);
+        return {
+          value: [isNaN(ts) ? null : ts, v],
+          rowid: r.id, raw: r.raw_value, pred: r.predicted_value,
+          utc_time: r.utc_time,
+        };
+      }).filter(function (p) { return p.value[0] != null; });
+      chart.setOption({
+        grid: { left: 56, right: 16, top: 16, bottom: 60 },
+        tooltip: {
+          trigger: 'item',
+          formatter: function (p) {
+            var d = p.data;
+            var html = d.rowid != null ? ('rowid: <b>' + d.rowid + '</b><br>') : '';
+            if (d.raw != null) html += '真实: ' + Number(d.raw).toFixed(3) + '<br>';
+            if (d.pred != null) html += '预测: ' + Number(d.pred).toFixed(3) + '<br>';
+            html += d.utc_time || '';
+            return html;
+          },
+        },
+        xAxis: {
+          type: 'value',
+          // Format the epoch-seconds axis ticks back into human-readable UTC.
+          axisLabel: {
+            rotate: 35,
+            fontSize: 10,
+            formatter: function (val) {
+              var d = new Date(val * 1000);
+              var hh = String(d.getUTCHours()).padStart(2, '0');
+              var mm = String(d.getUTCMinutes()).padStart(2, '0');
+              var ss = String(d.getUTCSeconds()).padStart(2, '0');
+              var ms = String(d.getUTCMilliseconds()).padStart(3, '0');
+              return hh + ':' + mm + ':' + ss + '.' + ms;
+            },
+          },
+        },
+        yAxis: { type: 'value', scale: true },
+        series: [{
+          type: 'line',
+          data: dataPts,
+          symbolSize: 8,
+          emphasis: { focus: 'self', itemStyle: { borderColor: '#1565c0', borderWidth: 2 } },
+        }],
+      });
+      chart.on('click', function (params) {
+        if (!params || params.data == null) return;
+        var rowid = params.data.rowid;
+        if (rowid == null) return;
+        highlightRow(rowid, true);
+        // Toggle the row's checkbox so the click doubles as a selection.
+        var cb = document.querySelector('.phm-tel-row[value="' + rowid + '"]');
+        if (cb) { cb.checked = !cb.checked; syncButtonState(); }
+      });
+      // Resize with the window.
+      window.addEventListener('resize', function () { if (chart) chart.resize(); });
+      var hint = document.getElementById('phm-tel-chart-hint');
+      if (hint) hint.textContent = '点数 = ' + dataPts.length;
+    }
+
+    // Load ECharts from CDN if not already present, then build the chart.
+    // On failure the table still works (graceful degradation).
+    if (typeof echarts === 'undefined') {
+      var s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js';
+      s.onload = buildChart;
+      s.onerror = buildChart;  // buildChart handles the missing-echarts case
+      document.head.appendChild(s);
+    } else {
+      buildChart();
+    }
+
+    // ── Delete (soft-delete → recycle bin) ────────────────────────────
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', function () {
+        var ids = selectedIds();
+        if (ids.length === 0) return;
+        if (!window.confirm('将选中的 ' + ids.length + ' 条遥测数据移到回收站？')) return;
+        var channel = document.getElementById('phm-tel-channel-select').value;
+        deleteBtn.disabled = true;
+        PHM.fetchJSON(DELETE_API, {
+          method: 'POST', body: { channel: channel, rowids: ids },
+        }).then(function (data) {
+          if (data.status === 'ok') {
+            PHM.toast('已移到回收站 ' + data.deleted + '/' + ids.length + ' 条', 'success');
+            setTimeout(function () { window.location.reload(); }, 800);
+          } else {
+            throw new Error(data.message || '删除失败');
+          }
+        }).catch(function (e) {
+          PHM.toast('删除失败：' + e.message, 'error', 5000);
+          deleteBtn.disabled = false;
+        });
+      });
+    }
+
+    // ── Export CSV ────────────────────────────────────────────────────
+    if (exportBtn) {
+      exportBtn.addEventListener('click', function () {
+        var channel = document.getElementById('phm-tel-channel-select').value;
+        var params = new URLSearchParams(window.location.search);
+        params.set('channel', channel);
+        window.location.href = EXPORT_API + '?' + params.toString();
+      });
+    }
+
+    // ── Page-size select + jump (reuse the pagination pattern) ───────
+    var sizeSelect = document.querySelector('.phm-page-size-select');
+    function gotoPage(newPage, newLimit) {
+      var params = new URLSearchParams(window.location.search);
+      params.delete('page');
+      if (newLimit != null) params.set('limit', newLimit);
+      if (newPage) params.set('page', newPage);
+      window.location.href = '?' + (params.toString() || 'page=1');
+    }
+    if (sizeSelect) {
+      sizeSelect.addEventListener('change', function () { gotoPage(1, this.value); });
+    }
+    var jumpInput = document.querySelector('.phm-page-jump-input');
+    var jumpBtn = document.querySelector('.phm-page-jump-btn');
+    function doJump() {
+      if (!jumpInput) return;
+      var total = parseInt(jumpInput.getAttribute('data-total-pages'), 10) || 1;
+      var n = parseInt(jumpInput.value, 10);
+      if (isNaN(n)) return;
+      n = Math.max(1, Math.min(n, total));
+      gotoPage(n, null);
+    }
+    if (jumpBtn) jumpBtn.addEventListener('click', doJump);
+    if (jumpInput) jumpInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); doJump(); }
+    });
+
+    // ── Create (super-admin) ──────────────────────────────────────────
+    var createMask = document.getElementById('phm-tel-create-mask');
+    var createOk = document.getElementById('phm-tel-create-ok');
+    var createCancel = document.getElementById('phm-tel-create-cancel');
+    if (createBtn) {
+      createBtn.addEventListener('click', function () { createMask.classList.add('active'); });
+    }
+    if (createCancel) createCancel.addEventListener('click', function () { createMask.classList.remove('active'); });
+    if (createMask) createMask.addEventListener('click', function (e) { if (e.target === createMask) createMask.classList.remove('active'); });
+    if (createOk) {
+      createOk.addEventListener('click', function () {
+        var channel = document.getElementById('phm-tel-create-channel').value.trim();
+        var ts = document.getElementById('phm-tel-create-ts').value.trim();
+        var raw = document.getElementById('phm-tel-create-raw').value.trim();
+        var pred = document.getElementById('phm-tel-create-pred').value.trim();
+        if (!channel) { PHM.toast('传感器必填', 'error'); return; }
+        if (!ts) { PHM.toast('时间戳必填', 'error'); return; }
+        var body = { channel: channel, timestamp: ts };
+        if (raw) body.raw_value = parseFloat(raw);
+        if (pred) body.predicted_value = parseFloat(pred);
+        if ((raw && isNaN(body.raw_value)) || (pred && isNaN(body.predicted_value))) {
+          PHM.toast('值必须为数字', 'error'); return;
+        }
+        createOk.disabled = true;
+        PHM.fetchJSON(CREATE_API, { method: 'POST', body: body })
+          .then(function (data) {
+            if (data.status === 'ok') {
+              PHM.toast('已补录遥测行 (channel=' + data.channel + ')', 'success');
+              setTimeout(function () { window.location.reload(); }, 800);
+            } else {
+              throw new Error(data.message || '补录失败');
+            }
+          }).catch(function (e) {
+            PHM.toast('补录失败：' + e.message, 'error', 5000);
+            createOk.disabled = false;
+          });
+      });
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
+{% endblock %}

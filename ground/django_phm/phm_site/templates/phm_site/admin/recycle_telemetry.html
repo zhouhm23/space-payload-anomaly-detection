@@ -1,0 +1,344 @@
+{% extends "phm_site/admin/admin_base.html" %}
+
+{% block content %}
+<div class="phm-admin-shell">
+  <div class="phm-page-header">
+    <h1 class="phm-page-title">遥测回收站</h1>
+    <span class="phm-text-dim" style="font-size: 13px;">
+      {% if channel %}
+        {{ channel_label }} · 已软删 {{ total_count }} 条
+      {% else %}
+        单通道遥测数据回收站（先选择传感器）
+      {% endif %}
+    </span>
+    <a href="{% url 'phm_admin_recycle' %}" class="phm-btn phm-btn-sm"
+       style="margin-left: 12px;">← 返回告警回收站</a>
+  </div>
+  <div class="phm-page-body">
+
+{# ── 强制单选 channel（同遥测管理页；遥测表是 per-channel 的） ──────────── #}
+<form class="phm-card phm-alert-filter" method="get" action="{% url 'phm_admin_recycle' %}">
+  <div class="phm-flex" style="flex-wrap: wrap; gap: 12px; align-items: center;">
+    <input type="hidden" name="type" value="telemetry">
+    <label class="phm-filter-field">
+      <span class="phm-text-dim">传感器 *</span>
+      <select name="channel" id="phm-recycle-tel-channel-select" class="phm-input" style="min-width: 180px;">
+        <option value="">— 选择传感器 —</option>
+        {% for ch in available_channels %}
+          <option value="{{ ch }}" {% if ch == channel %}selected{% endif %}>{{ ch }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit" class="phm-btn phm-btn-primary phm-btn-sm">查看</button>
+    {% if channel %}
+    <a href="{% url 'phm_admin_recycle' %}?type=telemetry" class="phm-btn phm-btn-sm">重置</a>
+    {% endif %}
+  </div>
+</form>
+
+{# ── 非超管提示 ──────────────────────────────────────────────────────── #}
+{% if not is_superuser %}
+<div class="phm-card" style="background: rgba(230,162,60,0.06); border-color: var(--phm-yellow);">
+  <div class="phm-flex" style="gap: 8px;">
+    <span style="font-size: 14px;">⚠️</span>
+    <p class="phm-text-sec" style="margin: 0; font-size: 13px;">
+      当前角色为<strong>普通管理员</strong>，仅可查看回收站内容。<strong>恢复</strong>与<strong>永久删除</strong>需超级管理员权限。
+    </p>
+  </div>
+</div>
+{% endif %}
+
+{% if not channel %}
+  {# ── 空状态：未选 channel ──────────────────────────────────────────── #}
+  <div class="phm-card">
+    <div class="phm-empty">
+      <div style="font-size: 36px; margin-bottom: 8px;">🗑️</div>
+      <p class="phm-text-sec">请先选择一个传感器，查看该通道被移到回收站的遥测数据。</p>
+    </div>
+  </div>
+
+{% else %}
+  {# ── 顶部工具栏（超管可写；普通 staff 只读） ────────────────────────── #}
+  {% if is_superuser and rows %}
+  <div class="phm-recycle-toolbar">
+    <span class="phm-text-sec phm-flex" style="font-size: 13px; gap: 12px; flex-wrap: wrap;">
+      <span>已选 <strong id="phm-recycle-selected-count">0</strong> 项 · 共 {{ total_count }} 条</span>
+      {% include "phm_site/admin/_page_size_select.html" with limit=limit page_size_options=page_size_options %}
+    </span>
+    <span class="phm-flex" style="gap: 8px;">
+      <button class="phm-btn phm-btn-primary phm-btn-sm" id="phm-recycle-restore-btn" disabled>
+        ↩ 恢复选中
+      </button>
+      <button class="phm-btn phm-btn-danger phm-btn-sm" id="phm-recycle-purge-btn" disabled>
+        ✕ 永久删除选中
+      </button>
+    </span>
+  </div>
+  {% elif rows %}
+  <div class="phm-recycle-toolbar">
+    <span class="phm-text-sec phm-flex" style="font-size: 13px; gap: 12px; flex-wrap: wrap;">
+      <span>共 {{ total_count }} 条</span>
+      {% include "phm_site/admin/_page_size_select.html" with limit=limit page_size_options=page_size_options %}
+    </span>
+  </div>
+  {% endif %}
+
+  {# ── 数据表 ─────────────────────────────────────────────────────────── #}
+  <div class="phm-card">
+    {% if rows %}
+    <div class="phm-table-wrap">
+      <table class="phm-table">
+        <thead>
+          <tr>
+            <th style="width: 36px;">
+              {% if is_superuser %}<input type="checkbox" id="phm-recycle-select-all" title="全选">{% else %}—{% endif %}
+            </th>
+            <th style="width: 60px;">rowid</th>
+            <th style="width: 130px;">时间戳</th>
+            <th style="width: 180px;">UTC 时间</th>
+            <th style="width: 90px;">类型</th>
+            <th>值</th>
+            <th style="width: 80px;">来源</th>
+            <th>删除时间(UTC)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+          <tr data-id="{{ r.id }}">
+            <td>{% if is_superuser %}<input type="checkbox" class="phm-recycle-row" value="{{ r.id }}">{% else %}—{% endif %}</td>
+            <td class="col-mono">{{ r.id }}</td>
+            <td class="col-mono phm-text-sec">{{ r.timestamp|floatformat:3 }}</td>
+            <td class="col-mono phm-text-sec">{{ r.utc_time }}</td>
+            <td>
+              {% if r.type_label == '真实' %}
+                <span class="phm-badge phm-badge-blue">真实</span>
+              {% elif r.type_label == '预测' %}
+                <span class="phm-badge phm-badge-yellow">预测</span>
+              {% elif r.type_label == '真实+预测' %}
+                <span class="phm-badge phm-badge-cyan">真实+预测</span>
+              {% else %}
+                <span class="phm-badge phm-badge-gray">{{ r.type_label }}</span>
+              {% endif %}
+            </td>
+            <td class="col-num">
+              {{ r.value_display }}
+              {% if r.unit %}<span class="phm-text-dim" style="margin-left:2px; font-size:11px;">{{ r.unit }}</span>{% endif %}
+            </td>
+            <td>
+              {% if r.is_manual %}
+                <span class="phm-badge phm-badge-yellow">{{ r.origin_label }}</span>
+              {% else %}
+                <span class="phm-text-dim">{{ r.origin_label }}</span>
+              {% endif %}
+            </td>
+            <td class="col-mono phm-text-dim" data-ts="{{ r.deleted_at }}">—</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% else %}
+    <div class="phm-empty">
+      <div style="font-size: 36px; margin-bottom: 8px;">🗑️</div>
+      <p class="phm-text-sec">该传感器没有被移到回收站的遥测数据。</p>
+    </div>
+    {% endif %}
+
+    {% include "phm_site/admin/_pagination.html" with total_count=total_count page=page total_pages=total_pages page_range=page_range current_filters=current_filters limit=limit page_size_default=20 %}
+  </div>
+{% endif %}
+
+  </div>{% comment %}close phm-page-body{% endcomment %}
+</div>{% comment %}close phm-admin-shell{% endcomment %}
+
+{# ── 二次确认对话框（永久删除专用） ──────────────────────────────── #}
+<div class="phm-drawer-mask" id="phm-recycle-confirm-mask" style="display: none;">
+  <div class="phm-recycle-confirm-dialog">
+    <h3 style="color: var(--phm-red); margin: 0 0 12px;">⚠️ 确认永久删除？</h3>
+    <p class="phm-text-sec" style="margin: 0 0 16px; font-size: 13px; line-height: 1.6;">
+      将对选中的 <strong id="phm-recycle-confirm-count" style="color: var(--phm-red);">0</strong> 条遥测数据
+      执行<strong style="color: var(--phm-red);">物理删除</strong>。此操作<strong>不可恢复</strong>，数据将从数据库彻底消失。
+    </p>
+    <div class="phm-flex-between">
+      <button class="phm-btn phm-btn-sm" id="phm-recycle-confirm-cancel">取消</button>
+      <button class="phm-btn phm-btn-danger phm-btn-sm" id="phm-recycle-confirm-ok">确认永久删除</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  function init() {
+    if (!window.PHM || !PHM.fetchJSON) return;
+
+    // 时间戳格式化（删除时间列）
+    function fmtTs(ts) {
+      if (window.PHM && PHM.fmtTimestamp) return PHM.fmtTimestamp(ts);
+      var d = new Date(ts * 1000);
+      if (isNaN(d.getTime())) return '—';
+      var pad = function (n) { return n < 10 ? '0' + n : n; };
+      return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()) +
+             ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds()) + ' UTC';
+    }
+    Array.prototype.forEach.call(
+      document.querySelectorAll('td[data-ts]'),
+      function (el) {
+        var ts = el.getAttribute('data-ts');
+        if (!ts) { el.textContent = '—'; return; }
+        el.textContent = fmtTs(parseFloat(ts));
+      }
+    );
+
+    {% if not is_superuser %}
+    // 普通管理员无写权限，不绑定批量按钮
+    return;
+    {% endif %}
+
+    var CHANNEL = "{{ channel|escapejs }}";
+    var RESTORE_URL = "{% url 'phm_admin_recycle_restore' %}";
+    var PURGE_URL = "{% url 'phm_admin_recycle_purge' %}";
+
+    var selectAll = document.getElementById('phm-recycle-select-all');
+    var rowChecks = Array.prototype.slice.call(document.querySelectorAll('.phm-recycle-row'));
+    var restoreBtn = document.getElementById('phm-recycle-restore-btn');
+    var purgeBtn = document.getElementById('phm-recycle-purge-btn');
+    var countEl = document.getElementById('phm-recycle-selected-count');
+
+    if (!restoreBtn || !purgeBtn || !CHANNEL) return;
+
+    function selectedIds() {
+      return rowChecks.filter(function (c) { return c.checked; })
+                       .map(function (c) { return parseInt(c.value, 10); });
+    }
+    function syncButtonState() {
+      var ids = selectedIds();
+      var n = ids.length;
+      if (countEl) countEl.textContent = String(n);
+      if (restoreBtn) restoreBtn.disabled = (n === 0);
+      if (purgeBtn) purgeBtn.disabled = (n === 0);
+      if (selectAll) selectAll.checked = (n > 0 && n === rowChecks.length);
+    }
+
+    if (selectAll) {
+      selectAll.addEventListener('change', function () {
+        rowChecks.forEach(function (c) { c.checked = selectAll.checked; });
+        syncButtonState();
+      });
+    }
+    rowChecks.forEach(function (c) { c.addEventListener('change', syncButtonState); });
+    syncButtonState();
+
+    // 恢复：直接 AJAX（可逆操作）
+    restoreBtn.addEventListener('click', function () {
+      var ids = selectedIds();
+      if (ids.length === 0) return;
+      restoreBtn.disabled = true;
+      PHM.fetchJSON(RESTORE_URL, {
+        method: 'POST',
+        body: { type: 'telemetry', channel: CHANNEL, ids: ids }
+      }).then(function (data) {
+        if (data && data.status === 'ok') {
+          PHM.toast('已恢复 ' + data.restored + ' 条' + (data.restored === ids.length ? '' : '（部分命中）'), 'success');
+          setTimeout(function () { window.location.reload(); }, 600);
+        } else {
+          throw new Error((data && data.message) || '恢复失败');
+        }
+      }).catch(function (e) {
+        PHM.toast('恢复失败：' + e.message, 'error', 5000);
+        restoreBtn.disabled = false;
+      });
+    });
+
+    // 永久删除：必须走二次确认对话框
+    var confirmMask = document.getElementById('phm-recycle-confirm-mask');
+    var confirmCount = document.getElementById('phm-recycle-confirm-count');
+    var confirmOk = document.getElementById('phm-recycle-confirm-ok');
+    var confirmCancel = document.getElementById('phm-recycle-confirm-cancel');
+    var pendingIds = [];
+
+    purgeBtn.addEventListener('click', function () {
+      var ids = selectedIds();
+      if (ids.length === 0) return;
+      pendingIds = ids;
+      if (confirmCount) confirmCount.textContent = String(ids.length);
+      confirmMask.style.display = '';
+    });
+    if (confirmCancel) {
+      confirmCancel.addEventListener('click', function () {
+        confirmMask.style.display = 'none';
+        pendingIds = [];
+      });
+    }
+    if (confirmMask) {
+      confirmMask.addEventListener('click', function (e) {
+        if (e.target === confirmMask) {
+          confirmMask.style.display = 'none';
+          pendingIds = [];
+        }
+      });
+    }
+    if (confirmOk) {
+      confirmOk.addEventListener('click', function () {
+        if (pendingIds.length === 0) return;
+        confirmOk.disabled = true;
+        PHM.fetchJSON(PURGE_URL, {
+          method: 'POST',
+          body: { type: 'telemetry', channel: CHANNEL, ids: pendingIds }
+        }).then(function (data) {
+          if (data && data.status === 'ok') {
+            PHM.toast('已永久删除 ' + data.purged + ' 条', 'success');
+            setTimeout(function () { window.location.reload(); }, 600);
+          } else {
+            throw new Error((data && data.message) || '删除失败');
+          }
+        }).catch(function (e) {
+          PHM.toast('删除失败：' + e.message, 'error', 5000);
+          confirmOk.disabled = false;
+          confirmMask.style.display = 'none';
+        }).finally(function () {
+          pendingIds = [];
+        });
+      });
+    }
+
+    // ── 分页跳转 + 每页数量 ───────────────────────────────────────
+    function gotoPage(newPage, newLimit) {
+      var params = new URLSearchParams(window.location.search);
+      params.delete('page');
+      if (newLimit != null) {
+        params.set('limit', newLimit);
+      }
+      if (newPage) params.set('page', newPage);
+      var qs = params.toString();
+      window.location.href = '?' + (qs || 'page=1');
+    }
+    var sizeSelect = document.querySelector('.phm-page-size-select');
+    if (sizeSelect) {
+      sizeSelect.addEventListener('change', function () { gotoPage(1, this.value); });
+    }
+    var jumpInput = document.querySelector('.phm-page-jump-input');
+    var jumpBtn = document.querySelector('.phm-page-jump-btn');
+    function doJump() {
+      if (!jumpInput) return;
+      var total = parseInt(jumpInput.getAttribute('data-total-pages'), 10) || 1;
+      var n = parseInt(jumpInput.value, 10);
+      if (isNaN(n)) return;
+      n = Math.max(1, Math.min(n, total));
+      gotoPage(n, null);
+    }
+    if (jumpBtn) jumpBtn.addEventListener('click', doJump);
+    if (jumpInput) jumpInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); doJump(); }
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
+{% endblock %}

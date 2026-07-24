@@ -355,6 +355,24 @@ class ChannelCalibration:
             :class:`FreqFeatureExtractor.transform` to map scores onto
             ``[0, 1]``.  Required when ``score_type`` involves freq; absent
             on older JSONs forces the legacy per-call MinMax fallback.
+        l1_modules: reserved — Stage-2 per-channel L1 rule chain (list of
+            :data:`FILTER_REGISTRY` names).  Not consumed by the cascade
+            in Stage-1; the schema is in place so future channel
+            calibration JSONs can carry it without a format break.
+        l3_modules: reserved — Stage-2 per-channel L3 rule chain (same
+            format as ``l1_modules``).
+        module_params: reserved — Stage-2 per-channel parameter overrides
+            for individual rule modules (``{module_name: {kwarg: value}}``).
+            Not consumed in Stage-1.
+        detector_model: DSL-derived — the L2 model name chosen via
+            ``@算法`` (e.g. ``"tspulse"``).  ``None`` means "use the system
+            default detector".  Mutually exclusive with ``skip_detector``.
+        skip_detector: DSL-derived — set by ``@跳过模型``; the channel
+            deliberately bypasses L2 (typical for command/status channels).
+        threshold_override: DSL-derived — dimensionless score trigger line
+            in ``[0,1]`` set by ``@阈值``.  ``None`` means "use the offline
+            ``threshold`` field above".  Distinct from physical-quantity
+            thresholds (which are module params under ``module_params``).
     """
 
     flip: bool = False
@@ -365,6 +383,21 @@ class ChannelCalibration:
     freq_band_std: list[float] | None = None
     freq_z_min: float | None = None
     freq_z_max: float | None = None
+    # ── Stage-2 schema reservations (Stage-1: written/read, not consumed) ──
+    l1_modules: list[str] | None = None
+    l3_modules: list[str] | None = None
+    module_params: dict[str, dict[str, Any]] | None = None
+    # ── DSL-derived per-channel explicit pipeline (from @commands) ──
+    # Populated by ``sensor_dsl.to_calibration`` when the scientist writes
+    # ``@算法`` / ``@跳过模型`` / ``@阈值`` in the device-tree description.
+    # ``detector_model`` is the L2 model name picked from MODEL_REGISTRY
+    # (None = use the default detector, currently tspulse).  ``skip_detector``
+    # is set by ``@跳过模型`` and is mutually exclusive with a detector model.
+    # ``threshold_override`` is the dimensionless score trigger line in
+    # [0,1]; None = use the offline-calibrated ``threshold`` field above.
+    detector_model: str | None = None
+    skip_detector: bool = False
+    threshold_override: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -373,6 +406,16 @@ class ChannelCalibration:
     def from_dict(cls, d: dict[str, Any]) -> "ChannelCalibration":
         z_min = d.get("freq_z_min")
         z_max = d.get("freq_z_max")
+        # Stage-2 reserved fields are read defensively — unknown / wrong
+        # shape falls back to None so an older JSON or a hand-edited entry
+        # cannot crash the loader.
+        l1_mod = d.get("l1_modules")
+        l3_mod = d.get("l3_modules")
+        mod_params = d.get("module_params")
+        # DSL-derived fields are also read defensively: an older JSON (no
+        # @command DSL yet) simply yields the defaults so existing
+        # channel_calibration.json files keep loading unchanged.
+        thr_override = d.get("threshold_override")
         return cls(
             flip=bool(d.get("flip", False)),
             score_type=str(d.get("score_type", "tsp")),
@@ -382,6 +425,17 @@ class ChannelCalibration:
             freq_band_std=d.get("freq_band_std"),
             freq_z_min=float(z_min) if z_min is not None else None,
             freq_z_max=float(z_max) if z_max is not None else None,
+            l1_modules=list(l1_mod) if isinstance(l1_mod, list) else None,
+            l3_modules=list(l3_mod) if isinstance(l3_mod, list) else None,
+            module_params=dict(mod_params) if isinstance(mod_params, dict) else None,
+            detector_model=(
+                str(d.get("detector_model"))
+                if d.get("detector_model") is not None else None
+            ),
+            skip_detector=bool(d.get("skip_detector", False)),
+            threshold_override=(
+                float(thr_override) if thr_override is not None else None
+            ),
         )
 
 
@@ -444,6 +498,46 @@ class CalibrationConfig:
     @property
     def channels(self) -> list[str]:
         return list(self._cal.keys())
+
+    def upsert(self, channel: str, cal: ChannelCalibration) -> None:
+        """Insert or replace one channel's calibration and persist to JSON.
+
+        Used by the ``@command`` DSL save hook: when a scientist edits a
+        sensor description and the parsed config passes validation, the
+        resulting :class:`ChannelCalibration` is written here so the
+        runtime cascade picks it up on the next reload.
+
+        The on-disk JSON is rewritten atomically — the dict is serialised
+        to a temporary string first and only written if serialisation
+        succeeds, so a malformed dataclass cannot truncate the existing
+        file.  Missing parent directory is created on demand so a fresh
+        ``config_path`` (e.g. in tests) works without pre-setup.
+        """
+        self._cal[channel] = cal
+        self.save()
+
+    def save(self) -> None:
+        """Persist the current in-memory calibrations to ``config_path``.
+
+        Rewrites the whole JSON file.  Atomicity is best-effort: the
+        payload is serialised to text before opening the file for write,
+        so the previous file is only overwritten when serialisation
+        succeeds.  Callers that need crash-proof atomicity should layer
+        their own tempfile + rename on top.
+        """
+        payload = {ch: cal.to_dict() for ch, cal in self._cal.items()}
+        # Serialise first so a bad payload cannot truncate the existing file.
+        text = json.dumps(payload, indent=2, ensure_ascii=False)
+        parent = os.path.dirname(self.config_path)
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent, exist_ok=True)
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        logger.info(
+            "wrote channel calibration for %d channels to %s",
+            len(self._cal),
+            self.config_path,
+        )
 
 
 # ---------------------------------------------------------------------------

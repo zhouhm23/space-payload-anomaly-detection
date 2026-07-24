@@ -570,6 +570,7 @@
           if (data.status !== 'ok') throw new Error(data.message || '加载失败');
           var a = data.alert;
           var d = data.diagnosis;
+          var si = data.sensor_info || null;
           var html = '';
           // 基本信息卡片
           html += '<div class="phm-card" style="margin-bottom:12px;">';
@@ -587,6 +588,33 @@
                   '<tr><td class="phm-text-dim">综合状态</td><td id="phm-alert-drawer-final-cell">' + finalStatusBadgeHTML(a.final_status) + '</td></tr>' +
                   '</tbody></table>';
           html += '</div>';
+
+          // 传感器信息块（v1.2：抽屉顶部，波形图快照之前；只读展示）
+          if (si) {
+            html += '<div class="phm-card" style="margin-bottom:12px;">';
+            html += '<div class="phm-flex-between"><h4 class="phm-card-title" style="margin:0;">传感器信息</h4>';
+            if (si.is_special) {
+              html += '<span class="phm-badge phm-badge-red">★ 特殊传感器</span>';
+            }
+            html += '</div>';
+            var thresholdText = '—';
+            if (si.threshold !== null && si.threshold !== undefined) {
+              thresholdText = Number(si.threshold).toFixed(3);
+              if (si.threshold_name) thresholdText += ' <span class="phm-text-dim" style="font-size:11px;">(' + PHM.escapeHTML(si.threshold_name) + ')</span>';
+            }
+            html += '<table class="phm-table"><tbody>' +
+                    '<tr><td class="phm-text-dim">名称</td><td>' + PHM.escapeHTML(si.display_name || '—') + '</td></tr>' +
+                    '<tr><td class="phm-text-dim">通道</td><td class="col-mono">' + PHM.escapeHTML(si.channel || '—') + '</td></tr>' +
+                    '<tr><td class="phm-text-dim">量程</td><td>' + PHM.escapeHTML(si.range || '—') + (si.unit ? ' <span class="phm-text-dim" style="font-size:11px;">' + PHM.escapeHTML(si.unit) + '</span>' : '') + '</td></tr>' +
+                    '<tr><td class="phm-text-dim">单位</td><td>' + PHM.escapeHTML(si.unit || '—') + '</td></tr>' +
+                    '<tr><td class="phm-text-dim">异常阈值</td><td>' + thresholdText + '</td></tr>' +
+                    '</tbody></table>';
+            if (si.description) {
+              html += '<p class="phm-text-sec" style="font-size:13px;line-height:1.6;margin-top:8px;">' +
+                      PHM.escapeHTML(si.description) + '</p>';
+            }
+            html += '</div>';
+          }
 
           // 描述
           if (a.message) {

@@ -24,12 +24,25 @@ import time as _time
 from pathlib import Path
 
 from django.contrib.admin.views.decorators import staff_member_required
-from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
+from django.http import HttpResponse, JsonResponse, StreamingHttpResponse, HttpResponseRedirect
 from django.shortcuts import render
 from django.urls import reverse
 from django.views.decorators.http import require_http_methods
 
 from phm.algorithm._registry import MODEL_REGISTRY, get_model_entry
+from phm.algorithm.sensor_dsl import parse as dsl_parse, validate as dsl_validate
+from phm.algorithm.sensor_dsl import to_calibration as dsl_to_calibration
+from phm.algorithm.calibration_config import CalibrationConfig
+from phm.algorithm.rules import (
+    DEFAULT_L1_MODULES,
+    DEFAULT_L3_MODULES,
+    FILTER_REGISTRY,
+)
+from phm.algorithm.showcase import (
+    SHOWCASE_REGISTRY,
+    LAYER_TO_CATEGORY,
+    ShowcaseEntry,
+)
 from phm.services.theme_service import get_theme
 
 from . import services_bridge
@@ -274,6 +287,237 @@ def _scan_default_usage(device_tree):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# Page 1b: Algorithm & model library (replaces models_view with 5 sub-menus +
+# ground/space dual panel).  Supersedes the single-page models_view above,
+# which is kept only as the 301-redirect target's predecessor.
+# ════════════════════════════════════════════════════════════════════════════
+# Spec (v1.2 admin section "Algorithm & model library"):
+#   Multiple sub-menus (L1 preprocessing / L2 detection / L3 post-processing /
+#   forecast / special).  Each card shows info + which sensors use it.  Cannot
+#   be added/deleted from the web UI — config-file edit only.  No
+#   enable/disable/reload.  Upper panel = ground segment (full cards), lower
+#   panel = space segment (placeholder until Phase 3 unified cascade).
+
+# 5 sub-menu tab definitions (key = ?cat= value, name/icon for the tab strip).
+# Order = display order in the tab strip.
+_LIBRARY_TABS = (
+    {'key': 'l1',       'name': 'L1 预处理算法库',  'icon': 'fas fa-filter'},
+    {'key': 'l2',       'name': 'L2 检测模型库',    'icon': 'fas fa-search'},
+    {'key': 'l3',       'name': 'L3 后处理算法库',  'icon': 'fas fa-layer-group'},
+    {'key': 'forecast', 'name': '预测模型库',       'icon': 'fas fa-chart-line'},
+    {'key': 'special',  'name': '特殊算法或模型库',  'icon': 'fas fa-star'},
+)
+_LIBRARY_CATEGORY_KEYS = frozenset(t['key'] for t in _LIBRARY_TABS)
+_LIBRARY_CATEGORY_DEFAULT = 'l1'
+
+
+def _parse_library_category(raw):
+    """Parse the ?cat= parameter.  Invalid / missing values fall back to l1."""
+    if raw not in _LIBRARY_CATEGORY_KEYS:
+        return _LIBRARY_CATEGORY_DEFAULT
+    return raw
+
+
+def scan_module_usage(device_tree=None, calibration=None):
+    """For each showcase entry, return the list of sensor channels using it.
+
+    Primary data source: :class:`ChannelCalibration` records populated by the
+    ``@算法`` DSL at device-tree save time (``detector_model`` /
+    ``l1_modules`` / ``l3_modules`` fields).  Reads them via the supplied
+    ``calibration`` (:class:`CalibrationConfig`) or a fresh one when omitted.
+
+    Default-flow backfill: a channel that has not explicitly overridden a
+    layer is counted against the system default chain
+    (:data:`DEFAULT_L1_MODULES` + tspulse + :data:`DEFAULT_L3_MODULES`), so
+    the default cards reflect real usage even before any DSL has been written.
+
+    Backward-compat fallback: when no :class:`ChannelCalibration` exists for
+    a channel but its device-tree description carries an ``@tspulse`` /
+    ``@预测模型`` / ``@rul`` substring (the pre-DSL convention), the old
+    :func:`_scan_sensor_model_usage` substring matcher is reused so sensors
+    not yet re-saved since the DSL migration still show up on the right card.
+
+    Args:
+        device_tree: optional device-tree list (for the substring fallback).
+            ``None`` skips the fallback.
+        calibration: optional :class:`CalibrationConfig`.  ``None`` constructs
+            a fresh one (reads the default ``channel_calibration.json``).
+
+    Returns:
+        ``{entry_key: [channel_name, ...]}`` keyed by :data:`SHOWCASE_REGISTRY`
+        keys.  Every showcase key is present (possibly with an empty list).
+    """
+    cal = calibration if calibration is not None else CalibrationConfig()
+
+    # Initialise every showcase key to an empty list so callers (template /
+    # tests) can index without .get(key, []).
+    usage: dict[str, list[str]] = {e.key: [] for e in SHOWCASE_REGISTRY}
+
+    def _add(key: str, channel: str) -> None:
+        if key in usage and channel not in usage[key]:
+            usage[key].append(channel)
+
+    # Walk the per-channel calibration records.  Each channel may have:
+    #   - explicit l1_modules / l3_modules / detector_model (DSL-populated)
+    #   - skip_detector=True (deliberately bypass L2)
+    #   - none of the above → default-flow backfill
+    for channel in cal.channels:
+        cc = cal.get(channel)
+        if cc is None:
+            continue
+
+        # Explicit L1 / L3 module chains.
+        for m in (cc.l1_modules or []):
+            _add(m, channel)
+        for m in (cc.l3_modules or []):
+            _add(m, channel)
+
+        # Explicit detector model.
+        if cc.detector_model:
+            _add(cc.detector_model, channel)
+
+        # Default-flow backfill: layers the channel did NOT override are
+        # counted against the system default chain.  This matches the
+        # runtime cascade behaviour — an unconfigured channel runs the
+        # default L1 + tspulse + default L3.
+        if not cc.l1_modules:
+            for m in DEFAULT_L1_MODULES:
+                _add(m, channel)
+        if not cc.detector_model and not cc.skip_detector:
+            _add('tspulse', channel)
+        if not cc.l3_modules:
+            for m in DEFAULT_L3_MODULES:
+                _add(m, channel)
+
+    # Backward-compat substring fallback for channels that have no
+    # ChannelCalibration record but still carry a legacy @ command in their
+    # device-tree description.  Merges into the same usage dict.
+    if device_tree:
+        legacy = _scan_sensor_model_usage(device_tree)
+        for mkey, channels in legacy.items():
+            for ch in channels:
+                _add(mkey, ch)
+
+    return usage
+
+
+def _pull_registry_data(entry: ShowcaseEntry) -> dict:
+    """Pull runtime metadata for ``entry`` from MODEL/FILTER_REGISTRY.
+
+    Returns a dict with ``hub_id`` / ``context_length`` / ``prediction_length``
+    for model entries, and ``name`` / ``layer`` for filter entries.  Missing
+    fields are omitted (template renders conditionally).
+    """
+    data: dict = {}
+    if entry.is_model:
+        m = get_model_entry(entry.key)
+        if m is None:
+            return data
+        if m.hub_id:
+            data['hub_id'] = m.hub_id
+        data['context_length'] = m.context_length
+        if m.prediction_length > 0:
+            data['prediction_length'] = m.prediction_length
+        data['kind'] = m.kind
+        data['kind_label'] = _KIND_LABEL.get(m.kind, m.kind)
+        data['deploy'] = m.deploy
+        data['deploy_label'] = _DEPLOY_LABEL.get(m.deploy, m.deploy)
+        data['notes'] = m.notes
+    else:
+        # FILTER_REGISTRY maps name → rule class; pull the static class attrs.
+        rule_cls = FILTER_REGISTRY.get(entry.key)
+        if rule_cls is not None:
+            data['rule_class'] = rule_cls.__name__
+            # Rule classes expose ``layer`` (e.g. LAYER_L1_CLASSIC); surface
+            # it as a plain string so the template can render it.
+            layer_attr = getattr(rule_cls, 'layer', None)
+            if layer_attr:
+                data['layer_code'] = str(layer_attr)
+    return data
+
+
+@staff_member_required
+def library_view(request, category=None):
+    """Algorithm & model library page (read-only cards, 5 sub-categories).
+
+    Switching the sub-menu:
+      - Positional path segment (``/admin/phm_site/library/l3/``) — wins when
+        present and valid.
+      - ``?cat=l3`` query string — wins when the path segment is absent
+        (the index route ``/library/``); the template's tab links use this form.
+      - Invalid / missing values fall back to ``l1``.
+
+    Renders the ``library.html`` template with:
+      - ``category``: active sub-menu key
+      - ``tabs``: the 5 sub-menu tab definitions (with ``active`` flag)
+      - ``cards``: list of card dicts for the active sub-menu (ground panel)
+      - ``space_cards``: always ``None`` — space panel is a placeholder
+    """
+    # Positional path segment wins when valid; otherwise fall back to ?cat=.
+    if category in _LIBRARY_CATEGORY_KEYS:
+        cat = category
+    else:
+        cat = _parse_library_category(request.GET.get('cat'))
+
+    # Active sub-menu's showcase entries (preserve SHOWCASE_REGISTRY order).
+    entries = [e for e in SHOWCASE_REGISTRY if LAYER_TO_CATEGORY.get(e.layer) == cat]
+
+    # Usage scan: reads ChannelCalibration (DSL-populated) + device-tree
+    # substring fallback.  Both data sources are best-effort — exceptions
+    # degrade to "no usage info" rather than a 500.
+    device_tree = []
+    c, _err = _container_or_error(request)
+    if c is not None:
+        try:
+            config_data = c.config.load()
+            device_tree = config_data.get('device_tree', [])
+        except Exception as e:
+            logger.warning("library_view: load device_tree failed: %s", e)
+
+    try:
+        usage = scan_module_usage(device_tree=device_tree)
+    except Exception as e:
+        logger.warning("library_view: scan_module_usage failed: %s", e)
+        usage = {e.key: [] for e in SHOWCASE_REGISTRY}
+
+    # Build the card list.  Each card carries the showcase entry, the
+    # registry-pulled metadata, and the used-by channel list.
+    cards = []
+    for entry in entries:
+        reg_data = _pull_registry_data(entry)
+        # Local-asset check only makes sense for model cards (HF snapshot /
+        # RUL weights).  Algorithm cards have no on-disk artefact to check.
+        local_assets = _check_local_assets(entry.key) if entry.is_model else None
+        used_by = usage.get(entry.key, [])
+        cards.append({
+            'entry': entry,
+            'registry': reg_data,
+            'used_by': used_by,
+            'used_count': len(used_by),
+            'local_assets': local_assets,
+            'is_model': entry.is_model,
+            'is_l35': entry.is_l35,
+        })
+
+    # 5 sub-menu tabs (active flag marks the current selection).
+    tabs = [
+        {**t, 'active': (t['key'] == cat)}
+        for t in _LIBRARY_TABS
+    ]
+
+    return render(request, 'phm_site/admin/library.html', {
+        'page_title': '算法库',
+        'category': cat,
+        'tabs': tabs,
+        'cards': cards,
+        # Ground panel = full cards; space panel = placeholder (Phase 3).
+        'ground_cards': cards,
+        'space_cards': None,
+        'readonly_note': '算法/模型为系统级配置，不支持网页新增/删除/启停，需修改配置文件',
+    })
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # Page 2: Dashboard (health banner + three cards + alert-trend bar chart + time-window switch)
 # ════════════════════════════════════════════════════════════════════════════
 # Spec (admin section "Dashboard"):
@@ -506,9 +750,14 @@ def dashboard_view(request):
     if window not in _WINDOW_CHOICES:
         window = _WINDOW_DEFAULT
 
-    # Auto-refresh: enabled by default (?auto=0 to disable). Per requirements doc,
-    # dashboard auto-refreshes by default.
-    auto_refresh = request.GET.get('auto', '1') != '0'
+    # Auto-refresh: OFF by default (?auto=1 to enable). The requirements doc
+    # specifies auto-refresh, but production profiling showed that the 15s SSR
+    # full-page reload stacks badly with the in-process eval threads (GIL
+    # contention) and the 2.66 GB SQLite WAL read amplification — a single
+    # open dashboard tab amplified to ~20 s perceived latency. Defaulting off
+    # removes the amplifier while keeping the feature opt-in for users who
+    # want live updates.
+    auto_refresh = request.GET.get('auto') == '1'
 
     # Container three-state gate
     c, err = _container_or_error(request)
@@ -779,6 +1028,27 @@ def _label(mapping, value):
 def recycle_view(request):
     """Recycle-bin page (GET).
 
+    Dispatches on the ``?type=`` query string:
+
+      - ``type=telemetry`` → per-channel telemetry recycle bin
+        (``_recycle_telemetry``; rows live in ``telemetry_<channel>`` tables).
+      - ``type=alert`` (default, backward compat) → existing alert / detection
+        / diagnosis recycle bin (``_recycle_alert``).
+
+    Keeping the alert branch intact (only wrapped in a dispatcher) means every
+    pre-existing ``test_views_admin_recycle.py`` assertion still holds: the
+    default URL (no ``?type=``) lands in ``_recycle_alert`` with the same
+    ``?table=`` semantics as before.
+    """
+    rtype = (request.GET.get('type') or 'alert').strip().lower()
+    if rtype == 'telemetry':
+        return _recycle_telemetry(request)
+    return _recycle_alert(request)
+
+
+def _recycle_alert(request):
+    """Alert / detection / diagnosis recycle bin (the pre-v1.2 behaviour).
+
     GET ?table=alerts|detections|diagnoses switches the three resources
     (default alerts). GET ?limit=N controls rows per page (1-1000, default 200).
     When the Container is not ready, renders a placeholder page (_state.html)
@@ -869,13 +1139,105 @@ def recycle_view(request):
     })
 
 
+def _recycle_telemetry(request):
+    """Telemetry recycle bin (v1.2).
+
+    Per-channel — the telemetry tables are ``telemetry_<channel>`` (one per
+    sensor), so a channel must be selected before any rows show up. This
+    mirrors the telemetry management page's "no multi-select" constraint.
+
+    Action bar is restricted to the two operations the requirements doc
+    specifies for the recycle bin: "Restore" + "Permanent Delete".
+
+    The deleted-count is computed as
+    ``count_tel(include_deleted=True) - count_tel(include_deleted=False)`` —
+    i.e. rows whose ``deleted_at`` is set. Restoring moves them back to the
+    telemetry management page; purging physically removes them.
+    """
+    limit = _parse_tel_limit(request.GET.get('limit'))
+    page = _parse_alert_page(request.GET.get('page'))
+    channel = (request.GET.get('channel') or '').strip()[:64]
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return _render_state_page(request, err, '遥测回收站')
+
+    available_channels = _list_tel_channels(c)
+
+    rows, total_count = [], 0
+    if channel:
+        try:
+            total_with = c.sqlite.count_tel(channel, include_deleted=True)
+            total_live = c.sqlite.count_tel(channel, include_deleted=False)
+            total_count = max(0, total_with - total_live)
+        except Exception as e:
+            logger.warning("recycle telemetry count(%s) failed: %s", channel, e)
+            total_count = 0
+
+        total_pages = max(1, math.ceil(total_count / limit)) if total_count > 0 else 1
+        if page > total_pages:
+            page = total_pages
+        offset = (page - 1) * limit
+        try:
+            rows = c.sqlite.query_tel_deleted(channel, limit=limit, offset=offset)
+        except Exception as e:
+            logger.warning("recycle query_tel_deleted(%s) failed: %s", channel, e)
+            rows = []
+    else:
+        total_pages = 1
+
+    sensor_meta = _build_sensor_meta(getattr(c, 'config', None))
+    decorated = _decorate_tel_rows(rows, sensor_meta=sensor_meta)
+
+    is_superuser = request.user.is_authenticated and request.user.is_superuser
+
+    current_filters = {
+        'channel': channel or '',
+    }
+
+    # Channel sensor name for the page header.
+    ch_meta = sensor_meta.get(channel) if channel else None
+    channel_label = ''
+    if ch_meta:
+        channel_label = ch_meta['sensor_name'] or channel
+        if ch_meta.get('unit'):
+            channel_label += ' ({})'.format(ch_meta['unit'])
+    elif channel:
+        channel_label = channel
+
+    return render(request, 'phm_site/admin/recycle_telemetry.html', {
+        'page_title': '遥测回收站',
+        'channel': channel,
+        'channel_label': channel_label,
+        'available_channels': available_channels,
+        'rows': decorated,
+        'limit': limit,
+        'is_superuser': is_superuser,
+        'current_filters': current_filters,
+        # Pagination
+        'total_count': total_count,
+        'page': page,
+        'total_pages': total_pages,
+        'page_range': _build_page_range(page, total_pages),
+        'page_size_options': _TEL_PAGE_SIZE_OPTIONS,
+        # AJAX endpoints (reuse the shared recycle restore/purge URLs; the
+        # ``?type=telemetry`` discriminator is set client-side by the template).
+        'csrf_token_str': request.META.get('CSRF_COOKIE', ''),
+    })
+
+
 @staff_member_required
 @require_http_methods(['POST'])
 def recycle_restore_api(request):
     """Restore soft-deleted records (POST, super-admin only).
 
-    Input JSON: {table: 'alerts|detections|diagnoses', ids: [int,...]}
-    Output JSON: {status: 'ok', restored: N} or {status: 'error', message}
+    Input JSON (alert branch, default):
+        ``{table: 'alerts|detections|diagnoses', ids: [int,...]}``
+    Input JSON (telemetry branch):
+        ``{type: 'telemetry', channel: str, ids: [int,...]}`` — ``ids`` are
+        per-channel rowids, routed to ``SQLiteStore.restore_tel``.
+
+    Output JSON: ``{status: 'ok', restored: N}`` or ``{status: 'error', message}``.
     """
     ok, err_resp = _require_superuser(request)
     if not ok:
@@ -885,17 +1247,45 @@ def recycle_restore_api(request):
     except json.JSONDecodeError:
         return JsonResponse({'status': 'error', 'message': '请求体不是合法 JSON'},
                             status=400)
-    table_key, sql_table, _label = _parse_recycle_table(body.get('table'))
+
+    rtype = (body.get('type') or 'alert')
+    if isinstance(rtype, str):
+        rtype = rtype.strip().lower()
+    else:
+        rtype = 'alert'
+
     ids = _parse_id_list(body.get('ids'))
     if not ids:
         return JsonResponse({'status': 'error', 'message': '未提供有效 id'},
                             status=400)
+
+    # Telemetry branch needs an extra channel argument; validate it before
+    # touching the Container so a missing channel is a 400 (not a 503).
+    tel_channel = None
+    if rtype == 'telemetry':
+        channel = body.get('channel')
+        if not channel or not isinstance(channel, str):
+            return JsonResponse({'status': 'error',
+                                 'message': '遥测恢复需提供 channel'}, status=400)
+        tel_channel = channel.strip()[:64]
 
     c, err = _container_or_error(request)
     if c is None:
         return JsonResponse({'status': 'error',
                              'message': 'PHM 服务未就绪：{}'.format(
                                  err.get('phm_state'))}, status=503)
+
+    if rtype == 'telemetry':
+        try:
+            n = c.sqlite.restore_tel(tel_channel, ids)
+        except Exception as e:
+            logger.warning("recycle restore_tel(%s) failed: %s", tel_channel, e)
+            return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+        return JsonResponse({'status': 'ok', 'restored': n, 'type': 'telemetry',
+                             'channel': tel_channel})
+
+    # alert branch (default): existing behaviour, unchanged.
+    table_key, sql_table, _label = _parse_recycle_table(body.get('table'))
     try:
         n = c.sqlite.restore(sql_table, ids)
     except Exception as e:
@@ -909,11 +1299,16 @@ def recycle_restore_api(request):
 def recycle_purge_api(request):
     """Permanently delete (physically remove) soft-deleted records (POST, super-admin only).
 
-    Input JSON: {table: 'alerts|detections|diagnoses', ids: [int,...]}
-    Output JSON: {status: 'ok', purged: N} or {status: 'error', message}
+    Input JSON (alert branch, default):
+        ``{table: 'alerts|detections|diagnoses', ids: [int,...]}``
+    Input JSON (telemetry branch):
+        ``{type: 'telemetry', channel: str, ids: [int,...]}`` — routed to
+        ``SQLiteStore.purge_tel`` (only deletes rows already in the bin).
 
-    Safety constraint: purge_by_ids only deletes is_deleted=1 rows; active data
-    is not affected.
+    Output JSON: ``{status: 'ok', purged: N}`` or ``{status: 'error', message}``.
+
+    Safety constraint: ``purge_by_ids`` / ``purge_tel`` only delete rows that
+    are already soft-deleted; active data is not affected.
     """
     ok, err_resp = _require_superuser(request)
     if not ok:
@@ -923,17 +1318,45 @@ def recycle_purge_api(request):
     except json.JSONDecodeError:
         return JsonResponse({'status': 'error', 'message': '请求体不是合法 JSON'},
                             status=400)
-    table_key, sql_table, _label = _parse_recycle_table(body.get('table'))
+
+    rtype = (body.get('type') or 'alert')
+    if isinstance(rtype, str):
+        rtype = rtype.strip().lower()
+    else:
+        rtype = 'alert'
+
     ids = _parse_id_list(body.get('ids'))
     if not ids:
         return JsonResponse({'status': 'error', 'message': '未提供有效 id'},
                             status=400)
+
+    # Telemetry branch needs an extra channel argument; validate it before
+    # touching the Container so a missing channel is a 400 (not a 503).
+    tel_channel = None
+    if rtype == 'telemetry':
+        channel = body.get('channel')
+        if not channel or not isinstance(channel, str):
+            return JsonResponse({'status': 'error',
+                                 'message': '遥测永久删除需提供 channel'}, status=400)
+        tel_channel = channel.strip()[:64]
 
     c, err = _container_or_error(request)
     if c is None:
         return JsonResponse({'status': 'error',
                              'message': 'PHM 服务未就绪：{}'.format(
                                  err.get('phm_state'))}, status=503)
+
+    if rtype == 'telemetry':
+        try:
+            n = c.sqlite.purge_tel(tel_channel, ids)
+        except Exception as e:
+            logger.warning("recycle purge_tel(%s) failed: %s", tel_channel, e)
+            return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+        return JsonResponse({'status': 'ok', 'purged': n, 'type': 'telemetry',
+                             'channel': tel_channel})
+
+    # alert branch (default): existing behaviour, unchanged.
+    table_key, sql_table, _label = _parse_recycle_table(body.get('table'))
     try:
         n = c.sqlite.purge_by_ids(sql_table, ids)
     except Exception as e:
@@ -1729,6 +2152,12 @@ def alert_detail_api(request, alert_id):
     sensor_meta = _build_sensor_meta(getattr(c, 'config', None))
     meta = sensor_meta.get(row.get('channel'))
 
+    # Sensor info block for the drawer top (v1.2): pulls display name / unit /
+    # range / threshold / description / is_special from the device tree +
+    # channel_calibration.json. Read-only — editing stays on the device-tree page.
+    sensor_info = _build_sensor_info(row.get('channel'),
+                                     getattr(c, 'config', None))
+
     return JsonResponse({
         'status': 'ok',
         'alert': {
@@ -1747,11 +2176,109 @@ def alert_detail_api(request, alert_id):
             'sensor_name': meta['sensor_name'] if meta else (row.get('channel') or '—'),
             'unit': meta['unit'] if meta else '',
         },
+        'sensor_info': sensor_info,
         'diagnosis': {
             'text': diagnosis_text,
             'error': diagnosis_error,
         },
     })
+
+
+def _build_sensor_info(channel, config_service):
+    """Build the read-only sensor-info dict for the alert drawer.
+
+    Pulls metadata from two sources:
+
+      - The device-tree node whose ``sourceId`` / ``channelName`` / ``name``
+        matches *channel* (display name / unit / yMin-yMax range /
+        description / isSpecial flag). Uses ``_walk_sensor_nodes`` so the
+        lookup matches the cascade's channel-key resolution.
+      - ``channel_calibration.json`` (offline calibration): the channel's
+        anomaly ``threshold`` + ``threshold_name`` (which candidate formula).
+
+    Returns a dict with keys: channel / display_name / unit / range /
+    range_min / range_max / threshold / threshold_name / description /
+    is_special. Missing fields fall back to safe defaults ('—' / None / False)
+    so the drawer renders without exceptions even on uncalibrated channels.
+    """
+    out = {
+        'channel': channel or '',
+        'display_name': channel or '—',
+        'unit': '',
+        'range': '—',
+        'range_min': None,
+        'range_max': None,
+        'threshold': None,
+        'threshold_name': '',
+        'description': '',
+        'is_special': False,
+    }
+    if not channel:
+        return out
+
+    # 1. Device-tree node lookup (display name / unit / range / description / isSpecial).
+    # The alert row's ``channel`` field is the channelName (e.g. "C-1"), not
+    # the sourceId (e.g. "file:NASA-MSL/C-1"). Match against both keys so the
+    # lookup works regardless of how the device tree author named the sensor.
+    node = None
+    if config_service is not None:
+        try:
+            body = config_service.load()
+            tree = body.get('device_tree') or []
+            def walk(nodes):
+                for n in nodes or []:
+                    if not isinstance(n, dict):
+                        continue
+                    if n.get('type') == 'sensor':
+                        keys = {
+                            n.get('channelName'),
+                            n.get('sourceId'),
+                            n.get('source_id'),
+                            n.get('name'),
+                        }
+                        if channel in keys:
+                            return n
+                    children = n.get('children')
+                    if children:
+                        found = walk(children)
+                        if found is not None:
+                            return found
+                return None
+            node = walk(tree)
+        except Exception as e:
+            logger.debug("sensor_info device_tree lookup failed: %s", e)
+
+    if node:
+        out['display_name'] = node.get('name') or channel
+        out['unit'] = node.get('unit') or ''
+        y_min = node.get('yMin')
+        y_max = node.get('yMax')
+        out['range_min'] = y_min
+        out['range_max'] = y_max
+        if y_min is not None and y_max is not None:
+            out['range'] = '{} ~ {}'.format(y_min, y_max)
+        elif y_min is not None:
+            out['range'] = '≥ {}'.format(y_min)
+        elif y_max is not None:
+            out['range'] = '≤ {}'.format(y_max)
+        out['description'] = node.get('description') or ''
+        desc = node.get('description') or ''
+        out['is_special'] = bool(node.get('isSpecial')) or '@rul' in desc
+
+    # 2. Channel calibration lookup (offline anomaly threshold).
+    try:
+        cal = CalibrationConfig().get(channel)
+    except Exception as e:
+        logger.debug("sensor_info calibration lookup failed: %s", e)
+        cal = None
+    if cal is not None:
+        out['threshold'] = cal.threshold
+        out['threshold_name'] = cal.threshold_name or ''
+        if cal.threshold_override is not None:
+            out['threshold'] = cal.threshold_override
+            out['threshold_name'] = 'DSL @阈值 覆盖'
+
+    return out
 
 
 @staff_member_required
@@ -2298,6 +2825,118 @@ def device_tree_space_channels_api(request):
     })
 
 
+def _walk_sensor_nodes(tree):
+    """Yield ``(channel_key, node)`` for every sensor node in the tree.
+
+    The channel key mirrors what the cascade uses to look up
+    :class:`ChannelCalibration` — the sourceId if present, else channelName,
+    else the node name.  Folder recursion is depth-first in document order.
+    """
+    def walk(nodes):
+        if not isinstance(nodes, list):
+            return
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            if n.get('type') == 'sensor':
+                key = (
+                    n.get('sourceId')
+                    or n.get('channelName')
+                    or n.get('name')
+                )
+                yield key, n
+            children = n.get('children')
+            if children:
+                yield from walk(children)
+    yield from walk(tree)
+
+
+def _validate_device_tree_descriptions(tree):
+    """Run the @command DSL validator on every sensor description.
+
+    Returns ``(first_error_response, calibration_writes)``:
+
+      * ``first_error_response``: a ``JsonResponse(status=400)`` ready to
+        return when any sensor has hard errors (E1-E5), else ``None``.
+        Only the first failing sensor is reported — the front-end shows
+        one error at a time so the scientist can fix-and-resubmit.  The
+        error payload carries the channel, the full errors list and any
+        warnings so the editor can surface related context.
+      * ``calibration_writes``: a list of ``(channel, SensorConfig)``
+        tuples for every sensor whose description parsed to a non-empty
+        config (i.e. actually contained @commands).  Sensors with plain
+        prose / empty descriptions are excluded so we don't overwrite
+        their offline calibration with default-filled records.
+
+    Sensors without a channel key (no sourceId / channelName / name) are
+    skipped silently — they cannot be calibrated anyway.
+    """
+    for channel, node in _walk_sensor_nodes(tree):
+        if not channel:
+            continue
+        desc = node.get('description') or ''
+        cfg = dsl_parse(desc)
+        # Skip sensors with no @commands at all — leave their offline
+        # calibration untouched (backward compat for existing deployments).
+        if cfg.is_empty:
+            continue
+        errors, warnings = dsl_validate(cfg)
+        if errors:
+            return JsonResponse({
+                'status': 'error',
+                'message': '传感器 @命令 校验失败',
+                'channel': str(channel),
+                'sensor_name': node.get('name') or str(channel),
+                'errors': errors,
+                'warnings': warnings,
+                'description': desc,
+            }, status=400), None
+    return None, None
+
+
+def _persist_dsl_calibrations(tree, calibration_path=None):
+    """Map every @command-bearing sensor description to ChannelCalibration.
+
+    Called after :func:`_validate_device_tree_descriptions` has accepted
+    the tree (no hard errors).  For each sensor whose description parses
+    to a non-empty config, the DSL config is merged onto the channel's
+    existing offline calibration and written back via
+    :meth:`CalibrationConfig.upsert`.
+
+    Failures here are logged but not raised — the device tree itself has
+    already been saved by this point, and a calibration write failure
+    should not roll back the structural save (the scientist can re-save
+    to retry).  Returns the count of channels written for logging.
+    """
+    try:
+        cc = CalibrationConfig(config_path=calibration_path)
+    except Exception:
+        logger.warning(
+            "CalibrationConfig load failed; DSL persistence skipped",
+            exc_info=True,
+        )
+        return 0
+    written = 0
+    for channel, node in _walk_sensor_nodes(tree):
+        if not channel:
+            continue
+        desc = node.get('description') or ''
+        cfg = dsl_parse(desc)
+        if cfg.is_empty:
+            continue
+        try:
+            existing = cc.get(channel)
+            cal = dsl_to_calibration(cfg, existing)
+            cc.upsert(channel, cal)
+            written += 1
+        except Exception:
+            logger.warning(
+                "DSL calibration write failed for channel %s",
+                channel, exc_info=True,
+            )
+    return written
+
+
 @staff_member_required
 @require_http_methods(['POST'])
 def device_tree_save_api(request):
@@ -2307,6 +2946,12 @@ def device_tree_save_api(request):
     ``aggregation_strategy``). You may also pass only
     ``{device_tree: [...]}``; when ``aggregation_strategy`` is omitted, the
     previous value is preserved.
+
+    @command DSL hook: before persisting the tree, every sensor's
+    ``description`` is parsed and validated.  Hard errors (E1-E5) block
+    the save with HTTP 400 and the offending channel + error list.
+    Sensors whose description has no @commands are skipped (their
+    offline calibration is preserved untouched).
     """
     ok, err_resp = _require_superuser(request)
     if not ok:
@@ -2327,6 +2972,11 @@ def device_tree_save_api(request):
         return JsonResponse({'status': 'error', 'message': 'device_tree 必须为数组'},
                             status=400)
 
+    # @command DSL validation — block the save on any hard error (E1-E5).
+    err_resp, _ = _validate_device_tree_descriptions(tree)
+    if err_resp is not None:
+        return err_resp
+
     c, err = _container_or_error(request)
     if c is None:
         return JsonResponse({'status': 'error',
@@ -2341,4 +2991,505 @@ def device_tree_save_api(request):
 
     if result.get('status') != 'ok':
         return JsonResponse(result, status=400)
+
+    # Persist @command DSL configs to channel_calibration.json (best-effort:
+    # tree is already saved; calibration writes are logged on failure).
+    try:
+        written = _persist_dsl_calibrations(tree)
+        if written:
+            logger.info("persisted DSL calibration for %d channels", written)
+    except Exception:
+        logger.warning("DSL calibration persistence failed", exc_info=True)
+
     return JsonResponse(result)
+
+
+@staff_member_required
+@require_http_methods(['POST'])
+def device_tree_validate_dsl_api(request):
+    """Live @command DSL validator (POST, staff).
+
+    Request body: ``{"description": "<sensor description text>"}``.
+    Response: ``{"status": "ok", "errors": [...], "warnings": [...]}``.
+
+    Used by the device-tree editor front-end to surface errors/warnings
+    as the scientist types, before the Save button is pressed.  Always
+    returns 200 (the validator never raises) — the front-end decides
+    what to render based on the ``errors`` list (non-empty = block save).
+    """
+    try:
+        body = json.loads(request.body or b'{}')
+    except json.JSONDecodeError:
+        return JsonResponse(
+            {'status': 'error', 'message': '请求体不是合法 JSON',
+             'errors': ['请求体不是合法 JSON'], 'warnings': []},
+            status=400,
+        )
+    desc = body.get('description') or ''
+    if not isinstance(desc, str):
+        return JsonResponse(
+            {'status': 'error', 'message': 'description 必须为字符串',
+             'errors': ['description 必须为字符串'], 'warnings': []},
+            status=400,
+        )
+    cfg = dsl_parse(desc)
+    errors, warnings = dsl_validate(cfg)
+    return JsonResponse({
+        'status': 'ok',
+        'errors': errors,
+        'warnings': warnings,
+        'has_commands': not cfg.is_empty,
+    })
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Page 7: Telemetry data management (single-channel, paginated + chart)
+#
+# Spec (v1.2 requirements-doc admin section "Telemetry data management"):
+#   id / timestamp / utc-time / type (real | predicted) / value / ...
+#   "must select one sensor, no multi-select" + bonus "bidirectional
+#   chart-table interaction". No realtime refresh (the page is refreshed
+#   manually). Reads directly from SQLiteStore per-channel telemetry_*
+#   tables, NOT the Django ORM (avoids double-write consistency issues).
+# ════════════════════════════════════════════════════════════════════════════
+
+# Page-size candidates for the telemetry page (slightly smaller default than
+# alert so the chart stays legible on a single screen).
+_TEL_PAGE_SIZE_OPTIONS = [10, 20, 50, 100]
+_TEL_LIMIT_DEFAULT = 20
+_TEL_LIMIT_MAX = 1000
+
+
+def _parse_tel_limit(raw):
+    """Parse the telemetry limit param, clamped to [1, 1000], default 20."""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return _TEL_LIMIT_DEFAULT
+    return max(1, min(n, _TEL_LIMIT_MAX))
+
+
+def _list_tel_channels(c):
+    """Return the union of channels that carry telemetry data.
+
+    Sources:
+      1. Device-tree sensor nodes (``channelName`` / ``sourceId``) — the
+         configured sensor channels, even if no row has been ingested yet.
+      2. ``sqlite_master`` tables whose name starts with ``telemetry_`` —
+         channels that actually have rows on disk (e.g. manually-inserted
+         test channels not yet in the device tree).
+
+    Returns a sorted list of channel-name strings. The device-tree channels
+    come first (in document order) so the dropdown reads naturally.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    # 1. Configured sensors (document order, dedup).
+    cfg_service = getattr(c, 'config', None)
+    if cfg_service is not None:
+        try:
+            body = cfg_service.load()
+            tree = body.get('device_tree') or []
+            for key, _node in _walk_sensor_nodes(tree):
+                if key and key not in seen:
+                    seen.add(key)
+                    out.append(key)
+        except Exception as e:
+            logger.debug("telemetry channels: device_tree walk failed: %s", e)
+    # 2. Tables that exist on disk but are not in the tree.
+    sqlite = getattr(c, 'sqlite', None)
+    if sqlite is not None and getattr(sqlite, 'enabled', False):
+        try:
+            cur = sqlite._conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name LIKE 'telemetry\\_%' ESCAPE '\\'"
+            )
+            for (tbl,) in cur.fetchall():
+                ch = tbl[len('telemetry_'):]
+                # Reverse the _tel_table escape: non-alnum → '_' (lossy, but
+                # matches what _ensure_tel_table does at write time).
+                if ch and ch not in seen:
+                    seen.add(ch)
+                    out.append(ch)
+        except Exception as e:
+            logger.debug("telemetry channels: sqlite_master scan failed: %s", e)
+    return out
+
+
+def _decorate_tel_rows(rows, sensor_meta=None):
+    """Decorate telemetry rows for display.
+
+    Adds:
+      - ``utc_time``   : ISO-8601 UTC string of ``timestamp``.
+      - ``type_label`` : '真实' / '预测' / '真实+预测' based on which value
+                         columns are non-null.
+      - ``value_display``: human-friendly merged value (raw first, then pred).
+      - ``origin_label``: '🖐 手动' when origin=='manual', else '采集'.
+      - ``is_manual``  : bool, handy for the template/chart colouring.
+
+    ``sensor_meta`` is the optional ``_build_sensor_meta`` output (adds
+    ``unit`` / ``sensor_name`` when available).
+    """
+    meta = sensor_meta or {}
+    decorated = []
+    for r in rows:
+        item = dict(r)
+        ts = r.get('timestamp')
+        # UTC time string (consistent with the alert page's data-ts rendering).
+        try:
+            item['utc_time'] = _dt.datetime.fromtimestamp(
+                float(ts), tz=_dt.timezone.utc,
+            ).strftime('%Y-%m-%d %H:%M:%S') + ' UTC' if ts is not None else '—'
+        except (TypeError, ValueError):
+            item['utc_time'] = '—'
+
+        raw = r.get('raw_value')
+        pred = r.get('predicted_value')
+        has_raw = raw is not None
+        has_pred = pred is not None
+        if has_raw and has_pred:
+            item['type_label'] = '真实+预测'
+        elif has_raw:
+            item['type_label'] = '真实'
+        elif has_pred:
+            item['type_label'] = '预测'
+        else:
+            item['type_label'] = '空'
+
+        parts = []
+        if has_raw:
+            parts.append('真实 {:.3f}'.format(float(raw)))
+        if has_pred:
+            parts.append('预测 {:.3f}'.format(float(pred)))
+        item['value_display'] = ' · '.join(parts) if parts else '—'
+
+        origin = r.get('origin') or 'acq'
+        item['is_manual'] = (origin == 'manual')
+        item['origin_label'] = '🖐 手动' if origin == 'manual' else '采集'
+
+        # Sensor name + unit (for the header / chart axis).
+        m = meta.get(r.get('channel')) if r.get('channel') else None
+        item['unit'] = m['unit'] if m else ''
+        decorated.append(item)
+    return decorated
+
+
+@staff_member_required
+def telemetry_view(request):
+    """Telemetry data management page (GET, single-channel, paginated).
+
+    GET parameters: channel (required for data; '' → empty-state prompt),
+    start / end (ISO 8601 or Unix seconds), page, limit.
+
+    Per the spec the channel selector is single-select: "must select one
+    sensor, no multi-select". When the Container is not ready, renders the
+    same placeholder page as the other admin pages.
+    """
+    limit = _parse_tel_limit(request.GET.get('limit'))
+    page = _parse_alert_page(request.GET.get('page'))
+    channel = (request.GET.get('channel') or '').strip()[:64]
+    start_ts = _parse_iso_or_float(request.GET.get('start'))
+    end_ts = _parse_iso_or_float(request.GET.get('end'))
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return _render_state_page(request, err, '遥测数据管理')
+
+    available_channels = _list_tel_channels(c)
+
+    # Query plan: count FIRST (needed to clamp the page number), then a SINGLE
+    # page query with the correct offset.  The previous implementation issued
+    # two queries (offset=0 then the real offset) on every page>1 request,
+    # which doubled the load time for no benefit.
+    rows, total_count = [], 0
+    if channel:
+        try:
+            total_count = c.sqlite.count_tel(
+                channel, start_ts=start_ts, end_ts=end_ts,
+            )
+        except Exception as e:
+            logger.warning("telemetry count_tel(%s) failed: %s", channel, e,
+                           exc_info=True)
+            total_count = 0
+
+    # Clamp page to the last page (consistent with alert_view).
+    total_pages = max(1, math.ceil(total_count / limit)) if total_count > 0 else 1
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * limit
+
+    # Single page query with the clamped offset.  We do NOT short-circuit on
+    # total_count == 0: count and query are independent calls, and a count
+    # failure (returns 0) must not hide rows that query would return.
+    if channel:
+        try:
+            rows = c.sqlite.query_tel_page(
+                channel, offset=offset, limit=limit,
+                start_ts=start_ts, end_ts=end_ts,
+            )
+        except Exception as e:
+            logger.warning("telemetry query_tel_page(%s) failed: %s",
+                           channel, e, exc_info=True)
+            rows = []
+
+    sensor_meta = _build_sensor_meta(getattr(c, 'config', None))
+    decorated = _decorate_tel_rows(rows, sensor_meta=sensor_meta)
+
+    is_superuser = request.user.is_authenticated and request.user.is_superuser
+
+    current_filters = {
+        'channel': channel or '',
+        'start': request.GET.get('start', ''),
+        'end': request.GET.get('end', ''),
+    }
+
+    # Inject decorated rows as JSON for the ECharts front-end (bidirectional
+    # chart-table interaction: same rows array, rowid is the join key).
+    rows_json = json.dumps(decorated, ensure_ascii=False, default=str)
+
+    # Channel sensor name for the page header / chart title.
+    ch_meta = sensor_meta.get(channel) if channel else None
+    channel_label = ''
+    if ch_meta:
+        channel_label = ch_meta['sensor_name'] or channel
+        if ch_meta.get('unit'):
+            channel_label += ' ({})'.format(ch_meta['unit'])
+    elif channel:
+        channel_label = channel
+
+    return render(request, 'phm_site/admin/telemetry.html', {
+        'page_title': '遥测数据管理',
+        'channel': channel,
+        'channel_label': channel_label,
+        'available_channels': available_channels,
+        'rows': decorated,
+        'rows_json': rows_json,
+        'limit': limit,
+        'current_filters': current_filters,
+        'is_superuser': is_superuser,
+        # Pagination
+        'total_count': total_count,
+        'page': page,
+        'total_pages': total_pages,
+        'page_range': _build_page_range(page, total_pages),
+        'page_size_options': _TEL_PAGE_SIZE_OPTIONS,
+        # AJAX endpoints
+        'api_create_url': reverse('phm_admin_telemetry_create'),
+        'api_delete_url': reverse('phm_admin_telemetry_delete'),
+        'api_export_url': reverse('phm_admin_telemetry_export'),
+        'api_channels_url': reverse('phm_admin_telemetry_channels'),
+    })
+
+
+@staff_member_required
+@require_http_methods(['GET'])
+def telemetry_channels_api(request):
+    """Return the available telemetry channel list (GET).
+
+    Used by the channel dropdown so a scientist can refresh the list after a
+    new channel is added to the device tree without reloading the page.
+    Returns ``{status: 'ok', channels: [str, ...]}``.
+    """
+    c, err = _container_or_error(request)
+    if c is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'PHM 服务未就绪：{}'.format(
+                                 err.get('phm_state'))},
+                            status=503)
+    channels = _list_tel_channels(c)
+    return JsonResponse({'status': 'ok', 'channels': channels})
+
+
+@staff_member_required
+@require_http_methods(['POST'])
+def telemetry_create_api(request):
+    """Manually insert / upsert a telemetry row (POST, super-admin only).
+
+    Input JSON: ``{channel: str, timestamp: float|str (ISO or Unix seconds),
+    raw_value?: float, predicted_value?: float, anomaly_score?: float}``.
+
+    Uses ``INSERT OR REPLACE`` (via ``store.insert_tel_manual``) keyed by
+    timestamp so a duplicate timestamp overwrites the prior row. The row is
+    tagged ``origin='manual'`` and is excluded from the acquisition pipeline.
+    """
+    ok, err_resp = _require_superuser(request)
+    if not ok:
+        return err_resp
+    try:
+        body = json.loads(request.body or b'{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'status': 'error', 'message': '请求体不是合法 JSON'},
+                            status=400)
+
+    channel = body.get('channel')
+    if not channel or not isinstance(channel, str):
+        return JsonResponse({'status': 'error', 'message': 'channel 必填且为字符串'},
+                            status=400)
+    channel = channel.strip()[:64]
+
+    ts_raw = body.get('timestamp')
+    if ts_raw is None:
+        return JsonResponse({'status': 'error', 'message': 'timestamp 必填'},
+                            status=400)
+    timestamp = _parse_iso_or_float(ts_raw)
+    if timestamp is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'timestamp 必须为数字或 ISO 8601 字符串'},
+                            status=400)
+
+    raw_value = body.get('raw_value')
+    predicted_value = body.get('predicted_value')
+    anomaly_score = body.get('anomaly_score')
+    # At least one value column must be supplied (otherwise the row is empty).
+    if raw_value is None and predicted_value is None and anomaly_score is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'raw_value / predicted_value / anomaly_score 至少填一个'},
+                            status=400)
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'PHM 服务未就绪：{}'.format(
+                                 err.get('phm_state'))},
+                            status=503)
+
+    try:
+        success = c.sqlite.insert_tel_manual(
+            channel=channel, timestamp=timestamp,
+            raw_value=raw_value, anomaly_score=anomaly_score,
+            predicted_value=predicted_value,
+        )
+    except Exception as e:
+        logger.warning("telemetry_create failed: %s", e, exc_info=True)
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+
+    if not success:
+        return JsonResponse({'status': 'error', 'message': '插入失败'}, status=500)
+    return JsonResponse({'status': 'ok', 'channel': channel,
+                         'timestamp': timestamp})
+
+
+@staff_member_required
+@require_http_methods(['POST'])
+def telemetry_delete_api(request):
+    """Soft-delete telemetry rows by rowid (POST, super-admin only).
+
+    Input JSON: ``{channel: str, rowids: [int, ...]}``.
+    Moves the rows to the recycle bin (sets ``deleted_at``); they are
+    restorable from the recycle-bin page.
+    """
+    ok, err_resp = _require_superuser(request)
+    if not ok:
+        return err_resp
+    try:
+        body = json.loads(request.body or b'{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'status': 'error', 'message': '请求体不是合法 JSON'},
+                            status=400)
+
+    channel = body.get('channel')
+    if not channel or not isinstance(channel, str):
+        return JsonResponse({'status': 'error', 'message': 'channel 必填且为字符串'},
+                            status=400)
+    channel = channel.strip()[:64]
+
+    rowids_raw = body.get('rowids')
+    if not isinstance(rowids_raw, list) or not rowids_raw:
+        return JsonResponse({'status': 'error', 'message': 'rowids 必须为非空数组'},
+                            status=400)
+    try:
+        rowids = [int(v) for v in rowids_raw]
+    except (TypeError, ValueError):
+        return JsonResponse({'status': 'error', 'message': 'rowids 必须为整数数组'},
+                            status=400)
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'PHM 服务未就绪：{}'.format(
+                                 err.get('phm_state'))},
+                            status=503)
+
+    try:
+        deleted = c.sqlite.soft_delete_tel(channel, rowids)
+    except Exception as e:
+        logger.warning("telemetry_delete failed: %s", e, exc_info=True)
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+
+    return JsonResponse({'status': 'ok', 'deleted': deleted})
+
+
+@staff_member_required
+@require_http_methods(['GET'])
+def telemetry_export_api(request):
+    """Stream telemetry rows of one channel as CSV (GET, UTF-8 BOM).
+
+    GET parameters: ``channel`` (required), ``start`` / ``end`` (optional
+    timestamp window). Streams via ``store.iter_tel_rows`` so memory use stays
+    bounded regardless of total row count (keyset pagination, batch=1000).
+    """
+    channel = (request.GET.get('channel') or '').strip()[:64]
+    if not channel:
+        return JsonResponse({'status': 'error', 'message': 'channel 必填'},
+                            status=400)
+    start_ts = _parse_iso_or_float(request.GET.get('start'))
+    end_ts = _parse_iso_or_float(request.GET.get('end'))
+
+    c, err = _container_or_error(request)
+    if c is None:
+        return JsonResponse({'status': 'error',
+                             'message': 'PHM 服务未就绪：{}'.format(
+                                 err.get('phm_state'))},
+                            status=503)
+
+    # CSV column set (requirements-doc L114: channel/timestamp/value/score).
+    header = ['channel', 'timestamp', 'utc_time', 'raw_value',
+              'anomaly_score', 'predicted_value', 'origin']
+
+    def _iso(ts):
+        if ts is None:
+            return ''
+        try:
+            return _dt.datetime.fromtimestamp(
+                float(ts), tz=_dt.timezone.utc,
+            ).strftime('%Y-%m-%dT%H:%M:%SZ')
+        except Exception:
+            return ''
+
+    import csv
+    import io as _io
+
+    def _stream():
+        # UTF-8 BOM so Excel opens the file with the right encoding.
+        yield b'\xef\xbb\xbf'
+        buf = _io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(header)
+        yield buf.getvalue().encode('utf-8')
+        try:
+            iterator = c.sqlite.iter_tel_rows(
+                channel, start_ts=start_ts, end_ts=end_ts, batch_size=1000,
+            )
+        except Exception as e:
+            logger.warning("telemetry_export iter_tel_rows(%s) failed: %s",
+                           channel, e, exc_info=True)
+            return
+        for row in iterator:
+            buf = _io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow([
+                channel,
+                row.get('timestamp', ''),
+                _iso(row.get('timestamp')),
+                '' if row.get('raw_value') is None else row.get('raw_value'),
+                '' if row.get('anomaly_score') is None else row.get('anomaly_score'),
+                '' if row.get('predicted_value') is None else row.get('predicted_value'),
+                row.get('origin') or 'acq',
+            ])
+            yield buf.getvalue().encode('utf-8')
+
+    resp = StreamingHttpResponse(_stream(), content_type='text/csv; charset=utf-8')
+    resp['Content-Disposition'] = (
+        'attachment; filename="phm_telemetry_{}.csv"'.format(channel)
+    )
+    return resp

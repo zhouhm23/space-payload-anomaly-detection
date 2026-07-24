@@ -24,6 +24,30 @@ from .cascade_types import LayerResult, CascadeOutput
 from .classic_filter import ClassicFilter
 from .physical_constraint import ConstraintConfig, PhysicalConstraint
 from .cascade_detector import CascadeDetector
+# Modular rule library (Stage-1 refactor: ClassicFilter / PhysicalConstraint
+# are now combinators over these per-rule modules).  Re-exported here so
+# callers can do ``from phm.algorithm import L1SigmaRule, build_filter``.
+from .rules import (
+    FILTER_REGISTRY,
+    register_filter,
+    build_filter,
+    DEFAULT_L1_MODULES,
+    DEFAULT_L3_MODULES,
+    DEFAULT_L35_MODULES,
+    L1ConstantRule,
+    L1SigmaRule,
+    L1IqrRule,
+    L1RateRule,
+    L3NanSanitiseRule,
+    L3ConstantRule,
+    L3RangeRule,
+    L3RateRule,
+    L3VarianceRule,
+    # Layer 3.5 leak-free post-processing modules (knee / EMA / persistence)
+    L3KneeThresholdRule,
+    L3EmaSmoothingRule,
+    L3PersistenceRule,
+)
 # Calibration components (offline-tuned enhancements)
 from .direction_calibrator import DirectionCalibrator
 from .freq_feature import FreqFeatureExtractor
@@ -73,6 +97,26 @@ __all__ = [
     # Cascade data types
     "LayerResult",
     "CascadeOutput",
+    # Modular rule library (Stage-1: per-rule modules + registry)
+    "FILTER_REGISTRY",
+    "register_filter",
+    "build_filter",
+    "DEFAULT_L1_MODULES",
+    "DEFAULT_L3_MODULES",
+    "DEFAULT_L35_MODULES",
+    "L1ConstantRule",
+    "L1SigmaRule",
+    "L1IqrRule",
+    "L1RateRule",
+    "L3NanSanitiseRule",
+    "L3ConstantRule",
+    "L3RangeRule",
+    "L3RateRule",
+    "L3VarianceRule",
+    # Layer 3.5 leak-free post-processing modules
+    "L3KneeThresholdRule",
+    "L3EmaSmoothingRule",
+    "L3PersistenceRule",
     # Model registry (agent-friendly: enumerate models without torch import)
     "MODEL_REGISTRY",
     "ModelEntry",

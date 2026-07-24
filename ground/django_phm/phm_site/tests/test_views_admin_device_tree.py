@@ -273,3 +273,233 @@ class DeviceTreeChannelsApiTest(TestCase):
     def test_anonymous_redirects(self):
         resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 302)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# @command DSL save hook (Plan 3): validation blocking + persistence
+# ════════════════════════════════════════════════════════════════════════════
+
+class DeviceTreeSaveDslHookTest(TestCase):
+    """The save API must block on hard DSL errors and persist valid configs.
+
+    Coverage:
+      - E1-E5 each block the save with HTTP 400 + structured error payload.
+      - Sensors with no description / no @commands pass through unchanged
+        (backward compatibility for existing deployments).
+      - A valid @command description is persisted to channel_calibration.json
+        via CalibrationConfig.upsert.
+      - The live validation API returns errors/warnings as JSON.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.save_url = reverse('phm_admin_device_tree_save')
+        self.validate_url = reverse('phm_admin_device_tree_validate_dsl')
+        self.superuser = User.objects.create_superuser(
+            username='admin1', password='pw', email='a@b.c'
+        )
+
+    def _post_save(self, tree):
+        self.client.force_login(self.superuser)
+        c = _make_mock_container(save_result={'status': 'ok'})
+        p1, p2 = _patch_container(c)
+        with p1, p2:
+            return self.client.post(
+                self.save_url, json.dumps({'device_tree': tree}),
+                content_type='application/json',
+            )
+
+    # ── Backward compatibility ─────────────────────────────────────────
+
+    def test_sensor_without_description_passes(self):
+        """A sensor with no description must not be blocked by the DSL hook."""
+        resp = self._post_save([
+            {'type': 'sensor', 'sourceId': 'X-1'},
+        ])
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['status'], 'ok')
+
+    def test_sensor_with_prose_only_description_passes(self):
+        """Plain prose (no @commands) must not be blocked."""
+        resp = self._post_save([
+            {'type': 'sensor', 'sourceId': 'X-1',
+             'description': '普通温度传感器'},
+        ])
+        self.assertEqual(resp.status_code, 200)
+
+    def test_legacy_at_rul_description_passes(self):
+        """Legacy ``@rul:xxx`` is unknown to the DSL → treated as prose → passes."""
+        resp = self._post_save([
+            {'type': 'sensor', 'sourceId': 'X-1',
+             'description': '@rul:fd001 special'},
+        ])
+        self.assertEqual(resp.status_code, 200)
+
+    # ── E1-E5 hard errors block the save ───────────────────────────────
+
+    def test_e1_unknown_algorithm_blocks_save(self):
+        resp = self._post_save([
+            {'type': 'sensor', 'sourceId': 'X-1',
+             'description': '@算法=does_not_exist'},
+        ])
+        self.assertEqual(resp.status_code, 400)
+        body = resp.json()
+        self.assertEqual(body['channel'], 'X-1')
+        self.assertTrue(any('E1' in e for e in body['errors']))
+
+    def test_e2_skip_model_mutex_blocks_save(self):
+        resp = self._post_save([
+            {'type': 'sensor', 'sourceId': 'X-1',
+             'description': '@算法=tspulse @跳过模型'},
+        ])
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(any('E2' in e for e in resp.json()['errors']))
+
+    def test_e3_setpoint_no_anchor_blocks_save(self):
+        resp = self._post_save([
+            {'type': 'sensor', 'sourceId': 'X-1',
+             'description': '@算法=l1_setpoint'},
+        ])
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(any('E3' in e for e in resp.json()['errors']))
+
+    def test_e4_threshold_out_of_range_blocks_save(self):
+        resp = self._post_save([
+            {'type': 'sensor', 'sourceId': 'X-1',
+             'description': '@算法=tspulse @阈值=1.5'},
+        ])
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(any('E4' in e for e in resp.json()['errors']))
+
+    def test_e5_param_for_undeclared_module_blocks_save(self):
+        resp = self._post_save([
+            {'type': 'sensor', 'sourceId': 'X-1',
+             'description': '@算法=tspulse @参数.l1_sigma.sigma_k=4'},
+        ])
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(any('E5' in e for e in resp.json()['errors']))
+
+    # ── Error payload structure ────────────────────────────────────────
+
+    def test_error_payload_carries_channel_and_description(self):
+        resp = self._post_save([
+            {'type': 'sensor', 'sourceId': 'X-1',
+             'description': '@算法=bad'},
+        ])
+        body = resp.json()
+        self.assertEqual(body['status'], 'error')
+        self.assertEqual(body['channel'], 'X-1')
+        self.assertIn('description', body)
+        self.assertEqual(body['description'], '@算法=bad')
+
+    def test_first_failing_sensor_reported(self):
+        """When multiple sensors fail, only the first is reported (fix-and-resubmit)."""
+        resp = self._post_save([
+            {'type': 'sensor', 'sourceId': 'X-1',
+             'description': '@算法=bad1'},
+            {'type': 'sensor', 'sourceId': 'X-2',
+             'description': '@算法=bad2'},
+        ])
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()['channel'], 'X-1')
+
+    # ── Persistence (best-effort, mocked) ──────────────────────────────
+
+    def test_valid_dsl_persists_calibration(self):
+        """A valid @command description triggers CalibrationConfig.upsert."""
+        with mock.patch('phm_site.views_admin.CalibrationConfig') as MockCC:
+            instance = MockCC.return_value
+            instance.get.return_value = None
+            c = _make_mock_container(save_result={'status': 'ok'})
+            p1, p2 = _patch_container(c)
+            with p1, p2:
+                resp = self._post_save([{
+                    'type': 'sensor', 'sourceId': 'X-1',
+                    'description': '@算法=tspulse @阈值=0.6',
+                }])
+        self.assertEqual(resp.status_code, 200)
+        # upsert must have been called once for X-1.
+        instance.upsert.assert_called_once()
+        args = instance.upsert.call_args[0]
+        self.assertEqual(args[0], 'X-1')
+
+    def test_persistence_failure_does_not_break_save(self):
+        """If CalibrationConfig.upsert raises, the save itself still succeeds."""
+        with mock.patch('phm_site.views_admin.CalibrationConfig') as MockCC:
+            instance = MockCC.return_value
+            instance.get.return_value = None
+            instance.upsert.side_effect = RuntimeError('disk full')
+            c = _make_mock_container(save_result={'status': 'ok'})
+            p1, p2 = _patch_container(c)
+            with p1, p2:
+                resp = self._post_save([{
+                    'type': 'sensor', 'sourceId': 'X-1',
+                    'description': '@算法=tspulse',
+                }])
+        # Tree was already saved; calibration write failure is logged, not raised.
+        self.assertEqual(resp.status_code, 200)
+
+
+class DeviceTreeValidateDslApiTest(TestCase):
+    """The live validation API (POST description → errors/warnings)."""
+
+    def setUp(self):
+        self.client = Client()
+        self.url = reverse('phm_admin_device_tree_validate_dsl')
+        self.staff = User.objects.create_user(
+            username='staff1', password='pw', is_staff=True
+        )
+
+    def test_valid_description_returns_no_errors(self):
+        self.client.force_login(self.staff)
+        resp = self.client.post(
+            self.url,
+            json.dumps({'description': '@算法=tspulse'}),
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body['status'], 'ok')
+        self.assertEqual(body['errors'], [])
+        self.assertTrue(body['has_commands'])
+
+    def test_invalid_description_returns_errors(self):
+        self.client.force_login(self.staff)
+        resp = self.client.post(
+            self.url,
+            json.dumps({'description': '@算法=bad @阈值=2'}),
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        # Both E1 and E4 should be reported.
+        self.assertTrue(any('E1' in e for e in body['errors']))
+        self.assertTrue(any('E4' in e for e in body['errors']))
+
+    def test_empty_description_returns_no_errors_but_has_commands_false(self):
+        self.client.force_login(self.staff)
+        resp = self.client.post(
+            self.url,
+            json.dumps({'description': 'just prose'}),
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body['errors'], [])
+        self.assertFalse(body['has_commands'])
+
+    def test_anonymous_redirects(self):
+        resp = self.client.post(
+            self.url,
+            json.dumps({'description': '@算法=tspulse'}),
+            content_type='application/json',
+        )
+        # staff_member_required redirects non-logged-in users.
+        self.assertEqual(resp.status_code, 302)
+
+    def test_invalid_json_returns_400(self):
+        self.client.force_login(self.staff)
+        resp = self.client.post(
+            self.url, 'not json', content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 400)

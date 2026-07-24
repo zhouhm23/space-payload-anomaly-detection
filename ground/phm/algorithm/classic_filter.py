@@ -14,8 +14,18 @@ data *before* the expensive DL detector runs.  Four independent checks:
 
 4. **Rate-of-change limit** — consecutive-sample jump exceeds a threshold.
 
-Checks are individually toggleable so the filter can be tailored per
-deployment.
+Stage-1 refactor: the four checks are now independent modules under
+``phm.algorithm.rules`` and this class is a *combinator* that builds a
+default rule chain from the constructor parameters and aggregates their
+outputs.  The constructor signature and ``filter()`` return shape are
+byte-for-byte backward compatible (verified by
+``tests/test_rules_equivalence.py``) — existing callers (WarningService,
+test_cascade.py) need no changes.
+
+A new optional ``rules`` parameter accepts an explicit ``list[BaseFilter]``
+to override the default chain (Stage-2 per-channel configuration will use
+this).  When ``rules=None`` the chain is built from ``enable_*`` and the
+threshold parameters, reproducing the pre-refactor behaviour exactly.
 """
 
 from __future__ import annotations
@@ -27,16 +37,20 @@ from .cascade_types import (
     LayerResult,
     LAYER_L1_CLASSIC,
     DECISION_PASS,
-    DECISION_ALERT,
     DECISION_SKIP,
-    DECISION_SUSPICIOUS,
+)
+from .rules import (
+    L1ConstantRule,
+    L1SigmaRule,
+    L1IqrRule,
+    L1RateRule,
 )
 
 __all__ = ["ClassicFilter"]
 
 
 class ClassicFilter(BaseFilter):
-    """Layer-1 statistical pre-filter.
+    """Layer-1 statistical pre-filter (rule-chain combinator).
 
     Args:
         enable_constant:   detect near-constant channels.
@@ -52,6 +66,13 @@ class ClassicFilter(BaseFilter):
         rate_multiplier:   ``max_rate = p99 * multiplier``.
         max_rate:          explicit rate-of-change threshold.  Overrides the
                            quantile derivation when not None.
+        rules:             explicit rule chain.  When None (default) the
+                           chain is built from the parameters above so the
+                           filter reproduces the pre-refactor behaviour.
+                           When a list is given it overrides the defaults;
+                           the ``enable_*`` / threshold params are still
+                           stored as attributes for introspection but do
+                           not affect the chain.
     """
 
     name = "classic_filter"
@@ -69,7 +90,10 @@ class ClassicFilter(BaseFilter):
         rate_quantile: float = 99.0,
         rate_multiplier: float = 5.0,
         max_rate: float | None = None,
+        rules: list[BaseFilter] | None = None,
     ) -> None:
+        # Store all original parameters as attributes (backward compat —
+        # external code may introspect them).
         self.enable_constant = enable_constant
         self.enable_sigma = enable_sigma
         self.enable_iqr = enable_iqr
@@ -80,6 +104,50 @@ class ClassicFilter(BaseFilter):
         self.rate_quantile = rate_quantile
         self.rate_multiplier = rate_multiplier
         self.max_rate = max_rate
+
+        if rules is not None:
+            # Explicit override — caller takes responsibility for the chain
+            # contents (e.g. Stage-2 per-channel config).  We do not inject
+            # the enable_* / threshold params here.
+            self._chain: list[BaseFilter] = list(rules)
+            self._rules_explicit = True
+        else:
+            self._chain = self._build_default_chain()
+            self._rules_explicit = False
+
+    # ------------------------------------------------------------------
+    # Chain construction
+    # ------------------------------------------------------------------
+
+    def _build_default_chain(self) -> list[BaseFilter]:
+        """Build the default L1 rule chain from constructor parameters.
+
+        Order matters: the constant/empty/insufficient_finite guard runs
+        first (it owns the short-circuit SKIP decisions), then σ / IQR /
+        rate in descending severity order so the combinator's
+        "first-triggered-rule wins" decision aggregation reproduces the
+        original severity ordering (σ/IQR → alert, rate → suspicious).
+        """
+        chain: list[BaseFilter] = [
+            # Guard rule is always present — it owns empty-input and
+            # insufficient-finite checks that are NOT gated by
+            # enable_constant in the original code.
+            L1ConstantRule(
+                constant_std=self.constant_std,
+                enable_constant=self.enable_constant,
+            ),
+        ]
+        if self.enable_sigma:
+            chain.append(L1SigmaRule(sigma_k=self.sigma_k))
+        if self.enable_iqr:
+            chain.append(L1IqrRule(iqr_factor=self.iqr_factor))
+        if self.enable_rate:
+            chain.append(L1RateRule(
+                rate_quantile=self.rate_quantile,
+                rate_multiplier=self.rate_multiplier,
+                max_rate=self.max_rate,
+            ))
+        return chain
 
     # ------------------------------------------------------------------
     # Public API
@@ -98,112 +166,66 @@ class ClassicFilter(BaseFilter):
         """
         v = np.asarray(values, dtype=np.float64).ravel()
         n = len(v)
-        rules: list[str] = []
-        decision = DECISION_PASS
-        per_sample = np.zeros(n, dtype=np.float32)
 
-        if n == 0:
-            return LayerResult(
-                layer=LAYER_L1_CLASSIC,
-                decision=DECISION_SKIP,
-                score=0.0,
-                detail={"reason": "empty_input"},
-            )
+        # --- Phase 1: data-quality guard (empty / constant / insufficient) -
+        # The first rule in the default chain owns the SKIP short-circuits.
+        # In explicit-chain mode the first rule (whatever it is) runs first;
+        # if it returns SKIP we propagate that result unchanged.
+        if self._chain:
+            first = self._chain[0].filter(v)
+            if first.decision == DECISION_SKIP:
+                return first
+        else:
+            first = None
 
-        # NaN / Inf safety
+        # --- Phase 2: statistical baseline (mu/sigma computed up front, --
+        # matching the original code which calculated them before any    --
+        # outlier rule ran).  These always appear in the returned detail. -
         finite_mask = np.isfinite(v)
         n_finite = int(finite_mask.sum())
+        if n_finite >= 2:
+            clean = v[finite_mask]
+            mu = float(np.mean(clean))
+            sigma = float(np.std(clean))
+        else:
+            # Should not happen in default-chain mode (the guard would have
+            # returned insufficient_finite SKIP above), but stay safe in
+            # explicit-chain mode.
+            mu = 0.0
+            sigma = 0.0
 
-        # --- 1. Constant-channel detection ------------------------------
-        if self.enable_constant and n_finite >= 2:
-            finite_vals = v[finite_mask]
-            std = float(np.std(finite_vals))
-            if std < self.constant_std:
-                return LayerResult(
-                    layer=LAYER_L1_CLASSIC,
-                    decision=DECISION_SKIP,
-                    score=0.0,
-                    detail={
-                        "rules": ["constant_channel"],
-                        "std": std,
-                        "threshold": self.constant_std,
-                        "n_samples": n,
-                    },
-                )
+        # --- Phase 3: aggregate remaining rules ---------------------------
+        per_sample = np.zeros(n, dtype=np.float32)
+        rules: list[str] = []
+        decision = DECISION_PASS
 
-        # If almost everything is NaN/Inf, skip — data is unusable.
-        if n_finite < 2:
-            return LayerResult(
-                layer=LAYER_L1_CLASSIC,
-                decision=DECISION_SKIP,
-                score=0.0,
-                detail={
-                    "rules": ["insufficient_finite"],
-                    "n_finite": n_finite,
-                    "n_samples": n,
-                },
-            )
+        # Seed with the guard rule's per-sample contribution (zero in
+        # default mode, but an explicit chain's first rule may contribute).
+        if first is not None:
+            ps0 = first.detail.get("per_sample_score")
+            if ps0 is not None:
+                ps0 = np.asarray(ps0, dtype=np.float32)
+                if len(ps0) == n:
+                    per_sample = np.maximum(per_sample, ps0)
+            rules.extend(first.detail.get("rules", []))
+            if decision == DECISION_PASS and first.decision != DECISION_PASS:
+                decision = first.decision
 
-        clean = v[finite_mask]
-        mu = float(np.mean(clean))
-        sigma = float(np.std(clean))
-
-        # --- 2. 3σ rule -------------------------------------------------
-        if self.enable_sigma and sigma > 0:
-            lo = mu - self.sigma_k * sigma
-            hi = mu + self.sigma_k * sigma
-            # NOTE: parentheses are required here because ``&`` binds
-            # tighter than ``|`` in Python.  Writing
-            # ``finite_mask & (v < lo) | (v > hi)`` would parse as
-            # ``(finite_mask & (v < lo)) | (v > hi)`` and incorrectly flag
-            # +Inf samples (v > hi is True for +Inf even though finite_mask
-            # is False).  See experiments/diag/reproduce_classic_filter_opbug.py.
-            sigma_out = finite_mask & ((v < lo) | (v > hi))
-            n_sigma = int(sigma_out.sum())
-            if n_sigma > 0:
-                rules.append("sigma_3")
-                per_sample[sigma_out] = np.maximum(per_sample[sigma_out], 0.8)
-                if decision == DECISION_PASS:
-                    decision = DECISION_ALERT
-
-        # --- 3. IQR rule ------------------------------------------------
-        if self.enable_iqr and n_finite >= 4:
-            q1 = float(np.percentile(clean, 25))
-            q3 = float(np.percentile(clean, 75))
-            iqr = q3 - q1
-            if iqr > 0:
-                lo_iqr = q1 - self.iqr_factor * iqr
-                hi_iqr = q3 + self.iqr_factor * iqr
-                # See note on the sigma rule above: parentheses required so
-                # non-finite samples are excluded by finite_mask before the
-                # OR combines the two comparisons.
-                iqr_out = finite_mask & ((v < lo_iqr) | (v > hi_iqr))
-                n_iqr = int(iqr_out.sum())
-                if n_iqr > 0:
-                    rules.append("iqr")
-                    per_sample[iqr_out] = np.maximum(per_sample[iqr_out], 0.7)
-                    if decision == DECISION_PASS:
-                        decision = DECISION_ALERT
-
-        # --- 4. Rate-of-change ------------------------------------------
-        if self.enable_rate and n >= 2:
-            diffs = np.abs(np.diff(v))
-            finite_diffs = diffs[np.isfinite(diffs)]
-            if len(finite_diffs) > 0:
-                if self.max_rate is not None:
-                    thr = self.max_rate
-                else:
-                    p = float(np.percentile(finite_diffs, self.rate_quantile))
-                    thr = p * self.rate_multiplier
-                if thr > 0:
-                    rate_out = np.zeros(n, dtype=bool)
-                    rate_out[1:] = diffs > thr
-                    n_rate = int(rate_out.sum())
-                    if n_rate > 0:
-                        rules.append("rate_of_change")
-                        per_sample[rate_out] = np.maximum(per_sample[rate_out], 0.6)
-                        if decision == DECISION_PASS:
-                            decision = DECISION_SUSPICIOUS
+        # Run the remaining rules in chain order.  Per-sample scores are
+        # merged with element-wise max; rule names are concatenated;
+        # decision follows the original "first non-pass trigger wins"
+        # semantics (σ/IQR → alert has priority over rate → suspicious
+        # because they appear earlier in the chain).
+        for rule in self._chain[1:]:
+            r = rule.filter(v)
+            r_ps = r.detail.get("per_sample_score")
+            if r_ps is not None:
+                r_ps = np.asarray(r_ps, dtype=np.float32)
+                if len(r_ps) == n:
+                    per_sample = np.maximum(per_sample, r_ps)
+            rules.extend(r.detail.get("rules", []))
+            if decision == DECISION_PASS and r.decision != DECISION_PASS:
+                decision = r.decision
 
         rep_score = float(np.max(per_sample)) if n > 0 else 0.0
         return LayerResult(

@@ -209,7 +209,17 @@ SIMPLEUI_CONFIG = {
             'models': [
                 {'name': '仪表盘', 'icon': 'fas fa-tachometer-alt', 'url': '/admin/phm_site/dashboard/'},
                 {'name': '告警与预警', 'icon': 'fas fa-bell', 'url': '/admin/phm_site/alert/'},
-                {'name': '回收站', 'icon': 'fas fa-trash', 'url': '/admin/phm_site/recycle/'},
+                {'name': '遥测数据', 'icon': 'fas fa-database', 'url': '/admin/phm_site/telemetry/'},
+                # v1.2: recycle bin splits into per-data-type sub-menus (three-level).
+                # SimpleUI renders a nested ``models`` list as a third level under
+                # the parent entry. Both children share one ``recycle_view``,
+                # dispatched by the ``?type=`` query string.
+                {'name': '回收站', 'icon': 'fas fa-trash', 'models': [
+                    {'name': '告警回收站', 'icon': 'fas fa-bell-slash',
+                     'url': '/admin/phm_site/recycle/?type=alert'},
+                    {'name': '遥测回收站', 'icon': 'fas fa-database',
+                     'url': '/admin/phm_site/recycle/?type=telemetry'},
+                ]},
             ],
         },
         {
@@ -218,7 +228,7 @@ SIMPLEUI_CONFIG = {
             'models': [
                 {'name': '设备树', 'icon': 'fas fa-sitemap', 'url': '/admin/phm_site/device-tree/'},
                 {'name': '系统设置', 'icon': 'fas fa-sliders-h', 'url': '/admin/phm_site/settings/'},
-                {'name': '模型管理', 'icon': 'fas fa-cubes', 'url': '/admin/phm_site/models/'},
+                {'name': '算法库', 'icon': 'fas fa-cubes', 'url': '/admin/phm_site/library/'},
             ],
         },
     ],

@@ -654,3 +654,281 @@ class RecycleAjaxLogicTest(TestCase):
     def test_get_purge_not_allowed(self):
         resp = self.client.get(self.purge_url)
         self.assertEqual(resp.status_code, 405)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Telemetry recycle bin tests (v1.2)
+# ════════════════════════════════════════════════════════════════════════════
+
+class RecycleTelemetryViewTest(TestCase):
+    """GET ?type=telemetry — telemetry recycle bin page."""
+
+    def setUp(self):
+        self.client = Client()
+        self.url = reverse('phm_admin_recycle')
+        self.staff = User.objects.create_user(
+            username='staff1', password='pw', is_staff=True
+        )
+        self.superuser = User.objects.create_superuser(
+            username='admin1', password='pw', email='a@b.c'
+        )
+
+    def _mock_container(self, deleted_rows=None, deleted_count=0):
+        """Mock container with the telemetry soft-delete methods wired up."""
+        c = mock.Mock()
+        c.sqlite.query_tel_deleted.return_value = deleted_rows or []
+        c.sqlite.count_tel.return_value = 0  # live count default 0
+        # count_tel is called twice: include_deleted=True then =False.
+        # Make the difference equal deleted_count.
+        c.sqlite.count_tel.side_effect = lambda *a, **k: (
+            deleted_count if k.get('include_deleted') else 0
+        )
+        c.config.load.return_value = {'device_tree': [
+            {'type': 'sensor', 'name': '传感器 C-1', 'channelName': 'C-1', 'unit': 'A'},
+        ]}
+        return c
+
+    def test_no_channel_renders_empty_prompt(self):
+        """No channel selected → empty-state prompt asking to pick a sensor."""
+        self.client.force_login(self.staff)
+        with mock.patch('phm_site.views_admin.services_bridge') as sb:
+            sb.get_state.return_value = 'ready'
+            sb.get_container.return_value = self._mock_container()
+            resp = self.client.get(self.url, {'type': 'telemetry'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '遥测回收站')
+        self.assertContains(resp, '请先选择一个传感器')
+
+    def test_with_channel_renders_table(self):
+        self.client.force_login(self.superuser)
+        rows = [{
+            'id': 7, 'timestamp': 1700000000.0, 'raw_value': 0.123,
+            'anomaly_score': 0.5, 'predicted_value': None,
+            'predicted_anomaly_score': None, 'origin_ts': None,
+            'ingested_at': 1700000001.0, 'deleted_at': 1700000005.0,
+            'origin': 'manual',
+        }]
+        with mock.patch('phm_site.views_admin.services_bridge') as sb:
+            sb.get_state.return_value = 'ready'
+            sb.get_container.return_value = self._mock_container(
+                deleted_rows=rows, deleted_count=1,
+            )
+            resp = self.client.get(self.url, {'type': 'telemetry',
+                                              'channel': 'C-1'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '遥测回收站')
+        # superuser + rows → toolbar buttons present
+        self.assertContains(resp, 'phm-recycle-restore-btn')
+        self.assertContains(resp, 'phm-recycle-purge-btn')
+        # rowid cell rendered
+        self.assertContains(resp, '>7<')
+
+    def test_query_tel_deleted_called_with_pagination(self):
+        """?page=2&limit=20 → offset=20 passed to query_tel_deleted."""
+        self.client.force_login(self.staff)
+        with mock.patch('phm_site.views_admin.services_bridge') as sb:
+            sb.get_state.return_value = 'ready'
+            sb.get_container.return_value = self._mock_container(
+                deleted_count=40,
+            )
+            self.client.get(self.url, {'type': 'telemetry', 'channel': 'C-1',
+                                        'page': 2, 'limit': 20})
+        args, kwargs = sb.get_container.return_value.sqlite.query_tel_deleted.call_args
+        self.assertEqual(kwargs.get('offset'), 20)
+        self.assertEqual(kwargs.get('limit'), 20)
+
+    def test_default_type_is_alert(self):
+        """No ?type= → falls through to _recycle_alert (existing behaviour)."""
+        self.client.force_login(self.staff)
+        with mock.patch('phm_site.views_admin.services_bridge') as sb:
+            sb.get_state.return_value = 'ready'
+            c = mock.Mock()
+            c.sqlite.query_deleted.return_value = []
+            c.sqlite.count_deleted.return_value = 0
+            c.config.load.return_value = {'device_tree': []}
+            sb.get_container.return_value = c
+            resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        # alert recycle renders the "Recycle empty" copy, not the telemetry prompt
+        self.assertContains(resp, '回收站为空')
+        # query_tel_deleted should NOT have been called on the alert branch
+        c.sqlite.query_tel_deleted.assert_not_called()
+
+    def test_container_not_ready_renders_state_page(self):
+        self.client.force_login(self.staff)
+        with mock.patch('phm_site.views_admin.services_bridge') as sb:
+            sb.get_state.return_value = 'initializing'
+            sb.get_init_error.return_value = None
+            resp = self.client.get(self.url, {'type': 'telemetry'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '正在初始化')
+
+
+class RecycleTelemetryAjaxTest(TestCase):
+    """restore / purge AJAX with type=telemetry."""
+
+    def setUp(self):
+        self.client = Client()
+        self.restore_url = reverse('phm_admin_recycle_restore')
+        self.purge_url = reverse('phm_admin_recycle_purge')
+        self.superuser = User.objects.create_superuser(
+            username='admin1', password='pw', email='a@b.c'
+        )
+        self.staff = User.objects.create_user(
+            username='staff1', password='pw', is_staff=True
+        )
+        self.client.force_login(self.superuser)
+
+    def test_staff_restore_telemetry_forbidden(self):
+        self.client.force_login(self.staff)
+        resp = self.client.post(
+            self.restore_url,
+            json.dumps({'type': 'telemetry', 'channel': 'C-1', 'ids': [1]}),
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_staff_purge_telemetry_forbidden(self):
+        self.client.force_login(self.staff)
+        resp = self.client.post(
+            self.purge_url,
+            json.dumps({'type': 'telemetry', 'channel': 'C-1', 'ids': [1]}),
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_restore_telemetry_success(self):
+        with mock.patch('phm_site.views_admin.services_bridge') as sb:
+            sb.get_state.return_value = 'ready'
+            sb.get_container.return_value = mock.Mock(
+                sqlite=mock.Mock(restore_tel=mock.Mock(return_value=2))
+            )
+            resp = self.client.post(
+                self.restore_url,
+                json.dumps({'type': 'telemetry', 'channel': 'C-1',
+                             'ids': [10, 11]}),
+                content_type='application/json',
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body['status'], 'ok')
+        self.assertEqual(body['restored'], 2)
+        self.assertEqual(body['type'], 'telemetry')
+        sb.get_container.return_value.sqlite.restore_tel.assert_called_once_with(
+            'C-1', [10, 11]
+        )
+
+    def test_purge_telemetry_success(self):
+        with mock.patch('phm_site.views_admin.services_bridge') as sb:
+            sb.get_state.return_value = 'ready'
+            sb.get_container.return_value = mock.Mock(
+                sqlite=mock.Mock(purge_tel=mock.Mock(return_value=3))
+            )
+            resp = self.client.post(
+                self.purge_url,
+                json.dumps({'type': 'telemetry', 'channel': 'C-1',
+                             'ids': [1, 2, 3]}),
+                content_type='application/json',
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body['purged'], 3)
+        sb.get_container.return_value.sqlite.purge_tel.assert_called_once_with(
+            'C-1', [1, 2, 3]
+        )
+
+    def test_restore_telemetry_missing_channel_returns_400(self):
+        resp = self.client.post(
+            self.restore_url,
+            json.dumps({'type': 'telemetry', 'ids': [1]}),
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_purge_telemetry_missing_channel_returns_400(self):
+        resp = self.client.post(
+            self.purge_url,
+            json.dumps({'type': 'telemetry', 'ids': [1]}),
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_restore_telemetry_empty_ids_returns_400(self):
+        resp = self.client.post(
+            self.restore_url,
+            json.dumps({'type': 'telemetry', 'channel': 'C-1', 'ids': []}),
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_restore_telemetry_service_exception_returns_500(self):
+        with mock.patch('phm_site.views_admin.services_bridge') as sb:
+            sb.get_state.return_value = 'ready'
+            sb.get_container.return_value = mock.Mock(
+                sqlite=mock.Mock(restore_tel=mock.Mock(
+                    side_effect=RuntimeError("db lock")))
+            )
+            resp = self.client.post(
+                self.restore_url,
+                json.dumps({'type': 'telemetry', 'channel': 'C-1', 'ids': [1]}),
+                content_type='application/json',
+            )
+        self.assertEqual(resp.status_code, 500)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SIMPLEUI_CONFIG structure tests (v1.2 — three-level recycle sub-menu)
+# ════════════════════════════════════════════════════════════════════════════
+
+class SimpleUiConfigRecycleMenuTest(TestCase):
+    """Assert the SIMPLEUI_CONFIG carries a three-level recycle sub-menu.
+
+    The user's v1.2 requirement is a sidebar with three levels
+    (运营管理 → 回收站 → [告警回收站, 遥测回收站]). SimpleUI's ``menu.js``
+    renders nested ``models`` recursively, so a three-level structure works
+    as long as the config actually carries it. These tests guard against an
+    accidental rollback to a flat single-level entry.
+    """
+
+    def _ops_group(self):
+        from django.conf import settings
+        menus = settings.SIMPLEUI_CONFIG.get('menus', [])
+        for m in menus:
+            if m.get('name') == '运营管理':
+                return m
+        return None
+
+    def _recycle_entry(self):
+        ops = self._ops_group()
+        if not ops:
+            return None
+        for model in ops.get('models', []):
+            if model.get('name') == '回收站':
+                return model
+        return None
+
+    def test_ops_group_exists(self):
+        self.assertIsNotNone(self._ops_group())
+
+    def test_recycle_entry_has_nested_models(self):
+        """回收站 entry must carry a nested ``models`` list (three-level)."""
+        entry = self._recycle_entry()
+        self.assertIsNotNone(entry, '运营管理 group must contain a 回收站 entry')
+        self.assertIn('models', entry, '回收站 entry must be three-level (nested models)')
+        self.assertIsInstance(entry['models'], list)
+        self.assertEqual(len(entry['models']), 2)
+
+    def test_recycle_sub_menu_alert(self):
+        entry = self._recycle_entry()
+        names = [m.get('name') for m in entry['models']]
+        self.assertIn('告警回收站', names)
+        alert = next(m for m in entry['models'] if m['name'] == '告警回收站')
+        self.assertIn('type=alert', alert.get('url', ''))
+
+    def test_recycle_sub_menu_telemetry(self):
+        entry = self._recycle_entry()
+        names = [m.get('name') for m in entry['models']]
+        self.assertIn('遥测回收站', names)
+        tel = next(m for m in entry['models'] if m['name'] == '遥测回收站')
+        self.assertIn('type=telemetry', tel.get('url', ''))
+

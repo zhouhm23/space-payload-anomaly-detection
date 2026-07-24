@@ -1,16 +1,21 @@
-"""Page 1: model-management page tests.
+"""Page 1: model-management page tests (now superseded by library_view).
 
-Coverage:
-  (a) Anonymous access → 302 redirect to login
-  (b) Staff access → 200 + key content rendered
-  (c) Container-not-ready → renders the status placeholder page (no 500)
-  (d) Device-tree @ command scanning is correct (_scan_sensor_model_usage)
-  (e) Default usage scanning (_scan_default_usage)
-  (f) Local asset check (_check_local_assets; no torch import)
+The single-page ``models_view`` was replaced by the 5-sub-menu
+``library_view`` (v1.2).  The old ``/admin/phm_site/models/`` route now
+returns a 301 permanent redirect to ``/admin/phm_site/library/`` — its
+access-control behaviour changed accordingly (every authenticated user
+gets a 301, anonymous users still hit the login gate first).
 
-Tests use Django TestCase (pytest-django also works) and do not depend on the
-real Container state — models_view's device-tree read has a try/except
-fallback that renders the placeholder page when the Container is not ready.
+This file retains coverage for the three *helper* functions that
+``library_view`` reuses as fallbacks / building blocks:
+  - ``_scan_sensor_model_usage`` (legacy @ command substring matcher,
+    reused by ``scan_module_usage`` as backward-compat fallback)
+  - ``_scan_default_usage`` (kept for callers that still want the legacy
+    default-usage shape)
+  - ``_check_local_assets`` (reused by ``library_view`` for model cards)
+
+The full library-page coverage (5 tabs, dual panel, read-only, 301) lives
+in ``test_views_admin_library.py``.
 """
 from __future__ import annotations
 
@@ -26,85 +31,51 @@ from phm_site.views_admin import (
 from phm.algorithm._registry import MODEL_REGISTRY
 
 
-class ModelsViewAccessTest(TestCase):
-    """Page access control and rendering."""
+class ModelsRouteRedirectTest(TestCase):
+    """The legacy /models/ route now 301-redirects to /library/.
+
+    Detailed library-page coverage (cards, tabs, dual panel) lives in
+    test_views_admin_library.py; here we only verify the legacy URL's
+    redirect semantics so old bookmarks do not break.
+    """
 
     def setUp(self):
         self.client = Client()
         self.url = reverse('phm_admin_models')
-        # Staff user (not superuser).
         self.staff = User.objects.create_user(
             username='staff1', password='pw', is_staff=True
         )
-        self.superuser = User.objects.create_superuser(
-            username='admin1', password='pw', email='a@b.c'
-        )
 
-    def test_anonymous_redirects_to_login(self):
-        """Anonymous access → 302 redirect to the login page (spec: "show login page when not logged in")."""
-        resp = self.client.get(self.url)
-        self.assertEqual(resp.status_code, 302)
-        self.assertIn('/admin/login/', resp['Location'])
+    def test_anonymous_also_gets_301(self):
+        """Anonymous access → 301 to /library/ (redirect is unauthenticated;
+        the auth gate lives on library_view itself).
 
-    def test_staff_can_access(self):
-        """Staff users can access (model management is read-only; all staff can view)."""
-        self.client.force_login(self.staff)
-        resp = self.client.get(self.url)
-        self.assertEqual(resp.status_code, 200)
-
-    def test_superuser_can_access(self):
-        self.client.force_login(self.superuser)
-        resp = self.client.get(self.url)
-        self.assertEqual(resp.status_code, 200)
-
-    def test_renders_model_cards(self):
-        """The page should render a card for every model in MODEL_REGISTRY."""
-        self.client.force_login(self.staff)
-        resp = self.client.get(self.url)
-        self.assertContains(resp, '模型管理')
-        for key in MODEL_REGISTRY:
-            self.assertContains(resp, key)
-        # Exactly one of the asset-status badges is present.
-        self.assertTrue(
-            b'\xe8\xb5\x84\xe4\xba\xa7\xe5\xb0\xb1\xe7\xbb\xaa' in resp.content  # "资产就绪"
-            or b'\xe8\xb5\x84\xe4\xba\xa7\xe7\xbc\xba\xe5\xa4\xb1' in resp.content  # "资产缺失"
-        )
-
-    def test_deploy_label_in_cards(self):
-        """Each card renders a deploy label (ground / space)."""
-        self.client.force_login(self.staff)
-        resp = self.client.get(self.url)
-        # The 3 default models are all ground → at least 3 "ground" badges.
-        self.assertContains(resp, '地基')
-        # Each card dict carries deploy / deploy_label fields.
-        for card in resp.context['cards']:
-            self.assertIn('deploy', card)
-            self.assertIn('deploy_label', card)
-            entry = MODEL_REGISTRY[card['key']]
-            self.assertEqual(card['deploy'], entry.deploy)
-
-    def test_container_not_ready_still_renders(self):
-        """The model-management page does not depend on the Container: it
-        renders even when PHM is not ready (reads MODEL_REGISTRY only).
-
-        This is by design — model info is static metadata + a local asset
-        existence check; no torch load / no Container needed. The device-tree
-        scan has a try/except fallback.
+        Following the redirect lands on /library/ which then 302s to login
+        (verified separately in test_views_admin_library.py).
         """
-        from unittest import mock
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 301)
+        self.assertIn('/admin/phm_site/library/', resp['Location'])
+        # Following the chain lands on the login page (library_view is gated).
+        resp2 = self.client.get(resp['Location'])
+        self.assertEqual(resp2.status_code, 302)
+        self.assertIn('/admin/login/', resp2['Location'])
+
+    def test_authenticated_gets_301_to_library(self):
+        """Authenticated staff → 301 permanent redirect to /library/."""
         self.client.force_login(self.staff)
-        with mock.patch('phm_site.views_admin.services_bridge') as mock_sb:
-            mock_sb.get_state.return_value = 'initializing'
-            mock_sb.get_init_error.return_value = None
-            resp = self.client.get(self.url)
-        self.assertEqual(resp.status_code, 200)
-        # Model cards are still rendered (no 500, no placeholder page).
-        for key in MODEL_REGISTRY:
-            self.assertIn(key, resp.content.decode('utf-8'))
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 301)
+        self.assertIn('/admin/phm_site/library/', resp['Location'])
 
 
 class SensorModelUsageScanTest(TestCase):
-    """@ command scanning logic (_scan_sensor_model_usage)."""
+    """@ command scanning logic (_scan_sensor_model_usage).
+
+    Retained because ``scan_module_usage`` reuses this helper as its
+    backward-compat fallback for sensors whose descriptions still carry a
+    legacy ``@tspulse`` / ``@预测模型`` substring (pre-DSL migration).
+    """
 
     def test_explicit_at_command_detected(self):
         tree = [
@@ -155,7 +126,12 @@ class SensorModelUsageScanTest(TestCase):
 
 
 class DefaultUsageScanTest(TestCase):
-    """Default-usage scanning (_scan_default_usage)."""
+    """Default-usage scanning (_scan_default_usage).
+
+    Retained as a standalone helper (the new ``scan_module_usage`` has its
+    own default-flow backfill inside ChannelCalibration, but this legacy
+    shape is still consumed by ``models_view``'s old default-usage path).
+    """
 
     def test_normal_sensor_defaults_to_tspulse_and_ttm(self):
         """A normal sensor (no @ command) defaults to tspulse + ttm_r3."""
@@ -185,7 +161,11 @@ class DefaultUsageScanTest(TestCase):
 
 
 class CheckLocalAssetsTest(TestCase):
-    """Local asset check (_check_local_assets; no torch import)."""
+    """Local asset check (_check_local_assets; no torch import).
+
+    Retained because ``library_view`` calls this for every model card to
+    surface the local-asset availability badge.
+    """
 
     def test_unknown_model_key(self):
         result = _check_local_assets('nonexistent_key')

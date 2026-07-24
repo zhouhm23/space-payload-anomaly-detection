@@ -489,13 +489,151 @@ class AlertDetailApiTest(TestCase):
                                   diag_result={'diagnosis': 'real',
                                                 'context_summary': {}})
         p1, p2 = _patch_container(c)
-        with p1, p2:
+        with p1, p2, mock.patch('phm_site.views_admin.CalibrationConfig') as MockCC:
+            MockCC.return_value.get.return_value = None
             resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body['status'], 'ok')
         self.assertEqual(body['alert']['channel'], 'C-1')
         self.assertEqual(body['diagnosis']['text'], 'real')
+        # v1.2: sensor_info block is always present (even uncalibrated)
+        self.assertIn('sensor_info', body)
+        self.assertEqual(body['sensor_info']['channel'], 'C-1')
+
+
+class AlertDetailSensorInfoTest(TestCase):
+    """v1.2: alert_detail_api now returns a ``sensor_info`` block.
+
+    Covers _build_sensor_info pulling metadata from the device-tree node +
+    channel_calibration.json, plus the is_special badge (★ 特殊传感器).
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.staff = User.objects.create_user(
+            username='staff1', password='pw', is_staff=True
+        )
+        self.client.force_login(self.staff)
+        self.url = reverse('phm_admin_alert_detail', args=[1])
+
+    def _container_with_tree(self, tree):
+        alert = {
+            'id': 1, 'channel': 'C-1', 'alert_type': 'measured',
+            'score': 0.8, 'message': '', 'created_at': 1700000000,
+            'status': 'active', 'llm_verdict': None, 'human_verdict': None,
+            'final_status': 'active', 'raw_snapshot': [1, 2, 3],
+            'score_snapshot': [0.1, 0.5, 0.8],
+        }
+        c = mock.Mock()
+        c.sqlite.get_alert_by_id.return_value = alert
+        c.sqlite.get_diagnosis.return_value = None
+        c.config.load.return_value = {'device_tree': tree}
+        return c
+
+    def test_sensor_info_from_device_tree(self):
+        """display_name / unit / range / description pulled from device tree."""
+        tree = [{
+            'type': 'sensor', 'name': '传感器 C-1', 'channelName': 'C-1',
+            'sourceId': 'file:NASA-MSL/C-1', 'unit': 'A (归一化)',
+            'yMin': -1, 'yMax': 1,
+            'description': '载荷电子箱主控电流监测通道。',
+        }]
+        c = self._container_with_tree(tree)
+        p1, p2 = _patch_container(c)
+        with p1, p2, mock.patch('phm_site.views_admin.CalibrationConfig') as MockCC:
+            MockCC.return_value.get.return_value = None
+            resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        si = resp.json()['sensor_info']
+        self.assertEqual(si['channel'], 'C-1')
+        self.assertEqual(si['display_name'], '传感器 C-1')
+        self.assertEqual(si['unit'], 'A (归一化)')
+        self.assertEqual(si['range'], '-1 ~ 1')
+        self.assertEqual(si['range_min'], -1)
+        self.assertEqual(si['range_max'], 1)
+        self.assertEqual(si['description'], '载荷电子箱主控电流监测通道。')
+        self.assertFalse(si['is_special'])
+
+    def test_sensor_info_threshold_from_calibration(self):
+        """threshold / threshold_name pulled from channel_calibration.json."""
+        tree = [{'type': 'sensor', 'name': 'C-1', 'channelName': 'C-1'}]
+        c = self._container_with_tree(tree)
+        from phm.algorithm.calibration_config import ChannelCalibration
+        cal = ChannelCalibration(threshold=0.73, threshold_name='global_p99')
+        p1, p2 = _patch_container(c)
+        with p1, p2, mock.patch('phm_site.views_admin.CalibrationConfig') as MockCC:
+            MockCC.return_value.get.return_value = cal
+            resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        si = resp.json()['sensor_info']
+        self.assertEqual(si['threshold'], 0.73)
+        self.assertEqual(si['threshold_name'], 'global_p99')
+
+    def test_sensor_info_is_special_via_flag(self):
+        """isSpecial=true → is_special True (drawer shows ★ 特殊传感器 badge)."""
+        # channelName matches the alert row's channel ('C-1').
+        tree = [{'type': 'sensor', 'name': 'C-1 特殊', 'channelName': 'C-1',
+                 'isSpecial': True}]
+        c = self._container_with_tree(tree)
+        p1, p2 = _patch_container(c)
+        with p1, p2, mock.patch('phm_site.views_admin.CalibrationConfig') as MockCC:
+            MockCC.return_value.get.return_value = None
+            resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        si = resp.json()['sensor_info']
+        self.assertTrue(si['is_special'])
+
+    def test_sensor_info_is_special_via_rul_command(self):
+        """@rul in description → is_special True (RUL special sensor)."""
+        # channelName matches the alert row's channel ('C-1').
+        tree = [{'type': 'sensor', 'name': 'C-1 RUL', 'channelName': 'C-1',
+                 'description': '退化基准。@rul:fd001 启用 RUL 退化预测。'}]
+        c = self._container_with_tree(tree)
+        p1, p2 = _patch_container(c)
+        with p1, p2, mock.patch('phm_site.views_admin.CalibrationConfig') as MockCC:
+            MockCC.return_value.get.return_value = None
+            resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        si = resp.json()['sensor_info']
+        self.assertTrue(si['is_special'])
+
+    def test_sensor_info_missing_node_falls_back(self):
+        """Channel not in device tree → display_name falls back to channel."""
+        tree = []  # no sensors configured
+        c = self._container_with_tree(tree)
+        p1, p2 = _patch_container(c)
+        with p1, p2, mock.patch('phm_site.views_admin.CalibrationConfig') as MockCC:
+            MockCC.return_value.get.return_value = None
+            resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        si = resp.json()['sensor_info']
+        self.assertEqual(si['display_name'], 'C-1')
+        self.assertEqual(si['unit'], '')
+        self.assertEqual(si['range'], '—')
+        self.assertIsNone(si['threshold'])
+        self.assertFalse(si['is_special'])
+
+    def test_sensor_info_empty_channel(self):
+        """Alert without a channel → sensor_info has safe defaults."""
+        alert = {
+            'id': 2, 'channel': None, 'alert_type': 'measured',
+            'score': 0.5, 'message': '', 'created_at': 1700000000,
+            'status': 'active', 'llm_verdict': None, 'human_verdict': None,
+            'final_status': 'active', 'raw_snapshot': [], 'score_snapshot': [],
+        }
+        c = mock.Mock()
+        c.sqlite.get_alert_by_id.return_value = alert
+        c.sqlite.get_diagnosis.return_value = None
+        c.config.load.return_value = {'device_tree': []}
+        p1, p2 = _patch_container(c)
+        with p1, p2, mock.patch('phm_site.views_admin.CalibrationConfig') as MockCC:
+            MockCC.return_value.get.return_value = None
+            resp = self.client.get(reverse('phm_admin_alert_detail', args=[2]))
+        self.assertEqual(resp.status_code, 200)
+        si = resp.json()['sensor_info']
+        self.assertEqual(si['channel'], '')
+        self.assertFalse(si['is_special'])
 
 
 class AlertAnnotateApiTest(TestCase):

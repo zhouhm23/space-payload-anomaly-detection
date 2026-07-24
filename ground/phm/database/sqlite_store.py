@@ -35,7 +35,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 import numpy as np
 
@@ -216,6 +216,9 @@ class SQLiteStore:
         self._conn: sqlite3.Connection | None = None
         self._write_lock = threading.Lock()  # guards _conn writes
         self._created_tables: set[str] = set()  # cache of per-channel tables
+        # Flush counter for periodic WAL checkpointing (see _flush_loop).
+        # Reset to 0 whenever the writer thread (re)starts.
+        self._flush_count = 0
 
         if self.enabled:
             self._init_db()
@@ -239,10 +242,23 @@ class SQLiteStore:
         )
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+        # WAL tuning (v1.2 perf): the default wal_autocheckpoint (1000 pages,
+        # ~4 MB) was being outrun by the eval-thread write rate, letting the
+        # WAL balloon to ~900 MB in production. A 900 MB WAL forces every new
+        # reader connection (each Django request) to search a huge WAL index,
+        # amplifying read latency. Lower the threshold to 256 pages (~1 MB)
+        # so checkpoints fire far more frequently and the WAL stays small.
+        # PASSIVE mode (the default) is used so writers are never blocked.
+        self._conn.execute("PRAGMA wal_autocheckpoint=256")
         self._conn.executescript(_SCHEMA)
         self._migrate_verdict_columns()
         self._migrate_soft_delete_columns()
         self._migrate_snapshot_columns()
+        # Per-channel telemetry tables are created lazily by _ensure_tel_table
+        # (which already includes deleted_at + origin in its DDL). This pass
+        # upgrades pre-existing telemetry_* tables from older DBs that were
+        # created before the soft-delete / origin feature.
+        self._migrate_tel_soft_delete_columns()
         logger.info("SQLiteStore initialised: %s", self.db_path)
 
     def _migrate_verdict_columns(self) -> None:
@@ -302,6 +318,51 @@ class SQLiteStore:
                 except Exception:
                     logger.warning("Failed to add %s to alert_records", col, exc_info=True)
 
+    def _migrate_tel_soft_delete_columns(self) -> None:
+        """Add ``deleted_at`` and ``origin`` columns to every existing
+        ``telemetry_*`` table (lazy, idempotent).
+
+        Per-channel telemetry tables are created lazily by
+        ``_ensure_tel_table`` (whose DDL already includes these columns), so
+        tables created on this code version already have them. This pass
+        upgrades pre-existing tables from older DBs that pre-date the
+        soft-delete / origin-tagging feature:
+
+          * ``deleted_at REAL``         — soft-delete timestamp (NULL = alive)
+          * ``origin TEXT DEFAULT 'acq'``— 'acq' for acquisition rows,
+                                             'manual' for backfilled rows
+
+        Both columns are optional (nullable / default-filled) so existing
+        queries and writes keep working unchanged.
+        """
+        if not self.enabled or self._conn is None:
+            return
+        tables = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'telemetry_%'"
+        ).fetchall()
+        for (tbl,) in tables:
+            cols = {r[1] for r in self._conn.execute(f'PRAGMA table_info("{tbl}")').fetchall()}
+            if "deleted_at" not in cols:
+                try:
+                    self._conn.execute(f'ALTER TABLE "{tbl}" ADD COLUMN deleted_at REAL')
+                    self._conn.execute(
+                        f'CREATE INDEX IF NOT EXISTS "idx_{tbl}_del" ON "{tbl}"(deleted_at)'
+                    )
+                    logger.info("Migrated %s: added column deleted_at", tbl)
+                except Exception:
+                    logger.warning("Failed to add deleted_at to %s", tbl, exc_info=True)
+            if "origin" not in cols:
+                try:
+                    # NOT NULL DEFAULT 'acq': every acquisition row is tagged
+                    # automatically, matching what _ensure_tel_table's DDL does
+                    # for freshly-created tables.
+                    self._conn.execute(
+                        f"ALTER TABLE \"{tbl}\" ADD COLUMN origin TEXT NOT NULL DEFAULT 'acq'"
+                    )
+                    logger.info("Migrated %s: added column origin", tbl)
+                except Exception:
+                    logger.warning("Failed to add origin to %s", tbl, exc_info=True)
+
     # Per-channel telemetry tables: each channel gets its own table
     # (e.g. ``telemetry_C_1``, ``telemetry_VS_multi_sine``) so channels
     # are fully isolated.  Table names are derived from the channel name
@@ -327,11 +388,16 @@ class SQLiteStore:
                 predicted_value             REAL,
                 predicted_anomaly_score     REAL,
                 origin_ts                   REAL,
-                ingested_at                 REAL    NOT NULL DEFAULT (unixepoch())
+                ingested_at                 REAL    NOT NULL DEFAULT (unixepoch()),
+                deleted_at                  REAL,                          -- soft-delete ts (NULL = alive)
+                origin                      TEXT    NOT NULL DEFAULT 'acq'  -- 'acq' | 'manual'
             )
         """)
         self._conn.execute(
             f'CREATE INDEX IF NOT EXISTS "idx_{table}_ts" ON "{table}"(timestamp)'
+        )
+        self._conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "idx_{table}_del" ON "{table}"(deleted_at)'
         )
         if self._created_tables is not None:
             self._created_tables.add(table)
@@ -526,6 +592,32 @@ class SQLiteStore:
                 if extra is not None:
                     batch.append(extra)
             self._write_batch(batch)
+            # Periodic WAL checkpoint (v1.2 perf). The background writer keeps
+            # inserting into 5 multi-million-row telemetry tables; without an
+            # active checkpoint the WAL grew to ~900 MB in production and every
+            # Django reader request paid a huge WAL-index search cost. PASSIVE
+            # mode never blocks writers — it just merges whatever WAL frames
+            # are safe to fold back into the main db. Firing every ~15 flushes
+            # (≈30 s at the default 2 s interval) keeps the WAL small without
+            # adding measurable overhead.
+            self._flush_count += 1
+            if self._flush_count % 15 == 0:
+                self._wal_checkpoint()
+
+    def _wal_checkpoint(self) -> None:
+        """Run a PASSIVE WAL checkpoint (best-effort, never blocks writers).
+
+        Called periodically from the flush thread. Failures are logged at
+        debug level only — a missed checkpoint is not fatal, the WAL will be
+        folded on the next attempt or on connection close.
+        """
+        if not self.enabled or self._conn is None:
+            return
+        try:
+            with self._write_lock:
+                self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except Exception:
+            logger.debug("wal_checkpoint failed (non-fatal)", exc_info=True)
 
     def _flush_remaining(self) -> None:
         """Drain all pending items and commit in batches (used by close)."""
@@ -787,6 +879,149 @@ class SQLiteStore:
         except Exception:
             logger.warning("query_window failed", exc_info=True)
             return {"channel": channel, "count": 0, "data": [], "gaps": []}
+
+    # ------------------------------------------------------------------
+    # Admin pagination: per-channel telemetry tables (v1.2 admin page)
+    # ------------------------------------------------------------------
+    #
+    # Telemetry tables have no AUTOINCREMENT ``id`` column (timestamp is the
+    # PRIMARY KEY), so these methods use the implicit SQLite ``rowid`` as the
+    # operation identifier. rowid is per-table, so callers must always pair
+    # it with the channel name.
+    #
+    # Soft-delete on telemetry uses ``deleted_at`` (NULL = alive), matching
+    # the lazy migration in ``_migrate_tel_soft_delete_columns``.
+
+    @staticmethod
+    def _build_tel_where_clause(
+        *,
+        start_ts: float | None,
+        end_ts: float | None,
+        include_deleted: bool,
+    ) -> tuple[str, list]:
+        """Build a WHERE-clause fragment + params for a telemetry_* table.
+
+        Shared by ``query_tel_page`` and ``count_tel`` so the filter logic
+        lives in one place. The returned fragment starts with ``WHERE``
+        (no leading ``AND``); params follow the placeholder order.
+        """
+        parts: list[str] = []
+        params: list = []
+        if not include_deleted:
+            parts.append("deleted_at IS NULL")
+        if start_ts is not None:
+            parts.append("timestamp >= ?")
+            params.append(start_ts)
+        if end_ts is not None:
+            parts.append("timestamp <= ?")
+            params.append(end_ts)
+        if parts:
+            return "WHERE " + " AND ".join(parts), params
+        return "", params
+
+    def query_tel_page(
+        self,
+        channel: str,
+        *,
+        offset: int = 0,
+        limit: int = 20,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+        include_deleted: bool = False,
+    ) -> list[dict]:
+        """Paginated telemetry query for the admin data-management page.
+
+        Returns rows newest-first (ORDER BY timestamp DESC, consistent with
+        ``query_alerts_filtered``). Each row dict carries the implicit rowid
+        (as ``id``) plus all telemetry columns so the front end can drive
+        edit / delete / export actions:
+
+            {id, timestamp, raw_value, anomaly_score, predicted_value,
+             predicted_anomaly_score, origin_ts, ingested_at, deleted_at,
+             origin}
+
+        Args:
+            channel:        per-channel table to query.
+            offset:         paging offset (rows skipped, newest first).
+            limit:          page size (clamped to 1..1000).
+            start_ts:       optional inclusive lower timestamp bound.
+            end_ts:         optional inclusive upper timestamp bound.
+            include_deleted: if True, also return soft-deleted rows
+                             (``deleted_at IS NOT NULL``).
+
+        Returns ``[]`` on failure or empty channel.
+        """
+        if not self.enabled or self._conn is None:
+            return []
+        try:
+            limit = max(1, min(int(limit), 1000))
+        except (TypeError, ValueError):
+            limit = 20
+        try:
+            offset = max(0, int(offset))
+        except (TypeError, ValueError):
+            offset = 0
+        table = self._ensure_tel_table(channel)
+        where_sql, params = self._build_tel_where_clause(
+            start_ts=start_ts, end_ts=end_ts, include_deleted=include_deleted,
+        )
+        sql = (
+            f'SELECT rowid AS id, timestamp, raw_value, anomaly_score, '
+            f'predicted_value, predicted_anomaly_score, origin_ts, '
+            f'ingested_at, deleted_at, origin '
+            f'FROM "{table}" {where_sql} '
+            f'ORDER BY timestamp DESC LIMIT ? OFFSET ?'
+        )
+        params.append(limit)
+        params.append(offset)
+        try:
+            cur = self._conn.execute(sql, params)
+            rows = cur.fetchall()
+        except Exception:
+            logger.warning("query_tel_page(%s) failed", channel, exc_info=True)
+            return []
+        return [
+            {
+                "id": r[0],
+                "timestamp": r[1],
+                "raw_value": r[2],
+                "anomaly_score": r[3],
+                "predicted_value": r[4],
+                "predicted_anomaly_score": r[5],
+                "origin_ts": r[6],
+                "ingested_at": r[7],
+                "deleted_at": r[8],
+                "origin": r[9],
+            }
+            for r in rows
+        ]
+
+    def count_tel(
+        self,
+        channel: str,
+        *,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+        include_deleted: bool = False,
+    ) -> int:
+        """Total row count of a telemetry table for pagination metadata.
+
+        Filter params mirror ``query_tel_page`` (without limit/offset).
+        Returns 0 on failure or empty channel.
+        """
+        if not self.enabled or self._conn is None:
+            return 0
+        table = self._ensure_tel_table(channel)
+        where_sql, params = self._build_tel_where_clause(
+            start_ts=start_ts, end_ts=end_ts, include_deleted=include_deleted,
+        )
+        sql = f'SELECT COUNT(*) FROM "{table}" {where_sql}'
+        try:
+            cur = self._conn.execute(sql, params)
+            return int(cur.fetchone()[0])
+        except Exception:
+            logger.warning("count_tel(%s) failed", channel, exc_info=True)
+            return 0
 
     # ------------------------------------------------------------------
     # Query API (synchronous, for /api/history and /api/detection)
@@ -1672,6 +1907,319 @@ class SQLiteStore:
         except Exception:
             logger.warning("insert_alert_manual failed", exc_info=True)
             return None
+
+    # ───────────────────────────────────────────────────────────────────
+    # Per-channel telemetry: soft-delete / restore / purge / recycle-bin
+    # (v1.2 data-management page + recycle bin)
+    # ───────────────────────────────────────────────────────────────────
+    #
+    # These mirror the alert/detection recycle-bin API (delete_by_ids /
+    # restore / purge_by_ids) but operate on a specific telemetry_<channel>
+    # table by rowid instead of a global ``id`` column. rowid is per-table,
+    # so every method takes ``(channel, rowids)`` — the view layer is
+    # responsible for validating the channel name.
+    #
+    # Unlike ``delete_history`` (HARD delete, kept for the DB panel), these
+    # methods implement the soft-delete recycle-bin semantics the admin UI
+    # needs: soft_delete_tel moves rows to the bin (deleted_at = now),
+    # restore_tel brings them back, purge_tel physically removes rows that
+    # are already in the bin.
+
+    def soft_delete_tel(self, channel: str, rowids: list[int]) -> int:
+        """Soft-delete telemetry rows by rowid (move to the recycle bin).
+
+        ``UPDATE telemetry_<ch> SET deleted_at = unixepoch()
+           WHERE rowid IN (...) AND deleted_at IS NULL``.
+        Returns the number of rows actually moved (rows already in the bin
+        are not re-counted).
+        """
+        if not self.enabled or self._conn is None:
+            return 0
+        if not channel or not isinstance(channel, str):
+            return 0
+        clean = self._sanitize_ids(rowids)
+        if not clean:
+            return 0
+        table = self._ensure_tel_table(channel)
+        try:
+            with self._write_lock:
+                cur = self._conn.execute(
+                    f'UPDATE "{table}" SET deleted_at = unixepoch() '
+                    f'WHERE rowid IN ({self._placeholders(len(clean))}) '
+                    f'AND deleted_at IS NULL',
+                    clean,
+                )
+                return cur.rowcount if cur.rowcount is not None else 0
+        except Exception:
+            logger.warning("soft_delete_tel(%s) failed", channel, exc_info=True)
+            return 0
+
+    def restore_tel(self, channel: str, rowids: list[int]) -> int:
+        """Restore soft-deleted telemetry rows by rowid (recycle-bin restore).
+
+        ``UPDATE telemetry_<ch> SET deleted_at = NULL
+           WHERE rowid IN (...) AND deleted_at IS NOT NULL``.
+        Returns the number of rows actually restored.
+        """
+        if not self.enabled or self._conn is None:
+            return 0
+        if not channel or not isinstance(channel, str):
+            return 0
+        clean = self._sanitize_ids(rowids)
+        if not clean:
+            return 0
+        table = self._ensure_tel_table(channel)
+        try:
+            with self._write_lock:
+                cur = self._conn.execute(
+                    f'UPDATE "{table}" SET deleted_at = NULL '
+                    f'WHERE rowid IN ({self._placeholders(len(clean))}) '
+                    f'AND deleted_at IS NOT NULL',
+                    clean,
+                )
+                return cur.rowcount if cur.rowcount is not None else 0
+        except Exception:
+            logger.warning("restore_tel(%s) failed", channel, exc_info=True)
+            return 0
+
+    def purge_tel(self, channel: str, rowids: list[int]) -> int:
+        """Physically delete telemetry rows by rowid (recycle-bin permanent delete).
+
+        Only affects rows that are **already soft-deleted**, so live data
+        cannot be purged by mistake. Irreversible. Returns the number of
+        rows physically removed.
+        """
+        if not self.enabled or self._conn is None:
+            return 0
+        if not channel or not isinstance(channel, str):
+            return 0
+        clean = self._sanitize_ids(rowids)
+        if not clean:
+            return 0
+        table = self._ensure_tel_table(channel)
+        try:
+            with self._write_lock:
+                cur = self._conn.execute(
+                    f'DELETE FROM "{table}" '
+                    f'WHERE rowid IN ({self._placeholders(len(clean))}) '
+                    f'AND deleted_at IS NOT NULL',
+                    clean,
+                )
+                return cur.rowcount if cur.rowcount is not None else 0
+        except Exception:
+            logger.warning("purge_tel(%s) failed", channel, exc_info=True)
+            return 0
+
+    def query_tel_deleted(
+        self,
+        channel: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[dict]:
+        """List soft-deleted telemetry rows for a channel (recycle-bin view).
+
+        Returns rows newest-deleted-first (ORDER BY deleted_at DESC) with
+        the same fields as ``query_tel_page`` so the front end can reuse
+        the column definitions. Returns ``[]`` on failure or empty channel.
+        """
+        if not self.enabled or self._conn is None:
+            return []
+        if not channel or not isinstance(channel, str):
+            return []
+        try:
+            limit = max(1, min(int(limit), 1000))
+        except (TypeError, ValueError):
+            limit = 200
+        try:
+            offset = max(0, int(offset))
+        except (TypeError, ValueError):
+            offset = 0
+        table = self._ensure_tel_table(channel)
+        try:
+            cur = self._conn.execute(
+                f'SELECT rowid AS id, timestamp, raw_value, anomaly_score, '
+                f'predicted_value, predicted_anomaly_score, origin_ts, '
+                f'ingested_at, deleted_at, origin '
+                f'FROM "{table}" WHERE deleted_at IS NOT NULL '
+                f'ORDER BY deleted_at DESC LIMIT ? OFFSET ?',
+                [limit, offset],
+            )
+            rows = cur.fetchall()
+        except Exception:
+            logger.warning("query_tel_deleted(%s) failed", channel, exc_info=True)
+            return []
+        return [
+            {
+                "id": r[0],
+                "timestamp": r[1],
+                "raw_value": r[2],
+                "anomaly_score": r[3],
+                "predicted_value": r[4],
+                "predicted_anomaly_score": r[5],
+                "origin_ts": r[6],
+                "ingested_at": r[7],
+                "deleted_at": r[8],
+                "origin": r[9],
+            }
+            for r in rows
+        ]
+
+    # ───────────────────────────────────────────────────────────────────
+    # Per-channel telemetry: manual insert (origin='manual')
+    # (v1.2 data-management page "add point" action)
+    # ───────────────────────────────────────────────────────────────────
+
+    def insert_tel_manual(
+        self,
+        channel: str,
+        timestamp: float,
+        raw_value: float | None = None,
+        anomaly_score: float | None = None,
+        *,
+        predicted_value: float | None = None,
+    ) -> bool:
+        """Manually insert / upsert a telemetry row tagged ``origin='manual'``.
+
+        Uses ``INSERT OR REPLACE`` keyed by timestamp: if a row already
+        exists at that timestamp (raw or predicted), the new manual values
+        overwrite it. The row is tagged ``origin='manual'`` so the front end
+        can colour it separately from acquisition points.
+
+        This method does **not** touch acquisition bookkeeping
+        (``t_acq_start`` anchoring / block sequence numbers): manual rows
+        are excluded from the acquisition pipeline, they only land in the
+        per-channel telemetry table for display / export.
+
+        Returns True on success, False on failure.
+        """
+        if not self.enabled or self._conn is None:
+            return False
+        if not channel or not isinstance(channel, str):
+            return False
+        try:
+            ts = float(timestamp)
+        except (TypeError, ValueError):
+            return False
+        try:
+            raw_f = float(raw_value) if raw_value is not None else None
+        except (TypeError, ValueError):
+            raw_f = None
+        try:
+            score_f = float(anomaly_score) if anomaly_score is not None else None
+        except (TypeError, ValueError):
+            score_f = None
+        try:
+            pred_f = float(predicted_value) if predicted_value is not None else None
+        except (TypeError, ValueError):
+            pred_f = None
+        table = self._ensure_tel_table(channel)
+        try:
+            with self._write_lock:
+                self._conn.execute(
+                    f'INSERT OR REPLACE INTO "{table}" '
+                    f'(timestamp, raw_value, anomaly_score, predicted_value, '
+                    f' ingested_at, origin) '
+                    f'VALUES (?, ?, ?, ?, unixepoch(), \'manual\')',
+                    [ts, raw_f, score_f, pred_f],
+                )
+                self._conn.commit()
+            return True
+        except Exception:
+            logger.warning("insert_tel_manual(%s) failed", channel, exc_info=True)
+            return False
+
+    # ───────────────────────────────────────────────────────────────────
+    # Per-channel telemetry: streaming export generator
+    # (v1.2 data-management page "export CSV")
+    # ───────────────────────────────────────────────────────────────────
+
+    def iter_tel_rows(
+        self,
+        channel: str,
+        *,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+        batch_size: int = 1000,
+    ) -> Iterator[dict]:
+        """Stream telemetry rows for memory-bounded CSV export.
+
+        Yields one row dict at a time (same shape as ``query_tel_page``
+        minus the soft-delete flag — only live rows are exported). Uses
+        keyset pagination on ``timestamp`` (the PRIMARY KEY) so memory use
+        stays bounded by ``batch_size`` regardless of total row count.
+
+        Args:
+            channel:   per-channel table to stream.
+            start_ts:  optional inclusive lower timestamp bound.
+            end_ts:    optional inclusive upper timestamp bound.
+            batch_size: rows fetched per internal query (default 1000).
+        """
+        if not self.enabled or self._conn is None:
+            return
+        if not channel or not isinstance(channel, str):
+            return
+        try:
+            batch_size = max(1, int(batch_size))
+        except (TypeError, ValueError):
+            batch_size = 1000
+        table = self._ensure_tel_table(channel)
+        # Export chronological (ascending) for a natural CSV reading order.
+        # Keyset pagination walks timestamp upward. The first batch uses an
+        # inclusive ``>= start_ts``; subsequent batches use ``> last_ts`` so
+        # the boundary row is never re-emitted. timestamp is the PRIMARY KEY
+        # (unique), so a strict greater-than is safe and never skips rows.
+        first_batch = True
+        cursor_ts: float = start_ts if start_ts is not None else float("-inf")
+        try:
+            while True:
+                if first_batch:
+                    where_parts = ["timestamp >= ?"]
+                else:
+                    where_parts = ["timestamp > ?"]
+                params: list = [cursor_ts]
+                if end_ts is not None:
+                    where_parts.append("timestamp <= ?")
+                    params.append(end_ts)
+                sql = (
+                    f'SELECT rowid AS id, timestamp, raw_value, anomaly_score, '
+                    f'predicted_value, predicted_anomaly_score, origin_ts, '
+                    f'ingested_at, deleted_at, origin '
+                    f'FROM "{table}" WHERE {" AND ".join(where_parts)} '
+                    f'AND deleted_at IS NULL '
+                    f'ORDER BY timestamp ASC LIMIT ?'
+                )
+                params.append(batch_size)
+                cur = self._conn.execute(sql, params)
+                rows = cur.fetchall()
+                if not rows:
+                    return
+                last_ts = rows[-1][1]
+                for r in rows:
+                    yield {
+                        "id": r[0],
+                        "timestamp": r[1],
+                        "raw_value": r[2],
+                        "anomaly_score": r[3],
+                        "predicted_value": r[4],
+                        "predicted_anomaly_score": r[5],
+                        "origin_ts": r[6],
+                        "ingested_at": r[7],
+                        "deleted_at": r[8],
+                        "origin": r[9],
+                    }
+                # Fewer rows than batch_size → this was the last page.
+                if len(rows) < batch_size:
+                    return
+                # No forward progress (shouldn't happen since timestamp is a
+                # unique PK) — break to avoid an infinite loop.
+                if last_ts <= cursor_ts and not first_batch:
+                    return
+                cursor_ts = last_ts
+                first_batch = False
+        except Exception:
+            logger.warning("iter_tel_rows(%s) failed", channel, exc_info=True)
+            return
 
     def stats(self) -> dict:
         """Return row counts for each table (for monitoring)."""

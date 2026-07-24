@@ -1,0 +1,256 @@
+{% extends "phm_site/admin/admin_base.html" %}
+
+{% block content %}
+<div class="phm-admin-shell">
+  <div class="phm-page-header">
+    <h1 class="phm-page-title">算法库</h1>
+  </div>
+  <div class="phm-page-body">
+
+{# ── Sub-menu tabs (5 categories, page-internal switch via ?cat=) ────────────── #}
+<div class="phm-dash-tabs phm-library-tabs">
+  {% for t in tabs %}
+  <a href="?cat={{ t.key }}" class="phm-dash-tab {% if t.active %}active{% endif %}">
+    <i class="{{ t.icon }}"></i>&nbsp;{{ t.name }}
+  </a>
+  {% endfor %}
+</div>
+
+{# ── Read-only notice ───────────────────────────────────────────────────────── #}
+<div class="phm-card" style="background: rgba(64,158,255,0.06); border-color: var(--phm-blue);">
+  <div class="phm-flex" style="gap: 8px;">
+    <span style="font-size: 16px;">ℹ️</span>
+    <div>
+      <strong style="color: var(--phm-text-pri);">只读说明</strong>
+      <p class="phm-text-sec" style="margin: 4px 0 0; font-size: 13px;">
+        {{ readonly_note }}。下方卡片按子菜单展示系统已注册的算法（L1 预处理 / L3 后处理）与模型
+        （L2 检测 / 预测 / RUL），含注册表元数据与被传感器引用情况。L3.5 后处理增强模块
+        （Knee / EMA / 持久性）归入 L3 子菜单并标注「后处理增强」小标签。
+      </p>
+    </div>
+  </div>
+</div>
+
+{# ── Ground / space dual panel ─────────────────────────────────────────────── #}
+<div class="phm-library-panels">
+
+  {# ── Ground panel (full cards) ──────────────────────────────────────────── #}
+  <div class="phm-library-panel phm-library-panel-ground">
+    <div class="phm-library-panel-header">
+      <i class="fas fa-home"></i>&nbsp;地基段算法库
+    </div>
+    <div class="phm-card-grid">
+      {% for card in ground_cards %}
+      <div class="phm-card phm-lib-card">
+        {# Card title row: icon + Chinese name + L3.5 tag + model/algorithm badge #}
+        <div class="phm-flex-between" style="margin-bottom: 8px;">
+          <div class="phm-flex" style="gap: 8px; align-items: flex-start;">
+            <i class="{{ card.entry.icon }}" style="font-size: 20px; color: var(--phm-blue); margin-top: 2px;"></i>
+            <div>
+              <div style="font-size: 15px; font-weight: 600; color: var(--phm-text-pri);">
+                {{ card.entry.display_name }}
+              </div>
+              <div style="margin-top: 4px;">
+                <span class="phm-mono phm-text-dim" style="font-size: 11px;">{{ card.entry.key }}</span>
+              </div>
+            </div>
+          </div>
+          <div class="phm-flex" style="gap: 4px; flex-wrap: wrap; justify-content: flex-end;">
+            {% if card.is_l35 %}
+            <span class="phm-badge phm-badge-yellow" title="Layer 3.5 后处理增强模块">后处理增强</span>
+            {% endif %}
+            {% if card.is_model %}
+            <span class="phm-badge phm-badge-blue">{{ card.registry.kind_label|default:'模型' }}</span>
+            {% else %}
+            <span class="phm-badge phm-badge-gray">算法</span>
+            {% endif %}
+            {% if card.registry.deploy_label %}
+            <span class="phm-badge phm-badge-gray" title="部署位置">🏠 {{ card.registry.deploy_label }}</span>
+            {% endif %}
+          </div>
+        </div>
+
+        {# Description #}
+        <p class="phm-text-sec" style="font-size: 12px; margin: 6px 0 10px; line-height: 1.6;">
+          {{ card.entry.description }}
+        </p>
+
+        {# Registry metadata (hub_id / context_length / rule class) #}
+        {% if card.registry.hub_id or card.registry.context_length or card.registry.rule_class %}
+        <dl class="phm-meta" style="margin: 8px 0; font-size: 12px;">
+          {% if card.registry.hub_id %}
+          <dt>Hub ID</dt>
+          <dd class="phm-mono phm-text-sec" style="font-size: 11px; word-break: break-all;">
+            {{ card.registry.hub_id }}
+          </dd>
+          {% endif %}
+          {% if card.registry.context_length %}
+          <dt>输入窗口</dt>
+          <dd class="phm-mono">{{ card.registry.context_length }} 点{% if card.registry.prediction_length %} → {{ card.registry.prediction_length }} 点{% endif %}</dd>
+          {% endif %}
+          {% if card.registry.rule_class %}
+          <dt>规则类</dt>
+          <dd class="phm-mono phm-text-sec">{{ card.registry.rule_class }}</dd>
+          {% endif %}
+        </dl>
+        {% endif %}
+
+        {# Parameter list #}
+        {% if card.entry.params %}
+        <div style="margin-top: 8px; border-top: 1px dashed var(--phm-border); padding-top: 8px;">
+          <div class="phm-text-sec" style="font-size: 11px; margin-bottom: 4px;">
+            <i class="fas fa-sliders-h"></i>&nbsp;参数 ({{ card.entry.params|length }})
+          </div>
+          <div class="phm-lib-params">
+            {% for p in card.entry.params %}
+            <div class="phm-lib-param">
+              <code class="phm-mono" style="font-size: 11px; color: var(--phm-blue);">{{ p.name }}</code>
+              <span class="phm-text-dim" style="font-size: 10px;">[{{ p.type }}]</span>
+              {% if p.default is not None %}
+              <span class="phm-mono phm-text-sec" style="font-size: 11px;">={{ p.default }}</span>
+              {% endif %}
+              <small class="phm-text-dim" style="font-size: 10px; display: block; margin-left: 4px;">{{ p.description }}</small>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+
+        {# Used-by sensors #}
+        <div style="margin-top: 10px; border-top: 1px solid var(--phm-border); padding-top: 8px;">
+          <div class="phm-flex-between" style="margin-bottom: 4px;">
+            <span class="phm-text-sec" style="font-size: 12px;">
+              📡 使用此{% if card.is_model %}模型{% else %}算法{% endif %}的传感器
+              <span class="phm-badge phm-badge-cyan">{{ card.used_count }}</span>
+            </span>
+          </div>
+          {% if card.used_by %}
+          <details>
+            <summary class="phm-text-sec" style="font-size: 11px; cursor: pointer;">查看列表</summary>
+            <div class="phm-flex" style="flex-wrap: wrap; gap: 4px; margin-top: 6px;">
+              {% for ch in card.used_by %}
+              <span class="phm-badge phm-badge-cyan">{{ ch }}</span>
+              {% endfor %}
+            </div>
+          </details>
+          {% else %}
+          <p class="phm-text-dim" style="font-size: 11px; margin: 4px 0;">暂无传感器引用（未配置时走默认流程）</p>
+          {% endif %}
+        </div>
+
+        {# Local assets (models only) #}
+        {% if card.local_assets %}
+        <p class="phm-text-dim" style="font-size: 10px; margin: 6px 0 0;">
+          资产：
+          {% if card.local_assets.available %}
+          <span class="phm-badge phm-badge-green" style="font-size: 10px;">✓ 就绪</span>
+          {% else %}
+          <span class="phm-badge phm-badge-gray" style="font-size: 10px;">⚠ 缺失</span>
+          {% endif %}
+          {{ card.local_assets.note }}
+        </p>
+        {% endif %}
+
+        {# Footer: read-only hint #}
+        <div class="phm-lib-card-footer">
+          <i class="fas fa-lock"></i>&nbsp;只读 · 修改需编辑配置文件
+        </div>
+      </div>
+      {% endfor %}
+
+      {% if not ground_cards %}
+      <div class="phm-card" style="grid-column: 1 / -1;">
+        <p class="phm-text-dim" style="text-align: center; margin: 20px 0;">
+          该子菜单暂无注册项
+        </p>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  {# ── Space panel (placeholder — Phase 3 unified cascade) ────────────────── #}
+  <div class="phm-library-panel phm-library-panel-space">
+    <div class="phm-library-panel-header">
+      <i class="fas fa-satellite"></i>&nbsp;天基段算法库
+    </div>
+    <div class="phm-library-placeholder">
+      <i class="fas fa-satellite" style="font-size: 36px; color: var(--phm-text-dim);"></i>
+      <p class="phm-text-sec" style="margin: 12px 0 4px; font-size: 14px;">
+        天基段算法库将在 Phase 3 统一天地级联后接入
+      </p>
+      <p class="phm-text-dim" style="margin: 0; font-size: 12px;">
+        当前天基段 (src/space/) 为地基克隆，无独立 registry；待天地级联方案落地后填充。
+      </p>
+    </div>
+  </div>
+
+</div>{% comment %}close phm-library-panels{% endcomment %}
+
+  </div>{% comment %}close phm-page-body{% endcomment %}
+</div>{% comment %}close phm-admin-shell{% endcomment %}
+
+<style>
+{# ── Library page-specific styles (scoped to .phm-library-*) ──────────────── #}
+{# Grid auto-fill is inherited from .phm-card-grid (admin.css).  These rules #}
+{# add the dual-panel layout + per-card param grid + footer styling.          #}
+.phm-library-tabs { margin-bottom: 16px; }
+.phm-library-panels {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.phm-library-panel {
+  background: var(--phm-bg-card);
+  border: 1px solid var(--phm-border);
+  border-radius: var(--phm-radius-lg);
+  padding: 16px;
+  box-shadow: var(--phm-shadow);
+}
+.phm-library-panel-ground {
+  border-left: 3px solid var(--phm-blue);
+}
+.phm-library-panel-space {
+  border-left: 3px solid var(--phm-text-dim);
+  background: var(--phm-bg-secondary);
+}
+.phm-library-panel-header {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--phm-text-pri);
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--phm-border);
+}
+.phm-library-placeholder {
+  text-align: center;
+  padding: 32px 16px;
+}
+.phm-lib-card {
+  display: flex;
+  flex-direction: column;
+}
+.phm-lib-card-footer {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px dashed var(--phm-border);
+  font-size: 11px;
+  color: var(--phm-text-dim);
+  text-align: right;
+}
+.phm-lib-params {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 6px;
+}
+.phm-lib-param {
+  background: var(--phm-bg-secondary);
+  border-radius: var(--phm-radius);
+  padding: 4px 6px;
+  line-height: 1.4;
+}
+
+@media (max-width: 768px) {
+  .phm-lib-params { grid-template-columns: 1fr; }
+}
+</style>
+{% endblock %}
